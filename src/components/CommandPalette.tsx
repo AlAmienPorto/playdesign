@@ -25,7 +25,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { useStore } from "../lib/store";
-import { LEADS, TEAM, teamById } from "../data/mock";
+import { LEADS, TEAM } from "../data/mock";
 import { Avatar, Kbd } from "./ui";
 import { cn, money } from "../lib/utils";
 
@@ -33,28 +33,28 @@ interface Result {
   id: string;
   label: string;
   sub: string;
-  group: "Pages" | "Leads" | "Deals" | "Tasks" | "Quick actions";
+  group: "Halaman" | "Prospek" | "Peluang" | "Tugas" | "Aksi cepat";
   icon: ReactNode;
   action: () => void;
 }
 
 const pages = [
-  { to: "/", label: "Overview", sub: "Workspace home", icon: <LayoutDashboard size={15} /> },
-  { to: "/inbox", label: "Inbox", sub: "AI + human conversations", icon: <Inbox size={15} /> },
-  { to: "/briefs", label: "Briefs", sub: "Brief intake and scope approval", icon: <FileText size={15} /> },
-  { to: "/leads", label: "Leads", sub: "Contacts and lead scores", icon: <Users size={15} /> },
-  { to: "/clients", label: "Clients", sub: "Client 360 and portal scope", icon: <Building2 size={15} /> },
-  { to: "/projects", label: "Projects", sub: "Delivery, progress and budgets", icon: <FolderKanban size={15} /> },
-  { to: "/studio", label: "Studio", sub: "Creative assets and versions", icon: <Palette size={15} /> },
-  { to: "/finance", label: "Finance", sub: "Cash, income and corrections", icon: <Wallet size={15} /> },
-  { to: "/kanban", label: "Kanban", sub: "Pipeline and task boards", icon: <Kanban size={15} /> },
-  { to: "/tasks", label: "Tasks", sub: "Everything to get done", icon: <ListTodo size={15} /> },
-  { to: "/schedule", label: "Schedule", sub: "Social content calendar", icon: <CalendarDays size={15} /> },
-  { to: "/agent", label: "AI Agent", sub: "Agent workspace", icon: <Sparkles size={15} /> },
-  { to: "/delivery", label: "AI delivery", sub: "Analysis, planning and implementation", icon: <Wrench size={15} /> },
-  { to: "/knowledge", label: "Knowledge", sub: "Sources the agent may cite", icon: <BookOpen size={15} /> },
-  { to: "/analytics", label: "Analytics", sub: "Sales, delivery and cash reports", icon: <BarChart3 size={15} /> },
-  { to: "/automation", label: "Automation", sub: "Workflows and execution log", icon: <Workflow size={15} /> },
+  { to: "/", label: "Ringkasan", sub: "Beranda ruang kerja", icon: <LayoutDashboard size={15} /> },
+  { to: "/inbox", label: "Kotak Masuk", sub: "Percakapan AI & tim", icon: <Inbox size={15} /> },
+  { to: "/briefs", label: "Brief Desain", sub: "Pengajuan dan persetujuan brief", icon: <FileText size={15} /> },
+  { to: "/leads", label: "Prospek", sub: "Kontak dan skor prospek", icon: <Users size={15} /> },
+  { to: "/clients", label: "Klien", sub: "Profil klien 360 & portal", icon: <Building2 size={15} /> },
+  { to: "/projects", label: "Proyek", sub: "Pengerjaan, progres & anggaran", icon: <FolderKanban size={15} /> },
+  { to: "/studio", label: "Studio", sub: "Aset kreatif & versi desain", icon: <Palette size={15} /> },
+  { to: "/finance", label: "Keuangan", sub: "Arus kas, pendapatan & rekap", icon: <Wallet size={15} /> },
+  { to: "/kanban", label: "Papan Kanban", sub: "Papan alur kerja & tugas", icon: <Kanban size={15} /> },
+  { to: "/tasks", label: "Daftar Tugas", sub: "Seluruh tugas studio", icon: <ListTodo size={15} /> },
+  { to: "/schedule", label: "Jadwal Tayang", sub: "Kalender konten sosial", icon: <CalendarDays size={15} /> },
+  { to: "/agent", label: "Agen AI", sub: "Ruang kerja agen AI", icon: <Sparkles size={15} /> },
+  { to: "/delivery", label: "Pengiriman AI", sub: "Analisis & perencanaan kerja", icon: <Wrench size={15} /> },
+  { to: "/knowledge", label: "Basis Pengetahuan", sub: "Sumber referensi agen AI", icon: <BookOpen size={15} /> },
+  { to: "/analytics", label: "Analitik", sub: "Laporan penjualan & performa", icon: <BarChart3 size={15} /> },
+  { to: "/automation", label: "Otomasi", sub: "Alur kerja & riwayat eksekusi", icon: <Workflow size={15} /> },
 ];
 
 export function CommandPalette({
@@ -102,23 +102,23 @@ export function CommandPalette({
           id: `page-${page.to}`,
           label: page.label,
           sub: page.sub,
-          group: "Pages" as const,
+          group: "Halaman" as const,
           icon: page.icon,
           action: go(page.to),
         })),
         {
           id: "quick-task",
-          label: "Create a task",
-          sub: "Add something to the board",
-          group: "Quick actions",
+          label: "Buat tugas baru",
+          sub: "Tambahkan tugas ke papan kerja",
+          group: "Aksi cepat",
           icon: <Plus size={15} />,
           action: go("/tasks"),
         },
         {
           id: "quick-post",
-          label: "Schedule a post",
-          sub: "Queue content for a channel",
-          group: "Quick actions",
+          label: "Jadwalkan postingan",
+          sub: "Antrekan konten ke saluran medsos",
+          group: "Aksi cepat",
           icon: <CalendarPlus size={15} />,
           action: go("/schedule"),
         },
@@ -131,7 +131,7 @@ export function CommandPalette({
         id: `page-${page.to}`,
         label: page.label,
         sub: page.sub,
-        group: "Pages",
+        group: "Halaman",
         icon: page.icon,
         action: go(page.to),
       }));
@@ -144,7 +144,7 @@ export function CommandPalette({
         id: `lead-${lead.id}`,
         label: lead.name,
         sub: `${lead.company} · ${money(lead.value)}`,
-        group: "Leads",
+        group: "Prospek",
         icon: <Avatar name={lead.name} tone={TEAM.find((m) => m.id === lead.ownerId)?.tone ?? 1} size="xs" />,
         action: go("/leads"),
       }));
@@ -156,7 +156,7 @@ export function CommandPalette({
         id: `deal-${deal.id}`,
         label: deal.company,
         sub: `${deal.title} · ${money(deal.value)}`,
-        group: "Deals",
+        group: "Peluang",
         icon: <Kanban size={15} />,
         action: go("/kanban"),
       }));
@@ -167,8 +167,8 @@ export function CommandPalette({
       .map((task) => ({
         id: `task-${task.id}`,
         label: task.title,
-        sub: `${task.project} · ${teamById(task.ownerId).name}`,
-        group: "Tasks",
+        sub: `${task.project} · ${task.due}`,
+        group: "Tugas",
         icon: <ListTodo size={15} />,
         action: go("/tasks"),
       }));
@@ -212,7 +212,7 @@ export function CommandPalette({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Search leads, deals, tasks or jump to a page…"
+            placeholder="Cari prospek, peluang, tugas atau lompat ke halaman…"
             className="h-[54px] w-full bg-transparent text-[14px] text-ink placeholder:text-faint focus:outline-none"
           />
           <Kbd>esc</Kbd>
@@ -222,8 +222,8 @@ export function CommandPalette({
           {results.length === 0 && (
             <div className="flex flex-col items-center gap-1 py-12 text-center">
               <Search size={20} className="text-faint" />
-              <p className="mt-2 text-sm font-medium text-ink">No results for “{query}”</p>
-              <p className="text-xs text-muted">Try a company name, task or page.</p>
+              <p className="mt-2 text-sm font-medium text-ink">Tidak ada hasil untuk “{query}”</p>
+              <p className="text-xs text-muted">Coba ketik nama klien, tugas, atau halaman.</p>
             </div>
           )}
           {results.map((result, index) => {
@@ -263,17 +263,17 @@ export function CommandPalette({
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1">
               <Kbd>↑</Kbd>
-              <Kbd>↓</Kbd> navigate
+              <Kbd>↓</Kbd> navigasi
             </span>
             <span className="flex items-center gap-1">
               <Kbd>
                 <CornerDownLeft size={9} />
               </Kbd>{" "}
-              open
+              buka
             </span>
           </div>
           <span className="flex items-center gap-1.5">
-            <Sparkles size={11} /> Search powered by agents
+            <Sparkles size={11} /> Pencarian didukung agen AI
           </span>
         </div>
       </div>

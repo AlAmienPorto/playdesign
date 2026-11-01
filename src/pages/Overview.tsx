@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { format } from "date-fns";
+import { id } from "date-fns/locale";
 import {
   ArrowRight,
   Bot,
@@ -44,7 +45,7 @@ export default function Overview() {
       setQcMessage(null);
       const res: QcGateResult = await runQcGateApi();
       setQcMessage(
-        `QC Gate selesai: ${res.posts} postingan diperiksa (${res.passed} lolos ke review owner, ${res.blocked} butuh revisi).`,
+        `QC Gate selesai: ${res.posts} postingan diperiksa (${res.passed} lolos ke tinjauan pemilik, ${res.blocked} butuh revisi).`,
       );
     } catch (err) {
       setQcMessage(
@@ -69,18 +70,18 @@ export default function Overview() {
               <span className="relative inline-flex size-2 rounded-full bg-success" />
             </span>
             <span className="font-mono uppercase tracking-[0.12em] text-ink">
-              {format(TODAY, "EEEE, d MMMM yyyy")}
+              {format(TODAY, "EEEE, d MMMM yyyy", { locale: id })}
             </span>
             <span className="text-faint">·</span>
-            <Badge tone="accent">D1 APAC · Live Edge</Badge>
+            <Badge tone="accent">D1 APAC · Server Aktif</Badge>
           </div>
 
           <h1 className="mt-2 text-[26px] font-semibold tracking-[-0.03em] text-ink md:text-[30px]">
             {sapaan}, Jawad.
           </h1>
           <p className="mt-1 text-[13px] text-muted">
-            Workspace <span className="font-medium text-ink">{workspace.name}</span> aktif.{" "}
-            <span className="font-medium text-ink">{agents.length} AI agent siaga</span> dengan sistem SPV-QC dua lapis.
+            Ruang kerja <span className="font-medium text-ink">{workspace.name}</span> aktif.{" "}
+            <span className="font-medium text-ink">{agents.length} agen AI siaga</span> dengan sistem SPV-QC dua lapis.
           </p>
         </div>
 
@@ -108,7 +109,7 @@ export default function Overview() {
             className="hover:bg-surface-2"
           >
             <Plus size={14} className="text-muted" />
-            <span>Task Baru</span>
+            <span>Tugas Baru</span>
           </Button>
 
           <Button
@@ -118,7 +119,7 @@ export default function Overview() {
             className="shadow-sm"
           >
             <MessageSquare size={14} />
-            <span>Buka Chat Agent</span>
+            <span>Buka Chat Agen</span>
           </Button>
         </div>
       </div>
@@ -141,7 +142,7 @@ export default function Overview() {
 
       {/* 4 Kartu Metrik Inti (Ringkas, Nyata, Bersih) */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {/* Task Aktif */}
+        {/* Tugas Aktif */}
         <div
           onClick={() => navigate("/tasks")}
           className="card group cursor-pointer p-4 transition-all hover:border-line-strong hover:bg-surface-2/40"
@@ -161,12 +162,12 @@ export default function Overview() {
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between border-t border-line/60 pt-2 text-[10.5px] text-muted">
-            <span>Daftar task studio</span>
+            <span>Daftar tugas studio</span>
             <ArrowRight size={11} className="text-faint group-hover:translate-x-0.5 transition-transform" />
           </div>
         </div>
 
-        {/* Antrean Konten & Post */}
+        {/* Antrean Konten & Jadwal */}
         <div
           onClick={() => navigate("/schedule")}
           className="card group cursor-pointer p-4 transition-all hover:border-line-strong hover:bg-surface-2/40"
@@ -182,7 +183,7 @@ export default function Overview() {
               {scheduledPosts.length + reviewPosts.length}
             </span>
             <span className="text-[11px] text-faint">
-              {scheduledPosts.length} tayang · {reviewPosts.length} draft
+              {scheduledPosts.length} tayang · {reviewPosts.length} draf
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between border-t border-line/60 pt-2 text-[10.5px] text-muted">
@@ -191,13 +192,13 @@ export default function Overview() {
           </div>
         </div>
 
-        {/* AI Agent Fleet */}
+        {/* Armada Agen AI */}
         <div
           onClick={() => navigate("/agent")}
           className="card group cursor-pointer p-4 transition-all hover:border-line-strong hover:bg-surface-2/40"
         >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-medium text-muted">Armada AI Agent</span>
+            <span className="text-[11px] font-medium text-muted">Armada Agen AI</span>
             <span className="grid size-7 place-items-center rounded-lg border border-line bg-surface-2 text-faint group-hover:text-ink">
               <Bot size={14} />
             </span>
@@ -207,22 +208,22 @@ export default function Overview() {
               {agents.length}
             </span>
             <span className="text-[11px] text-faint">
-              agent siaga dengan skill
+              agen siaga dengan skill
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between border-t border-line/60 pt-2 text-[10.5px] text-muted">
-            <span>Buka playground</span>
+            <span>Buka ruang agen</span>
             <ArrowRight size={11} className="text-faint group-hover:translate-x-0.5 transition-transform" />
           </div>
         </div>
 
-        {/* SPV Quality Guard */}
+        {/* Gerbang Kualitas SPV */}
         <div
           onClick={handleRunQc}
           className="card group cursor-pointer p-4 transition-all hover:border-line-strong hover:bg-surface-2/40"
         >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-medium text-muted">SPV Quality Gate</span>
+            <span className="text-[11px] font-medium text-muted">Gerbang Kualitas SPV</span>
             <span className="grid size-7 place-items-center rounded-lg border border-line bg-surface-2 text-accent-text">
               <ShieldCheck size={14} />
             </span>
@@ -254,11 +255,11 @@ export default function Overview() {
               Siklus kerja terintegrasi dari riset, produksi, hingga kurasi kualitas.
             </p>
           </div>
-          <span className="text-[10px] font-mono text-faint">PIPELINE OS</span>
+          <span className="text-[10px] font-mono text-faint tracking-wider">ALUR KERJA</span>
         </div>
 
         <div className="grid grid-cols-1 gap-2.5 md:grid-cols-4">
-          {/* Step 1 */}
+          {/* Tahap 1 */}
           <div className="relative rounded-xl border border-line bg-surface-2/40 p-3">
             <div className="flex items-center justify-between text-[11px] font-medium text-muted mb-1.5">
               <span className="flex items-center gap-1.5">
@@ -271,11 +272,11 @@ export default function Overview() {
               Riset tren visual, kompetitor &amp; ide sudut pandang via <code>agent-reach</code>.
             </p>
             <div className="mt-2 text-[10px] text-accent-text font-medium">
-              Agent: Salsabila / Echo
+              Agen: Salsabila / Echo
             </div>
           </div>
 
-          {/* Step 2 */}
+          {/* Tahap 2 */}
           <div className="relative rounded-xl border border-line bg-surface-2/40 p-3">
             <div className="flex items-center justify-between text-[11px] font-medium text-muted mb-1.5">
               <span className="flex items-center gap-1.5">
@@ -285,41 +286,41 @@ export default function Overview() {
               <FileCheck2 size={12} className="text-faint" />
             </div>
             <p className="text-[11px] text-faint leading-snug">
-              Pengerjaan task desain, copywriting, dan penyiapan aset draf.
+              Pengerjaan tugas desain, penulisan narasi, dan penyiapan aset draf.
             </p>
             <div className="mt-2 text-[10px] text-accent-text font-medium">
-              Tasks: {activeTasks.length} aktif
+              Tugas: {activeTasks.length} aktif
             </div>
           </div>
 
-          {/* Step 3 */}
+          {/* Tahap 3 */}
           <div className="relative rounded-xl border border-line bg-surface-2/40 p-3">
             <div className="flex items-center justify-between text-[11px] font-medium text-muted mb-1.5">
               <span className="flex items-center gap-1.5">
                 <span className="grid size-4 place-items-center rounded-full bg-surface text-[9px] font-mono text-ink border border-line">3</span>
-                SPV-QC Gate
+                Gerbang SPV-QC
               </span>
               <ShieldCheck size={12} className="text-accent-text" />
             </div>
             <p className="text-[11px] text-faint leading-snug">
-              Filter otomatis anti-slop, claim check, limit hashtag &amp; lisensi aset.
+              Penyaringan otomatis anti-slop, validasi klaim, batas tagar &amp; lisensi aset.
             </p>
             <div className="mt-2 text-[10px] text-accent-text font-medium">
               Cron 2 Lapis Otomatis
             </div>
           </div>
 
-          {/* Step 4 */}
+          {/* Tahap 4 */}
           <div className="relative rounded-xl border border-line bg-surface-2/40 p-3">
             <div className="flex items-center justify-between text-[11px] font-medium text-muted mb-1.5">
               <span className="flex items-center gap-1.5">
                 <span className="grid size-4 place-items-center rounded-full bg-surface text-[9px] font-mono text-ink border border-line">4</span>
-                Persetujuan Owner
+                Persetujuan Pemilik
               </span>
               <CheckCircle2 size={12} className="text-success" />
             </div>
             <p className="text-[11px] text-faint leading-snug">
-              Validasi final Jawad sebelum postingan dipublikasikan ke klien/sosmed.
+              Validasi final Mas Jawad sebelum postingan dipublikasikan ke klien/sosmed.
             </p>
             <div className="mt-2 text-[10px] text-success font-medium">
               {pendingApprovals} menunggu tindakan
@@ -328,18 +329,18 @@ export default function Overview() {
         </div>
       </section>
 
-      {/* Main Grid: Agent Fleet (Left) + QC & Review (Right) */}
+      {/* Main Grid: Armada AI (Kiri) + QC & Review (Kanan) */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-        {/* Left: Agent Fleet & Quick Chat (7 Cols) */}
+        {/* Kiri: Armada Agen AI (7 Kolom) */}
         <section className="card p-4 md:p-5 lg:col-span-7 flex flex-col">
           <div className="flex items-center justify-between border-b border-line pb-3.5 mb-4">
             <div>
               <h2 className="text-[14px] font-semibold tracking-tight text-ink flex items-center gap-2">
                 <Sparkles size={15} className="text-accent-text" />
-                Armada AI Agent Siaga
+                Armada Agen AI Siaga
               </h2>
               <p className="text-[11px] text-muted">
-                Daftar agent di workspace {workspace.name} dengan persona dan skill aktif.
+                Daftar agen di ruang kerja {workspace.name} dengan persona dan skill aktif.
               </p>
             </div>
             <Link
@@ -399,7 +400,7 @@ export default function Overview() {
                     className="shrink-0 h-7 text-[11px] px-2.5 hover:bg-surface"
                   >
                     <MessageSquare size={12} className="text-accent-text" />
-                    <span>Chat</span>
+                    <span>Obrol</span>
                   </Button>
                 </div>
               );
@@ -407,7 +408,7 @@ export default function Overview() {
           </div>
         </section>
 
-        {/* Right: Quality Guard & Status Review (5 Cols) */}
+        {/* Kanan: Penjaga Kualitas & Antrean Tinjauan (5 Kolom) */}
         <div className="space-y-5 lg:col-span-5 flex flex-col">
           {/* Box 1: Aturan SPV-QC Gate */}
           <section className="card p-4 md:p-5">
@@ -418,7 +419,7 @@ export default function Overview() {
                 </span>
                 <div>
                   <h3 className="text-[13px] font-semibold text-ink">Standar Kualitas SPV-QC</h3>
-                  <p className="text-[10px] text-faint">Filter ketat sebelum masuk review owner</p>
+                  <p className="text-[10px] text-faint">Filter ketat sebelum masuk tinjauan pemilik</p>
                 </div>
               </div>
               <Button
@@ -429,7 +430,7 @@ export default function Overview() {
                 className="h-7 text-[10.5px] px-2"
               >
                 <Play size={10} className="text-accent-text" />
-                <span>Tes Gate</span>
+                <span>Uji Gerbang</span>
               </Button>
             </div>
 
@@ -444,7 +445,7 @@ export default function Overview() {
               </div>
               <div className="flex items-center gap-2">
                 <Check size={12} className="text-success shrink-0" />
-                <span><strong>Batas Hashtag:</strong> Maksimal 5 hashtag relevan</span>
+                <span><strong>Batas Tagar:</strong> Maksimal 5 tagar relevan</span>
               </div>
               <div className="flex items-center gap-2">
                 <Check size={12} className="text-success shrink-0" />
@@ -465,7 +466,7 @@ export default function Overview() {
             <div className="flex items-center justify-between mb-3 border-b border-line pb-3">
               <div>
                 <h3 className="text-[13px] font-semibold text-ink flex items-center gap-2">
-                  Antrean Review Post
+                  Antrean Tinjauan Postingan
                   {reviewPosts.length > 0 && (
                     <Badge tone="warning">{reviewPosts.length}</Badge>
                   )}
@@ -487,7 +488,7 @@ export default function Overview() {
                 </span>
                 <p className="text-[12px] font-medium text-ink">Semua Bersih &amp; Terkendali</p>
                 <p className="text-[10.5px] text-faint mt-0.5 max-w-[220px]">
-                  Tidak ada draft postingan yang tertahan di antrean review.
+                  Tidak ada draf postingan yang tertahan di antrean tinjauan.
                 </p>
               </div>
             ) : (
@@ -500,13 +501,13 @@ export default function Overview() {
                   >
                     <div className="min-w-0 pr-2">
                       <p className="text-[11.5px] font-medium text-ink truncate">
-                        {post.caption || "Draft postingan"}
+                        {post.caption || "Draf postingan"}
                       </p>
                       <p className="text-[9.5px] text-faint font-mono mt-0.5">
                         {post.platform} · {post.date ? `${post.date} ${post.time}` : "Belum dijadwalkan"}
                       </p>
                     </div>
-                    <Badge tone="warning" dot>Review</Badge>
+                    <Badge tone="warning" dot>Tinjauan</Badge>
                   </div>
                 ))}
               </div>

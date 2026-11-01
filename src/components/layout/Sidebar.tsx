@@ -31,34 +31,34 @@ import { CONVERSATIONS_BY_WORKSPACE } from "../../data/office";
 
 const navSections = [
   {
-    label: "Workspace",
+    label: "Ruang Kerja",
     items: [
-      { to: "/", label: "Overview", icon: LayoutDashboard },
-      { to: "/inbox", label: "Inbox", icon: Inbox, dynamicCount: "inbox" as const },
-      { to: "/briefs", label: "Briefs", icon: FileText, dynamicCount: "briefs" as const },
-      { to: "/leads", label: "Leads", icon: Users },
-      { to: "/kanban", label: "Kanban", icon: Kanban },
-      { to: "/tasks", label: "Tasks", icon: ListTodo, dynamicCount: true },
-      { to: "/schedule", label: "Schedule", icon: CalendarDays },
+      { to: "/", label: "Ringkasan", icon: LayoutDashboard },
+      { to: "/inbox", label: "Kotak Masuk", icon: Inbox, dynamicCount: "inbox" as const },
+      { to: "/briefs", label: "Brief Desain", icon: FileText, dynamicCount: "briefs" as const },
+      { to: "/leads", label: "Prospek", icon: Users },
+      { to: "/kanban", label: "Papan Kanban", icon: Kanban },
+      { to: "/tasks", label: "Daftar Tugas", icon: ListTodo, dynamicCount: true },
+      { to: "/schedule", label: "Jadwal Tayang", icon: CalendarDays },
     ],
   },
   {
-    label: "Business",
+    label: "Bisnis",
     items: [
-      { to: "/clients", label: "Clients", icon: Building2 },
-      { to: "/projects", label: "Projects", icon: FolderKanban },
+      { to: "/clients", label: "Klien", icon: Building2 },
+      { to: "/projects", label: "Proyek", icon: FolderKanban },
       { to: "/studio", label: "Studio", icon: Palette },
-      { to: "/finance", label: "Finance", icon: Wallet },
+      { to: "/finance", label: "Keuangan", icon: Wallet },
     ],
   },
   {
-    label: "Intelligence",
+    label: "Intelijen",
     items: [
-      { to: "/agent", label: "AI Agent", icon: Sparkles, agent: true },
-      { to: "/delivery", label: "AI delivery", icon: Wrench },
-      { to: "/knowledge", label: "Knowledge", icon: BookOpen },
-      { to: "/analytics", label: "Analytics", icon: BarChart3 },
-      { to: "/automation", label: "Automation", icon: Workflow },
+      { to: "/agent", label: "Agen AI", icon: Sparkles, agent: true },
+      { to: "/delivery", label: "Pengiriman AI", icon: Wrench },
+      { to: "/knowledge", label: "Basis Pengetahuan", icon: BookOpen },
+      { to: "/analytics", label: "Analitik", icon: BarChart3 },
+      { to: "/automation", label: "Otomasi", icon: Workflow },
     ],
   },
 ];
@@ -168,7 +168,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
               className="absolute inset-x-0 top-[calc(100%+6px)] z-20 animate-fade-in overflow-hidden rounded-xl border border-line bg-surface shadow-float"
             >
               <div className="px-2.5 pb-1 pt-2 font-mono text-[8.5px] uppercase tracking-[0.14em] text-faint">
-                Workspaces
+                Ruang Kerja
               </div>
               {workspaces.map((item) => (
                 <button
@@ -269,25 +269,25 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           <div className="relative flex items-center gap-2">
             <AgentAvatar size="sm" online={autopilot && leadAgent?.availability !== "unavailable"} />
             <div className="min-w-0 flex-1">
-              <div className="text-[12px] font-medium leading-tight text-ink">{leadAgent?.name ?? "Agent"}</div>
+              <div className="text-[12px] font-medium leading-tight text-ink">{leadAgent?.name ?? "Agen"}</div>
               <div className="mt-0.5 flex items-center gap-1 text-[10px] text-faint">
                 <span className={cn("size-1.5 rounded-full", autopilot ? "bg-[#2fbf8f]" : "bg-line-strong")} />
-                {autopilot ? "Autopilot active" : "Paused"}
+                {autopilot ? "Autopilot aktif" : "Dijeda"}
               </div>
             </div>
-            <Toggle checked={autopilot} onChange={setAutopilot} label="Toggle agent autopilot" />
+            <Toggle checked={autopilot} onChange={setAutopilot} label="Beralih autopilot agen" />
           </div>
           <p className="relative mt-2.5 text-[11px] leading-relaxed text-muted">
             {autopilot
-              ? `${pendingApprovals} approval${pendingApprovals === 1 ? "" : "s"} waiting. Drafts only — nothing sends on its own.`
-              : "Paused — drafts are held and need your review."}
+              ? `${pendingApprovals} persetujuan menunggu. Khusus draf — tidak ada yang terkirim otomatis.`
+              : "Dijeda — draf ditahan dan membutuhkan tinjauan Anda."}
           </p>
           <Link
             to="/agent"
             onClick={onClose}
             className="relative mt-2.5 flex items-center justify-between rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[11px] font-medium text-ink transition-colors hover:border-line-strong hover:bg-surface-3"
           >
-            Open agent workspace
+            Buka ruang agen
             <ArrowUpRight size={13} className="text-muted" />
           </Link>
         </div>

@@ -59,11 +59,11 @@ export type ApprovalDecision = "approved" | "changes_requested" | "rejected";
 export type ApprovalState = "none" | "pending" | ApprovalDecision;
 
 export const APPROVAL_META: Record<ApprovalState, { label: string; tone: Tone }> = {
-  none: { label: "Not submitted", tone: "neutral" },
-  pending: { label: "Approval pending", tone: "accent" },
-  approved: { label: "Approved", tone: "success" },
-  changes_requested: { label: "Changes requested", tone: "warning" },
-  rejected: { label: "Rejected", tone: "warning" },
+  none: { label: "Belum diajukan", tone: "neutral" },
+  pending: { label: "Menunggu persetujuan", tone: "accent" },
+  approved: { label: "Disetujui", tone: "success" },
+  changes_requested: { label: "Perlu revisi", tone: "warning" },
+  rejected: { label: "Ditolak", tone: "warning" },
 };
 
 export type OutputStatus =
@@ -77,14 +77,14 @@ export type OutputStatus =
   | "failed";
 
 export const OUTPUT_LABEL: Record<OutputStatus, string> = {
-  draft: "Draft",
-  research: "Research",
-  pending_verification: "Pending verification",
-  qc: "In QC",
-  owner_review: "Owner review",
-  approved: "Approved",
-  rejected: "Rejected",
-  failed: "Failed",
+  draft: "Draf",
+  research: "Riset",
+  pending_verification: "Menunggu verifikasi",
+  qc: "Dalam QC",
+  owner_review: "Tinjauan Pemilik",
+  approved: "Disetujui",
+  rejected: "Ditolak",
+  failed: "Gagal",
 };
 
 export interface Evidence {
@@ -937,9 +937,9 @@ export type AgentAvailability = "online" | "idle" | "unavailable";
 export type AgentRole = "Specialist Agent" | "SPV/QC Agent";
 
 export const AVAILABILITY_META: Record<AgentAvailability, { label: string; tone: Tone }> = {
-  online: { label: "Online", tone: "success" },
-  idle: { label: "Idle", tone: "neutral" },
-  unavailable: { label: "Unavailable", tone: "warning" },
+  online: { label: "Aktif", tone: "success" },
+  idle: { label: "Siaga", tone: "neutral" },
+  unavailable: { label: "Tidak aktif", tone: "warning" },
 };
 
 export interface OfficeAgent {
@@ -1057,17 +1057,17 @@ export type RunState =
   | "cancelled";
 
 export const RUN_STATE_META: Record<RunState, { label: string; tone: Tone }> = {
-  queued: { label: "Queued", tone: "neutral" },
-  running: { label: "Running", tone: "info" },
-  received: { label: "Received", tone: "info" },
-  qc: { label: "In QC", tone: "warning" },
-  owner_review: { label: "Owner review", tone: "accent" },
-  approved: { label: "Approved", tone: "success" },
-  changes_requested: { label: "Changes", tone: "warning" },
-  rejected: { label: "Rejected", tone: "warning" },
-  failed: { label: "Failed", tone: "warning" },
-  unavailable: { label: "Unavailable", tone: "warning" },
-  cancelled: { label: "Stopped", tone: "neutral" },
+  queued: { label: "Antrean", tone: "neutral" },
+  running: { label: "Berjalan", tone: "info" },
+  received: { label: "Diterima", tone: "info" },
+  qc: { label: "Dalam QC", tone: "warning" },
+  owner_review: { label: "Tinjauan Pemilik", tone: "accent" },
+  approved: { label: "Disetujui", tone: "success" },
+  changes_requested: { label: "Revisi", tone: "warning" },
+  rejected: { label: "Ditolak", tone: "warning" },
+  failed: { label: "Gagal", tone: "warning" },
+  unavailable: { label: "Tidak aktif", tone: "warning" },
+  cancelled: { label: "Dibatalkan", tone: "neutral" },
 };
 
 export const TERMINAL_RUN_STATES: RunState[] = [

@@ -72,7 +72,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu: () => void; onSearch: () 
         className="hidden h-9 w-full max-w-[300px] items-center gap-2.5 rounded-[10px] border border-line bg-surface px-3 text-left text-[12.5px] text-faint transition-colors hover:border-line-strong hover:text-muted md:flex"
       >
         <Search size={15} className="text-faint" />
-        <span className="flex-1">Search anything…</span>
+        <span className="flex-1">Cari apa saja…</span>
         <span className="flex items-center gap-1">
           <Kbd>⌘</Kbd>
           <Kbd>K</Kbd>
@@ -85,20 +85,20 @@ export function Topbar({ onMenu, onSearch }: { onMenu: () => void; onSearch: () 
           className="mr-1 hidden items-center gap-2 rounded-full border border-line bg-surface py-1 pl-1 pr-2.5 xl:flex"
         >
           <AgentAvatar size="sm" online={autopilot && leadAgent?.availability !== "unavailable"} />
-          <span className="text-[11px] font-medium text-ink">{leadAgent?.name ?? "Agent"}</span>
+          <span className="text-[11px] font-medium text-ink">{leadAgent?.name ?? "Agen"}</span>
           <span className="h-3 w-px bg-line" />
           <span className="flex items-center gap-1.5 text-[10.5px] text-muted">
             <span className={cn("size-1.5 rounded-full", autopilot ? "bg-[#2fbf8f]" : "bg-line-strong")} />
-            {autopilot ? "Autopilot" : "Paused"}
+            {autopilot ? "Autopilot aktif" : "Dijeda"}
           </span>
         </Link>
 
-        <IconButton label="Search" onClick={onSearch} className="md:hidden">
+        <IconButton label="Cari" onClick={onSearch} className="md:hidden">
           <Search size={17} />
         </IconButton>
 
         <IconButton
-          label={resolved === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          label={resolved === "dark" ? "Ganti ke mode terang" : "Ganti ke mode gelap"}
           onClick={toggleTheme}
         >
           {resolved === "dark" ? <Sun size={17} /> : <Moon size={17} />}
@@ -106,7 +106,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu: () => void; onSearch: () 
 
         <div className="relative" ref={panelRef}>
           <IconButton
-            label="Notifications"
+            label="Notifikasi"
             onClick={() => setPanelOpen((current) => !current)}
             className={cn(panelOpen && "bg-surface-3 text-ink")}
           >
@@ -120,7 +120,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu: () => void; onSearch: () 
             <div className="absolute right-0 top-11 w-[min(360px,calc(100vw-2rem))] animate-scale-in overflow-hidden rounded-xl border border-line bg-surface shadow-float">
               <div className="flex items-center justify-between border-b border-line px-4 py-3">
                 <div className="flex items-center gap-2">
-                  <h3 className="text-[13px] font-semibold text-ink">Notifications</h3>
+                  <h3 className="text-[13px] font-semibold text-ink">Notifikasi</h3>
                   {unread > 0 && (
                     <span className="rounded-full bg-accent px-1.5 font-mono text-[9px] leading-4 text-white">
                       {unread}
@@ -132,7 +132,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu: () => void; onSearch: () 
                   onClick={markAllNotificationsRead}
                   className="text-[11px] font-medium text-muted transition-colors hover:text-ink"
                 >
-                  Mark all read
+                  Tandai semua dibaca
                 </button>
               </div>
               <div className="max-h-[360px] overflow-y-auto p-1.5">

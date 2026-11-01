@@ -566,11 +566,11 @@ export default function Agent() {
           <section className="card overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3.5">
               <div>
-                <h2 className="text-[14px] font-semibold tracking-tight text-ink">Agent fleet</h2>
-                <p className="mt-0.5 text-[10.5px] text-muted">Agents scoped to {workspace.name}</p>
+                <h2 className="text-[14px] font-semibold tracking-tight text-ink">Armada Agen</h2>
+                <p className="mt-0.5 text-[10.5px] text-muted">Daftar agen di {workspace.name}</p>
               </div>
               <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-faint">
-                {agents.length} agents
+                {agents.length} agen
               </span>
             </div>
             <div>
@@ -716,7 +716,7 @@ export default function Agent() {
                 </div>
               </div>
               <IconButton
-                label="Clear conversation"
+                label="Hapus riwayat obrolan"
                 onClick={handleClearChat}
                 className="size-7"
               >
@@ -726,7 +726,7 @@ export default function Agent() {
 
             {agents.length > 1 && (
               <div className="flex items-center gap-1.5 border-b border-line bg-surface-2/40 px-3 py-2 overflow-x-auto">
-                <span className="text-[9.5px] text-faint mr-1 shrink-0 font-medium">Pilih Agent:</span>
+                <span className="text-[9.5px] text-faint mr-1 shrink-0 font-medium">Pilih Agen:</span>
                 {agents.map((a) => (
                   <button
                     key={a.id}
@@ -765,7 +765,7 @@ export default function Agent() {
                       <div className="mt-1.5 w-full rounded-xl border border-accent/25 bg-accent-soft/30 p-2.5 text-left">
                         <div className="flex items-center gap-1.5">
                           <Sparkles size={11} className="text-accent-text" />
-                          <span className="text-[10px] font-medium text-accent-text">Proposed run · preview</span>
+                          <span className="text-[10px] font-medium text-accent-text">Proposal aksi · pratinjau</span>
                         </div>
                         <p className="mt-1 text-[10.5px] leading-snug text-ink">
                           {message.proposal.action} — {message.proposal.subject}
@@ -783,18 +783,18 @@ export default function Agent() {
                               onClick={() => confirmProposal(message.id, message.proposal!)}
                               disabled={!agentAvailable}
                             >
-                              Confirm &amp; queue
+                              Konfirmasi &amp; antrekan
                             </Button>
                             <Button
                               size="sm"
                               variant="ghost"
                               onClick={() => cancelProposal(message.id, message.proposal!)}
                             >
-                              Cancel
+                              Batal
                             </Button>
                             {!agentAvailable && (
                               <span className="text-[9px] text-warning">
-                                {leadAgent?.name} is unavailable — nothing will execute.
+                                {leadAgent?.name} sedang tidak aktif — tidak ada aksi yang dieksekusi.
                               </span>
                             )}
                           </div>
@@ -807,15 +807,14 @@ export default function Agent() {
                           >
                             {message.proposal.status === "confirmed" ? (
                               <>
-                                <CheckCircle2 size={10} /> Queued — follow it in the run log. Nothing was sent.
+                                <CheckCircle2 size={10} /> Masuk antrean — pantau di log eksekusi.
                               </>
                             ) : message.proposal.status === "unavailable" ? (
                               <>
-                                <AlertTriangle size={10} className="text-warning" /> Not queued — agent unavailable.
-                                No action was executed.
+                                <AlertTriangle size={10} className="text-warning" /> Tidak masuk antrean — agen tidak aktif.
                               </>
                             ) : (
-                              <>Cancelled — nothing was queued.</>
+                              <>Dibatalkan — tidak ada yang diantrekan.</>
                             )}
                           </p>
                         )}
@@ -868,8 +867,8 @@ export default function Agent() {
                       send(draft);
                     }
                   }}
-                  placeholder="Ask the agent anything…"
-                  aria-label="Message the agent"
+                  placeholder="Tanyakan apa saja ke agen…"
+                  aria-label="Kirim pesan ke agen"
                   className="h-8 min-w-0 flex-1 bg-transparent text-[11.5px] text-ink placeholder:text-faint focus:outline-none"
                 />
                 <Button
@@ -878,13 +877,13 @@ export default function Agent() {
                   onClick={() => send(draft)}
                   disabled={!draft.trim()}
                   className="size-8 rounded-lg p-0"
-                  aria-label="Send to agent"
+                  aria-label="Kirim pesan ke agen"
                 >
                   <Send size={13} />
                 </Button>
               </div>
               <p className="mt-1.5 text-center text-[8.5px] text-faint">
-                Answers use the demo dataset in this workspace. Nothing is sent without your confirmation.
+                Respon menggunakan konteks ruang kerja ini. Tidak ada tindakan keluar tanpa persetujuan Anda.
               </p>
             </div>
           </section>
