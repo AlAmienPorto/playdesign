@@ -22,6 +22,37 @@ export const officeApiEnabled = import.meta.env.DEV || import.meta.env.VITE_OFFI
 
 const ACTOR_ID = import.meta.env.VITE_ACTOR_ID ?? "ja";
 
+/*
+ * Token akses disimpan di perangkat ini saja (localStorage), tidak pernah
+ * masuk bundle. Dipakai sebagai Bearer ke Worker yang sudah punya API_TOKEN.
+ */
+const TOKEN_KEY = "pd_office_token";
+
+export const getOfficeToken = (): string => {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+};
+
+export const setOfficeToken = (value: string) => {
+  try {
+    // Tempelan dari chat/email sering membawa spasi atau baris baru.
+    localStorage.setItem(TOKEN_KEY, value.replace(/\s+/g, ""));
+  } catch {
+    /* storage diblokir — token hanya berlaku selama sesi ini */
+  }
+};
+
+export const clearOfficeToken = () => {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* abaikan */
+  }
+};
+
 export class OfficeApiError extends Error {
   status: number;
   code: string;
@@ -42,14 +73,23 @@ export const apiErrorMessage = (error: unknown) =>
       : "The workspace API could not be reached.";
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+  const token = getOfficeToken();
   const response = await fetch(path, {
     ...init,
     headers: {
       "content-type": "application/json",
       "x-actor-id": ACTOR_ID,
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
   });
+
+  // Token salah/kosong: buang, lalu minta layar token tampil lagi.
+  // Sengaja TIDAK reload — reload berulang membuat token mustahil ditempel.
+  if (response.status === 401) {
+    clearOfficeToken();
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("pd-auth-cleared"));
+  }
 
   const payload = (await response.json().catch(() => null)) as
     | { error?: { code?: string; message?: string } }
@@ -442,4 +482,89 @@ export async function startRunFromProposal(input: {
     body: JSON.stringify({ workspaceId: input.workspaceId, token: preview.proposal.confirmationToken }),
   });
   return mapRun(executed.run);
+}
+
+export interface AgentChatInput {
+  workspaceId: WorkspaceId;
+  agentId?: string;
+  messages: Array<{ role: "user" | "agent"; text: string }>;
+}
+
+export interface AgentChatOutput {
+  text: string;
+  proposal?: {
+    action: string;
+    subject: string;
+    limitations: string[];
+    status: "pending";
+  } | null;
+  agent: {
+    id: string;
+    name: string;
+    role: string;
+  };
+}
+
+export async function sendAgentChat(input: AgentChatInput): Promise<AgentChatOutput> {
+  return request<AgentChatOutput>("/api/agent/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      workspaceId: input.workspaceId,
+      agentId: input.agentId,
+      messages: input.messages.map((m) => ({
+        role: m.role,
+        content: m.text,
+      })),
+    }),
+  });
+}
+
+export interface StoredAgentMessage {
+  id: string;
+  role: "user" | "agent";
+  text: string;
+  proposal?: {
+    action: string;
+    subject: string;
+    limitations: string[];
+    status: "pending";
+  };
+  createdAt?: string;
+}
+
+export async function loadAgentMessages(
+  workspaceId: WorkspaceId,
+  agentId: string,
+): Promise<StoredAgentMessage[]> {
+  const res = await request<{ messages: StoredAgentMessage[] }>(
+    `/api/agent/messages?workspaceId=${encodeURIComponent(workspaceId)}&agentId=${encodeURIComponent(agentId)}`,
+  );
+  return res.messages ?? [];
+}
+
+export async function clearAgentMessages(
+  workspaceId: WorkspaceId,
+  agentId: string,
+): Promise<void> {
+  await request<{ ok: boolean }>(
+    `/api/agent/messages?workspaceId=${encodeURIComponent(workspaceId)}&agentId=${encodeURIComponent(agentId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export interface QcGateResult {
+  ranAt: string;
+  posts: number;
+  passed: number;
+  blocked: number;
+  runs: Array<{
+    postId: string;
+    title: string;
+    state: string;
+    findings: Array<{ rule: string; message: string; severity: string }>;
+  }>;
+}
+
+export async function runQcGateApi(): Promise<QcGateResult> {
+  return request<QcGateResult>("/api/qc/run", { method: "POST" });
 }

@@ -13,11 +13,21 @@
     {
       "binding": "DB",
       "database_name": "office-crm",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "6edc7e5e-b448-49dc-8654-94ea3bc9d7a1",
       "migrations_dir": "migrations"
     }
   ],
   "observability": {
     "enabled": true
-  }
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "triggers": {
+    "crons": ["0 1 * * *"]
+  },
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "kantor.playdesign.my.id", "custom_domain": true }
+  ]
 }

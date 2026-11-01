@@ -18,6 +18,12 @@ import {
 } from "lucide-react";
 import { AUTOMATIONS, KNOWLEDGE, type Automation } from "../data/mock";
 import { AVAILABILITY_META, RUN_STATE_META, type OfficeRun } from "../data/office";
+import {
+  clearAgentMessages,
+  loadAgentMessages,
+  officeApiEnabled,
+  sendAgentChat,
+} from "../lib/officeApi";
 import { useStore } from "../lib/store";
 import { cn, moneyCompact } from "../lib/utils";
 import {
@@ -134,13 +140,15 @@ export default function Agent() {
   const [automationModal, setAutomationModal] = useState(false);
   const [syncState, setSyncState] = useState<"idle" | "syncing" | "done">("idle");
   const [params, setParams] = useSearchParams();
+  const agentParam = params.get("agent");
 
-  const leadAgent = agents[0];
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(agentParam);
+  const leadAgent = (selectedAgentId ? agents.find((a) => a.id === selectedAgentId) : null) ?? agents[0];
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     {
       id: "welcome",
       role: "agent",
-      text: `Scoped to ${workspace.name}. Ask for a pipeline summary, a follow-up draft, or a second opinion — I'll preview anything that would leave the workspace.`,
+      text: `Halo! Saya ${agents[0]?.name ?? "Agent"}, ${agents[0]?.role ?? "spesialis"} di ${workspace.name}. Ada yang bisa saya bantu?`,
     },
   ]);
   const [draft, setDraft] = useState("");
@@ -150,6 +158,51 @@ export default function Agent() {
 
   const runParam = params.get("run");
   const selectedRun = runs.find((run) => run.id === runParam) ?? null;
+
+  useEffect(() => {
+    if (agentParam && agents.some((a) => a.id === agentParam)) {
+      setSelectedAgentId(agentParam);
+    }
+  }, [agentParam, agents]);
+
+  useEffect(() => {
+    if (!leadAgent?.id) return;
+    let active = true;
+    if (officeApiEnabled) {
+      loadAgentMessages(workspace.id, leadAgent.id)
+        .then((stored) => {
+          if (!active) return;
+          if (stored && stored.length > 0) {
+            setMessages(stored);
+          } else {
+            setMessages([
+              {
+                id: `welcome-${leadAgent.id}`,
+                role: "agent",
+                text: `Halo! Saya ${leadAgent.name} (${leadAgent.role}). Ada yang bisa saya bantu terkait ${leadAgent.jobdesk.toLowerCase()}?`,
+              },
+            ]);
+          }
+        })
+        .catch((err) => console.warn("Failed to load agent messages:", err));
+    }
+    return () => {
+      active = false;
+    };
+  }, [workspace.id, leadAgent?.id]);
+
+  const handleClearChat = async () => {
+    if (leadAgent?.id && officeApiEnabled) {
+      await clearAgentMessages(workspace.id, leadAgent.id).catch(() => {});
+    }
+    setMessages([
+      {
+        id: `welcome-${leadAgent?.id ?? "default"}`,
+        role: "agent",
+        text: `Halo! Saya ${leadAgent?.name ?? "Agent"}, ${leadAgent?.role ?? "spesialis"} di ${workspace.name}. Ada yang bisa saya bantu?`,
+      },
+    ]);
+  };
 
   useEffect(() => {
     const node = chatRef.current;
@@ -227,20 +280,51 @@ export default function Agent() {
     };
   };
 
-  const send = (text: string) => {
+  const send = async (text: string) => {
     const value = text.trim();
-    if (!value) return;
-    setMessages((current) => [...current, { id: `u-${Date.now()}`, role: "user", text: value }]);
+    if (!value || thinking) return;
+    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: "user", text: value };
+    const nextHistory = [...messages, userMsg];
+    setMessages(nextHistory);
     setDraft("");
     setThinking(true);
-    window.setTimeout(() => {
-      const answer = reply(value);
+
+    try {
+      if (officeApiEnabled) {
+        const res = await sendAgentChat({
+          workspaceId: workspace.id,
+          agentId: leadAgent?.id,
+          messages: nextHistory.map((m) => ({ role: m.role, text: m.text })),
+        });
+        setMessages((current) => [
+          ...current,
+          {
+            id: `a-${Date.now()}`,
+            role: "agent",
+            text: res.text,
+            proposal: res.proposal ?? undefined,
+          },
+        ]);
+      } else {
+        const answer = reply(value);
+        setMessages((current) => [
+          ...current,
+          { id: `n-${Date.now()}`, role: "agent", text: answer.text, proposal: answer.proposal },
+        ]);
+      }
+    } catch (err) {
+      console.error("agent_chat_error", err);
       setMessages((current) => [
         ...current,
-        { id: `n-${Date.now()}`, role: "agent", text: answer.text, proposal: answer.proposal },
+        {
+          id: `err-${Date.now()}`,
+          role: "agent",
+          text: `Gagal menghubungi AI agent: ${err instanceof Error ? err.message : "Terjadi kesalahan."}`,
+        },
       ]);
+    } finally {
       setThinking(false);
-    }, 950);
+    }
   };
 
   const confirmProposal = async (messageId: string, proposal: Proposal) => {
@@ -496,7 +580,17 @@ export default function Agent() {
                   (run) => run.agentId === agent.id && run.state !== "approved" && run.state !== "failed",
                 ).length;
                 return (
-                  <div key={agent.id} className="flex items-start gap-3 border-t border-line px-4 py-3">
+                  <div
+                    key={agent.id}
+                    onClick={() => {
+                      setSelectedAgentId(agent.id);
+                      scrollTo("playground");
+                    }}
+                    className={cn(
+                      "flex items-start gap-3 border-t border-line px-4 py-3 cursor-pointer transition hover:bg-surface-2/60",
+                      leadAgent?.id === agent.id && "bg-surface-2/40",
+                    )}
+                  >
                     <span
                       className={cn(
                         "mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg",
@@ -519,6 +613,11 @@ export default function Agent() {
                       </div>
                       <p className="mt-0.5 text-[10.5px] text-muted">{agent.role} · {agent.jobdesk}</p>
                       <p className="mt-0.5 text-[9.5px] text-faint">{agent.capabilities.join(" · ")}</p>
+                      {(agent.skills ?? []).length > 0 && (
+                        <p className="mt-0.5 text-[9.5px] text-faint">
+                          skill: {(agent.skills ?? []).join(" · ")}
+                        </p>
+                      )}
                       {agent.note && (
                         <p className="mt-1 flex items-center gap-1 text-[9.5px] text-warning">
                           <AlertTriangle size={9} /> {agent.note}
@@ -600,38 +699,51 @@ export default function Agent() {
 
         <div className="space-y-4 xl:col-span-5">
           {/* Playground */}
-          <section id="playground" className="card scroll-mt-24 flex h-[520px] flex-col overflow-hidden">
+          <section id="playground" className="card scroll-mt-24 flex h-[540px] flex-col overflow-hidden">
             <div className="flex items-center justify-between border-b border-line px-4 py-3">
               <div className="flex items-center gap-2">
                 <AgentAvatar size="md" online={agentAvailable} />
                 <div>
                   <h2 className="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink">
-                    Playground
+                    {leadAgent?.name ?? "Playground"}
                     <span className="rounded bg-accent-soft px-1 py-0.5 font-mono text-[8px] text-accent-text">
                       {leadAgent?.model?.toUpperCase() ?? "JE.EL AGENT"}
                     </span>
                   </h2>
                   <p className="text-[9px] text-faint">
-                    Reads {workspace.name} · previews before acting
+                    {leadAgent?.role} · Reads {workspace.name} · AI live
                   </p>
                 </div>
               </div>
               <IconButton
                 label="Clear conversation"
-                onClick={() =>
-                  setMessages([
-                    {
-                      id: "welcome",
-                      role: "agent",
-                      text: "Fresh start. What should we work on?",
-                    },
-                  ])
-                }
+                onClick={handleClearChat}
                 className="size-7"
               >
                 <RefreshCw size={12} />
               </IconButton>
             </div>
+
+            {agents.length > 1 && (
+              <div className="flex items-center gap-1.5 border-b border-line bg-surface-2/40 px-3 py-2 overflow-x-auto">
+                <span className="text-[9.5px] text-faint mr-1 shrink-0 font-medium">Pilih Agent:</span>
+                {agents.map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => setSelectedAgentId(a.id)}
+                    className={cn(
+                      "rounded-full px-2.5 py-0.5 text-[10px] font-medium transition shrink-0",
+                      leadAgent?.id === a.id
+                        ? "bg-accent-soft text-accent-text border border-accent-line font-semibold"
+                        : "bg-surface text-muted hover:text-ink border border-line",
+                    )}
+                  >
+                    {a.name}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div ref={chatRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
               {messages.map((message) => (

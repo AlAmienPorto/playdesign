@@ -7,10 +7,20 @@
  * API is the production data surface and never presents seeded data as live.
  */
 
+import { handleAgentChat, handleClearAgentMessages, handleGetAgentMessages } from "./chat";
+import { runQcGate, saveQcNote } from "./qc";
+
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
+  AI: Ai;
   API_TOKEN?: string;
+  /**
+   * Set to "1" hanya setelah Cloudflare Access aktif untuk domain ini.
+   * Saat aktif, edge Access sudah memvalidasi identitas, jadi header
+   * cf-access-authenticated-user-email boleh dipercaya (workers.dev dimatikan).
+   */
+  ACCESS_ENABLED?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -142,6 +152,13 @@ const tokenMatches = (provided: string, expected: string) => {
 };
 
 function assertToken(req: Request, env: Env) {
+  // Jalur Cloudflare Access: edge sudah menolak request tanpa sesi valid, dan
+  // header ini hanya bisa muncul kalau Access aktif untuk domain ini
+  // (workers.dev dimatikan). Digerbangi env flag supaya tidak jadi celah
+  // sebelum Access benar-benar menyala.
+  if (env.ACCESS_ENABLED === "1" && req.headers.get("cf-access-authenticated-user-email")) {
+    return;
+  }
   const expected = env.API_TOKEN?.trim();
   if (!expected) {
     fail(503, "auth_not_configured", "API_TOKEN is not configured. Set the secret before serving the API.");
@@ -284,6 +301,7 @@ interface AgentRow {
   jobdesk: string;
   availability: string;
   capabilities: string;
+  skills: string;
   provider: string;
   model: string;
   last_seen: string;
@@ -380,6 +398,7 @@ const mapAgent = (row: AgentRow) => ({
   jobdesk: row.jobdesk,
   availability: row.availability,
   capabilities: parseArray<string>(row.capabilities),
+  skills: parseArray<string>(row.skills),
   provider: row.provider,
   model: row.model,
   lastSeen: row.last_seen,
@@ -1467,6 +1486,31 @@ async function route(req: Request, env: Env): Promise<Response> {
 
   if (path === "/api/health" && method === "GET") return health(env);
 
+  if (path === "/api/agent/chat" && method === "POST") return handleAgentChat(env, req, json);
+
+  if (path === "/api/agent/messages" && method === "GET") return handleGetAgentMessages(env, req, json);
+  if (path === "/api/agent/messages" && method === "DELETE") return handleClearAgentMessages(env, req, json);
+
+  if (path === "/api/qc/run" && method === "POST") return json(await runQcGate(env));
+
+  if (path === "/api/qc/report" && method === "POST") {
+    const body = (await req.json().catch(() => null)) as
+      | { postId?: string; comment?: string; state?: string }
+      | null;
+    if (!body?.postId || !body?.comment) {
+      return json({ error: { code: "invalid_request", message: "postId dan comment wajib diisi." } }, 400);
+    }
+    const saved = await saveQcNote(env, {
+      postId: body.postId,
+      comment: body.comment,
+      state: body.state as never,
+    });
+    if (!saved) {
+      return json({ error: { code: "run_not_found", message: "Belum ada run QC untuk post ini." } }, 404);
+    }
+    return json(saved);
+  }
+
   if (path === "/api/office" && method === "GET") return office(env, req);
   if (path === "/api/tasks" && method === "GET") {
     const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
@@ -1521,5 +1565,17 @@ export default {
       console.error("unhandled_api_error", error);
       return json({ error: { code: "internal_error", message: "The request could not be completed." } }, 500);
     }
+  },
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      runQcGate(env).then(
+        (summary) =>
+          console.log(
+            "qc_gate_ok",
+            JSON.stringify({ posts: summary.posts, passed: summary.passed, blocked: summary.blocked }),
+          ),
+        (error) => console.error("qc_gate_failed", error),
+      ),
+    );
   },
 } satisfies ExportedHandler<Env>;

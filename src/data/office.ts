@@ -1,5 +1,4 @@
 import {
-  CONVERSATIONS,
   DEALS,
   LEADS,
   POSTS,
@@ -873,7 +872,7 @@ export const OFFICE_LEADS: OfficeLead[] = [
 
 export type OfficeConversation = Conversation & { workspaceId: WorkspaceId };
 
-const brandalConversations: OfficeConversation[] = [
+/* const brandalConversations: OfficeConversation[] = [
   {
     id: "bc1",
     name: "Maya Putri",
@@ -923,11 +922,11 @@ const brandalConversations: OfficeConversation[] = [
     ],
     workspaceId: "brandal",
   },
-];
+]; */
 
 export const CONVERSATIONS_BY_WORKSPACE: Record<WorkspaceId, OfficeConversation[]> = {
-  playdesign: CONVERSATIONS.map((conversation) => ({ ...conversation, workspaceId: "playdesign" as WorkspaceId })),
-  brandal: brandalConversations,
+  playdesign: [],
+  brandal: [],
 };
 
 /* ------------------------------------------------------------------ */
@@ -951,6 +950,7 @@ export interface OfficeAgent {
   jobdesk: string;
   availability: AgentAvailability;
   capabilities: string[];
+  skills: string[];
   provider: string;
   model: string;
   lastSeen: string;
@@ -966,6 +966,7 @@ export const AGENTS: OfficeAgent[] = [
     jobdesk: "Revenue operations: inbox triage, follow-ups and CRM hygiene",
     availability: "online",
     capabilities: ["Inbox triage", "Follow-up drafts", "Scheduling", "CRM hygiene"],
+    skills: ["email-inbox-triage", "playdesign-coordinator-workflow"],
     provider: "Ruang gateway",
     model: "Je.el Agent",
     lastSeen: "Active now",
@@ -978,6 +979,7 @@ export const AGENTS: OfficeAgent[] = [
     jobdesk: "Research and evidence: web research, source checks, competitor scans",
     availability: "idle",
     capabilities: ["Web research", "Source checks", "Competitor scans"],
+    skills: ["social-media-competitor-research", "grounded-citations", "competitor-news-monitor"],
     provider: "Ruang gateway",
     model: "Je.el Agent",
     lastSeen: "38m ago",
@@ -990,6 +992,7 @@ export const AGENTS: OfficeAgent[] = [
     jobdesk: "QC gate: verifies evidence, tone and completeness before owner review",
     availability: "online",
     capabilities: ["QC checklist", "Evidence verification", "Approval routing"],
+    skills: ["playdesign-spv-qc", "grounded-citations"],
     provider: "Ruang gateway",
     model: "Je.el Agent QC",
     lastSeen: "Active now",
@@ -1002,6 +1005,7 @@ export const AGENTS: OfficeAgent[] = [
     jobdesk: "Content production: caption drafts, brand voice and content calendar",
     availability: "online",
     capabilities: ["Caption drafts", "Brand voice QC", "Content calendar"],
+    skills: ["playdesign-content-style", "playdesign-social-style", "humanizer"],
     provider: "Ruang gateway",
     model: "Je.el Agent",
     lastSeen: "Active now",
@@ -1014,6 +1018,7 @@ export const AGENTS: OfficeAgent[] = [
     jobdesk: "Market research: pricing scans, competitor scans, source verification",
     availability: "unavailable",
     capabilities: ["Market research", "Pricing scans", "Source verification"],
+    skills: ["product-price-monitor", "social-media-competitor-research"],
     provider: "Ruang gateway",
     model: "Je.el Agent",
     lastSeen: "1h ago",
@@ -1027,6 +1032,7 @@ export const AGENTS: OfficeAgent[] = [
     jobdesk: "QC gate: brand voice and claims check before owner review",
     availability: "idle",
     capabilities: ["QC checklist", "Claims check", "Approval routing"],
+    skills: ["playdesign-spv-qc", "playdesign-creative-style"],
     provider: "Ruang gateway",
     model: "Je.el Agent QC",
     lastSeen: "12m ago",

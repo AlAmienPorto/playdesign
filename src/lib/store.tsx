@@ -9,7 +9,6 @@ import {
 } from "react";
 import { TEAM, type Deal, type DealStage, type Post, type TaskStatus } from "../data/mock";
 import {
-  BRIEFS,
   briefStatus,
   extractBriefScope,
   type Brief,
@@ -369,7 +368,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [allDeals, setAllDeals] = useState<OfficeDeal[]>(OFFICE_DEALS);
   const [allPosts, setAllPosts] = useState<OfficePost[]>(OFFICE_POSTS);
   const [allLeads, setAllLeads] = useState<OfficeLead[]>(OFFICE_LEADS);
-  const [allBriefs, setAllBriefs] = useState<Brief[]>(BRIEFS);
+  const [allBriefs, setAllBriefs] = useState<Brief[]>([]);
   const [allDeliveryAnalyses, setAllDeliveryAnalyses] = useState<DeliveryAnalysis[]>(DELIVERY_ANALYSES);
   const [allDeliveryPlan, setAllDeliveryPlan] = useState<DeliveryPlanItem[]>(DELIVERY_PLAN);
   const [allDeliveryRuns, setAllDeliveryRuns] = useState<DeliveryRun[]>(DELIVERY_RUNS);
