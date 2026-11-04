@@ -1535,6 +1535,82 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json(saved);
   }
 
+  /* ---- On-demand scrape queue ------------------------------------- */
+  if (path === "/api/scrape/requests" && method === "POST") {
+    const body = (await req.json().catch(() => ({}))) as {
+      city?: string;
+      keyword?: string;
+      maxLeads?: number;
+      workspace?: string;
+    };
+    const city = (body.city ?? "").trim();
+    const keyword = (body.keyword ?? "").trim();
+    if (!city || !keyword) {
+      return json(
+        { error: { code: "invalid_request", message: "Kota dan kata kunci wajib diisi." } },
+        400,
+      );
+    }
+    const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+    const maxLeads = Math.min(Math.max(Number(body.maxLeads) || 10, 1), 50);
+    const id = `sr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    await env.DB.prepare(
+      `INSERT INTO scrape_requests
+         (id, workspace_id, city, keyword, max_leads, status, requested_by, requested_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?, datetime('now'), datetime('now'), datetime('now'))`,
+    )
+      .bind(id, workspaceId, city, keyword, maxLeads, req.headers.get("x-actor-id") ?? "ja")
+      .run();
+    return json({ ok: true, request: { id, city, keyword, maxLeads, status: "pending" } }, 201);
+  }
+
+  if (path === "/api/scrape/requests" && method === "GET") {
+    const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
+    const rows = await env.DB.prepare(
+      `SELECT id, city, keyword, max_leads, status, requested_at, started_at, finished_at, inserted, error
+         FROM scrape_requests
+        WHERE workspace_id = ?
+        ORDER BY requested_at DESC
+        LIMIT 10`,
+    )
+      .bind(workspaceId)
+      .all();
+    return json({ requests: rows.results ?? [] });
+  }
+
+  const scrapeRequestMatch = /^\/api\/scrape\/requests\/([^/]+)$/.exec(path);
+  if (scrapeRequestMatch && method === "PATCH") {
+    const id = decodeURIComponent(scrapeRequestMatch[1]);
+    const body = (await req.json().catch(() => ({}))) as {
+      status?: string;
+      inserted?: number;
+      error?: string;
+    };
+    const status = body.status ?? "running";
+    if (!["pending", "running", "done", "failed"].includes(status)) {
+      return json(
+        { error: { code: "invalid_request", message: "Status tidak dikenal." } },
+        400,
+      );
+    }
+    const result = await env.DB.prepare(
+      `UPDATE scrape_requests
+          SET status = ?,
+              inserted = COALESCE(?, inserted),
+              error = ?,
+              started_at = CASE WHEN ? = 'running' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+              finished_at = CASE WHEN ? IN ('done', 'failed') THEN datetime('now') ELSE finished_at END,
+              updated_at = datetime('now')
+        WHERE id = ?`,
+    )
+      .bind(status, body.inserted ?? null, body.error ?? null, status, status, id)
+      .run();
+    if (!result.meta || result.meta.changes === 0) {
+      return json({ error: { code: "not_found", message: "Permintaan tidak ditemukan." } }, 404);
+    }
+    return json({ ok: true, id, status });
+  }
+
   if (path === "/api/office" && method === "GET") return office(env, req);
   if (path === "/api/tasks" && method === "GET") {
     const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));

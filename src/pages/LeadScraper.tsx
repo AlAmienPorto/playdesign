@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight,
   Building2,
   Check,
   CheckCircle2,
+  Clock,
   Filter,
   Instagram,
   Linkedin,
@@ -27,62 +28,18 @@ import {
   Field,
   Fig,
   PageHead,
-  Progress,
   SearchField,
   Tabs,
 } from '../components/ui';
 import { WhatsAppIcon } from '../components/icons';
 import { fmtDate, waLink } from '../lib/utils';
 import type { RawLead } from '../data/types';
-
-const DEMO_PEOPLE = [
-  'Dewi Pratama',
-  'Rizky Hidayat',
-  'Sinta Lestari',
-  'Fajar Kusuma',
-  'Nadia Anggraini',
-  'Bima Saputra',
-  'Ayu Wulandari',
-  'Hendra Wijaya',
-  'Maya Sari',
-  'Galih Permana',
-];
-
-const DEMO_SUFFIXES = [
-  'Studio',
-  'Group',
-  'Kreatif',
-  'Digital',
-  'Lab',
-  'Kolektif',
-  'Prima',
-  'Nusantara',
-  'Works',
-  'Haus',
-];
-
-const slugify = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
-
-const buildDemoLeads = (
-  source: RawLead['source'],
-  keyword: string,
-  city: string,
-  total: number,
-): RawLead[] => {
-  const base = slugify(keyword) || 'prospek';
-  return Array.from({ length: total }, (_, index) => ({
-    id: `rl-demo-${Date.now()}-${index}`,
-    name: DEMO_PEOPLE[index % DEMO_PEOPLE.length],
-    company: `${keyword.trim()} ${DEMO_SUFFIXES[index % DEMO_SUFFIXES.length]}`,
-    source,
-    phone: `08${Math.floor(1000000000 + Math.random() * 8999999999)}`,
-    email: `hello@${base}${index + 1}.id`,
-    instagram: `@${base}${index + 1}`,
-    city: city.trim(),
-    status: index % 4 === 0 ? 'Raw' : 'Verified',
-    scrapedAt: new Date().toISOString(),
-  }));
-};
+import {
+  createScrapeRequest,
+  listScrapeRequests,
+  type ScrapeRequestRow,
+  type ScrapeRequestStatus,
+} from '../lib/api';
 
 const sourceIcon = (source: RawLead['source']) => {
   switch (source) {
@@ -104,16 +61,25 @@ function RawStatusBadge({ status }: { status: RawLead['status'] }) {
   return <Badge tone="warning" dot>Perlu review</Badge>;
 }
 
-export function LeadScraperPage() {
-  const { db, importRawLeadToCrm, addScrapedLeads, toast, syncFromApi } = useStore();
+function QueueBadge({ status }: { status: ScrapeRequestStatus }) {
+  if (status === 'running') return <Badge tone="info" dot>Diproses</Badge>;
+  if (status === 'done') return <Badge tone="success" dot>Selesai</Badge>;
+  if (status === 'failed') return <Badge tone="danger" dot>Gagal</Badge>;
+  return <Badge tone="warning" dot>Menunggu</Badge>;
+}
 
-  const [source, setSource] = useState<RawLead['source']>('Google Maps');
+export function LeadScraperPage() {
+  const { db, importRawLeadToCrm, toast, syncFromApi } = useStore();
+
   const [keyword, setKeyword] = useState('katering harian');
   const [city, setCity] = useState('Semarang');
-  const [limit, setLimit] = useState(2);
-  const [isScraping, setIsScraping] = useState(false);
+  const [limit, setLimit] = useState(5);
+  const [requesting, setRequesting] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [progress, setProgress] = useState(0);
+
+  const [requests, setRequests] = useState<ScrapeRequestRow[]>([]);
+  const handledRef = useRef<Set<string>>(new Set());
+  const primedRef = useRef(false);
 
   const [tab, setTab] = useState('all');
   const [cityFilter, setCityFilter] = useState('all');
@@ -151,27 +117,78 @@ export function LeadScraperPage() {
   const selectable = filtered.filter((lead) => lead.status !== 'Imported');
   const allSelected = selectable.length > 0 && selectable.every((lead) => selectedIds.includes(lead.id));
 
-  const handleStartScrape = () => {
+  /* --- queue polling ------------------------------------------------- */
+  const refreshRequests = useCallback(async () => {
+    try {
+      const rows = await listScrapeRequests();
+      setRequests(rows);
+
+      if (!primedRef.current) {
+        rows.forEach((row) => handledRef.current.add(row.id));
+        primedRef.current = true;
+        return;
+      }
+
+      const finished = rows.filter(
+        (row) => row.status === 'done' && !handledRef.current.has(row.id),
+      );
+      const failed = rows.filter(
+        (row) => row.status === 'failed' && !handledRef.current.has(row.id),
+      );
+      if (!finished.length && !failed.length) return;
+
+      [...finished, ...failed].forEach((row) => handledRef.current.add(row.id));
+
+      failed.forEach((row) => {
+        toast(
+          `Scraping "${row.keyword}" di ${row.city} gagal. ${row.error ?? ''}`.trim(),
+          'danger',
+        );
+      });
+
+      if (finished.length) {
+        const inserted = finished.reduce((sum, row) => sum + Number(row.inserted ?? 0), 0);
+        const result = await syncFromApi();
+        if (!result.ok) {
+          toast(result.error ?? 'Hasil scraping masuk, tapi gagal ditarik ke UI.', 'danger');
+        } else if (inserted > 0) {
+          toast(`${inserted} prospek baru dari hasil scraping sudah masuk antrean.`, 'success');
+        } else {
+          toast('Scraping selesai, tapi tidak ada kontak baru yang ditemukan.', 'warning');
+        }
+      }
+    } catch {
+      /* offline / token issue — TokenGate handles auth */
+    }
+  }, [syncFromApi, toast]);
+
+  useEffect(() => {
+    refreshRequests();
+    const timer = window.setInterval(refreshRequests, 20_000);
+    return () => window.clearInterval(timer);
+  }, [refreshRequests]);
+
+  /* --- actions ------------------------------------------------------- */
+  const handleRequestScrape = async () => {
     if (!keyword.trim() || !city.trim()) {
       toast('Kata kunci dan kota target wajib diisi.', 'danger');
       return;
     }
 
-    setIsScraping(true);
-    setProgress(15);
-
-    window.setTimeout(() => setProgress(55), 450);
-    window.setTimeout(() => setProgress(85), 950);
-
-    window.setTimeout(() => {
-      addScrapedLeads(buildDemoLeads(source, keyword, city, limit), { silent: true });
-      setIsScraping(false);
-      setProgress(100);
-      setTab('all');
-      setCityFilter('all');
-      setQuery('');
-      toast(`Simulasi selesai. ${limit} prospek demo masuk ke antrean review.`, 'success');
-    }, 1450);
+    setRequesting(true);
+    try {
+      await createScrapeRequest({ city: city.trim(), keyword: keyword.trim(), maxLeads: limit });
+      await refreshRequests();
+      toast(
+        `Permintaan scraping "${keyword.trim()}" di ${city.trim()} dikirim ke antrean. Runner memproses tiap ±5 menit.`,
+        'success',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Gagal mengirim permintaan scraping.';
+      toast(message, 'danger');
+    } finally {
+      setRequesting(false);
+    }
   };
 
   const handleSyncFromD1 = async () => {
@@ -214,15 +231,20 @@ export function LeadScraperPage() {
     );
   };
 
+  const pendingCount = requests.filter(
+    (row) => row.status === 'pending' || row.status === 'running',
+  ).length;
+
   return (
     <>
       <PageHead
         kicker="CRM · Lead generation"
         title="Lead Scraper"
-        desc="Prospek UMKM Jawa Tengah dari Google Maps yang sudah tersimpan di database D1. Tarik data terbaru atau review hasil scrape sebelum diimpor ke Leads."
+        desc="Prospek UMKM Jawa Tengah hasil scraping nyata yang tersimpan di database D1. Minta scrape baru, lalu review hasilnya sebelum diimpor ke Leads."
         actions={
           <div className="head-inline">
             <Badge tone="success" dot>Live D1</Badge>
+            {pendingCount > 0 && <Badge tone="warning" dot>{pendingCount} antre</Badge>}
             <button
               type="button"
               className="btn btn-primary btn-sm"
@@ -251,7 +273,7 @@ export function LeadScraperPage() {
         <Fig label="Sudah di Leads" value={counts.imported} hint="Diimpor ke CRM" icon={<Check size={17} />} />
       </div>
 
-      <Card title="Parameter scrape" sub="Tentukan sumber, kata kunci, dan wilayah target.">
+      <Card title="Parameter scrape" sub="Tentukan kata kunci, wilayah target, dan jumlah hasil.">
         <div className="scraper-config">
           <div className="scraper-source-row">
             <span className="field-label">Sumber platform</span>
@@ -263,18 +285,21 @@ export function LeadScraperPage() {
                   ['LinkedIn', <Linkedin key="li" size={14} />],
                   ['Direktori', <Building2 key="dir" size={14} />],
                 ] as Array<[RawLead['source'], JSX.Element]>
-              ).map(([value, icon]) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={`source-pill ${source === value ? 'is-active' : ''}`}
-                  onClick={() => setSource(value)}
-                  disabled={isScraping}
-                >
-                  {icon}
-                  {value === 'Direktori' ? 'Direktori bisnis' : value}
-                </button>
-              ))}
+              ).map(([value, icon]) => {
+                const supported = value === 'Google Maps';
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`source-pill ${supported ? 'is-active' : ''}`}
+                    disabled
+                    title={supported ? 'Didukung runner' : 'Belum didukung runner otomatis'}
+                  >
+                    {icon}
+                    {value === 'Direktori' ? 'Direktori bisnis' : value}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -284,8 +309,8 @@ export function LeadScraperPage() {
                 className="input"
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
-                placeholder="Misal: skincare clinic, kedai kopi, software house"
-                disabled={isScraping}
+                placeholder="Misal: katering harian, konveksi kaos"
+                disabled={requesting}
               />
             </Field>
 
@@ -294,68 +319,110 @@ export function LeadScraperPage() {
                 className="input"
                 value={city}
                 onChange={(event) => setCity(event.target.value)}
-                placeholder="Misal: Bandung, Jakarta Selatan"
-                disabled={isScraping}
+                placeholder="Misal: Semarang, Solo, Kudus"
+                disabled={requesting}
               />
             </Field>
 
-            <Field label="Jumlah hasil (demo)">
+            <Field label="Jumlah hasil">
               <select
                 className="input"
                 value={limit}
                 onChange={(event) => setLimit(Number(event.target.value))}
-                disabled={isScraping}
+                disabled={requesting}
               >
-                <option value={2}>2 prospek</option>
+                <option value={3}>3 prospek</option>
                 <option value={5}>5 prospek</option>
                 <option value={10}>10 prospek</option>
+                <option value={20}>20 prospek</option>
               </select>
             </Field>
           </div>
-
-          {isScraping && (
-            <div className="scraper-inline-progress" role="status" aria-live="polite">
-              <RefreshCw size={15} className="spin" />
-              <div className="scraper-progress-body">
-                <div className="scraper-progress-meta">
-                  <span>
-                    Menyiapkan hasil simulasi untuk <strong>{keyword}</strong> di{' '}
-                    <strong>{city}</strong>…
-                  </span>
-                  <strong>{progress}%</strong>
-                </div>
-                <Progress value={progress} tone="brand" />
-              </div>
-            </div>
-          )}
 
           <div className="scraper-run-row">
             <div className="notice-inline">
               <ShieldCheck size={14} />
               <span>
-                Data live berasal dari database D1 (hasil scraping Google Maps UMKM Jawa Tengah).
-                Tombol simulasi hanya untuk menguji alur review.
+                Permintaan masuk ke antrean D1 dan diproses runner otomatis tiap ±5 menit. Hasilnya
+                adalah kontak nyata (bukan simulasi) yang muncul di antrean review.
               </span>
             </div>
             <button
               type="button"
               className="btn btn-primary"
-              onClick={handleStartScrape}
-              disabled={isScraping}
+              onClick={handleRequestScrape}
+              disabled={requesting}
             >
-              {isScraping ? (
+              {requesting ? (
                 <>
-                  <RefreshCw size={14} className="spin" /> Menyiapkan…
+                  <RefreshCw size={14} className="spin" /> Mengirim…
                 </>
               ) : (
                 <>
-                  <Play size={14} /> Jalankan demo
+                  <Play size={14} /> Minta Scrape Sekarang
                 </>
               )}
             </button>
           </div>
         </div>
       </Card>
+
+      {requests.length > 0 && (
+        <Card
+          title="Antrean permintaan"
+          sub="Diproses otomatis oleh runner scraper. Halaman ini menyegarkan status tiap 20 detik."
+          bodyClass="no-pad"
+        >
+          <div className="table-wrap">
+            <table className="pd-table">
+              <thead>
+                <tr>
+                  <th>Kata kunci</th>
+                  <th>Kota</th>
+                  <th>Target</th>
+                  <th>Status</th>
+                  <th>Hasil</th>
+                  <th className="row-end">Diminta</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requests.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <span className="cell-main">{row.keyword}</span>
+                    </td>
+                    <td>
+                      <span className="scraper-location">
+                        <MapPin size={12} /> {row.city}
+                      </span>
+                    </td>
+                    <td>{row.max_leads}</td>
+                    <td>
+                      <QueueBadge status={row.status} />
+                    </td>
+                    <td>
+                      {row.inserted ? (
+                        <span className="muted-small">{row.inserted} lead</span>
+                      ) : row.error ? (
+                        <span className="muted-small" title={row.error}>
+                          —
+                        </span>
+                      ) : (
+                        <span className="muted-small">—</span>
+                      )}
+                    </td>
+                    <td className="row-end">
+                      <span className="muted-small">
+                        <Clock size={11} /> {fmtDate(row.requested_at)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {selectedIds.length > 0 && (
         <div className="scraper-bulk-bar" role="status" aria-live="polite">
@@ -423,12 +490,17 @@ export function LeadScraperPage() {
             desc={
               rawLeads.length
                 ? 'Ubah filter status, kota, atau kata kunci pencarian.'
-                : 'Jalankan scraper demo untuk mengisi antrean review.'
+                : 'Minta scrape baru untuk mengisi antrean review dari hasil pencarian nyata.'
             }
             action={
               rawLeads.length === 0 ? (
-                <button type="button" className="btn btn-primary btn-sm" onClick={handleStartScrape}>
-                  <Play size={14} /> Jalankan demo
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={handleRequestScrape}
+                  disabled={requesting}
+                >
+                  <Play size={14} /> Minta Scrape Sekarang
                 </button>
               ) : undefined
             }

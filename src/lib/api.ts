@@ -110,6 +110,48 @@ export async function fetchOffice(workspaceId = 'playdesign'): Promise<OfficeSna
   return request<OfficeSnapshot>(`/api/office?workspace=${encodeURIComponent(workspaceId)}`);
 }
 
+export type ScrapeRequestStatus = 'pending' | 'running' | 'done' | 'failed';
+
+export interface ScrapeRequestRow {
+  id: string;
+  city: string;
+  keyword: string;
+  max_leads: number;
+  status: ScrapeRequestStatus;
+  requested_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  inserted?: number | null;
+  error?: string | null;
+}
+
+export async function createScrapeRequest(input: {
+  city: string;
+  keyword: string;
+  maxLeads?: number;
+}): Promise<ScrapeRequestRow> {
+  const payload = await request<{ ok: boolean; request: ScrapeRequestRow }>(
+    '/api/scrape/requests',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        city: input.city,
+        keyword: input.keyword,
+        maxLeads: input.maxLeads ?? 10,
+        workspace: 'playdesign',
+      }),
+    },
+  );
+  return payload.request;
+}
+
+export async function listScrapeRequests(): Promise<ScrapeRequestRow[]> {
+  const payload = await request<{ requests: ScrapeRequestRow[] }>(
+    '/api/scrape/requests?workspace=playdesign',
+  );
+  return payload.requests ?? [];
+}
+
 export async function probeToken(token: string): Promise<boolean> {
   const response = await fetch('/api/office?workspace=playdesign', {
     headers: {
