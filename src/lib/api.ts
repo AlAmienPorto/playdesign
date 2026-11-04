@@ -152,6 +152,45 @@ export async function listScrapeRequests(): Promise<ScrapeRequestRow[]> {
   return payload.requests ?? [];
 }
 
+export type OutreachStatus = 'contacted' | 'replied' | 'interested' | 'not_interested' | 'deal';
+
+export interface OutreachRow {
+  id: string;
+  leadId: string;
+  leadName?: string | null;
+  company?: string | null;
+  phone?: string | null;
+  category?: string | null;
+  city?: string | null;
+  status: OutreachStatus;
+  channel: string;
+  note?: string | null;
+  contactedAt: string;
+  repliedAt?: string | null;
+  updatedAt: string;
+}
+
+export async function fetchOutreach(): Promise<OutreachRow[]> {
+  const payload = await request<{ outreach: OutreachRow[] }>('/api/outreach?workspace=playdesign');
+  return payload.outreach ?? [];
+}
+
+export async function saveOutreach(input: {
+  leadId: string;
+  leadName?: string;
+  company?: string;
+  phone?: string;
+  category?: string;
+  city?: string;
+  status: OutreachStatus;
+  note?: string;
+}): Promise<void> {
+  await request<{ ok: boolean }>('/api/outreach', {
+    method: 'POST',
+    body: JSON.stringify({ ...input, workspace: 'playdesign' }),
+  });
+}
+
 export async function probeToken(token: string): Promise<boolean> {
   const response = await fetch('/api/office?workspace=playdesign', {
     headers: {

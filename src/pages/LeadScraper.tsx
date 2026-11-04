@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight,
   Building2,
   Check,
+  CheckCheck,
   CheckCircle2,
   Clock,
   Filter,
+  Handshake,
   Instagram,
   Linkedin,
   Mail,
   MapPin,
+  MessageCircle,
   Phone,
   Play,
   Plus,
@@ -18,6 +21,8 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
 } from 'lucide-react';
 import { useStore } from '../store/store';
 import {
@@ -33,7 +38,7 @@ import {
 } from '../components/ui';
 import { WhatsAppIcon } from '../components/icons';
 import { fmtDate, waLink } from '../lib/utils';
-import type { RawLead } from '../data/types';
+import type { RawLead, OutreachStatus } from '../data/types';
 import {
   createScrapeRequest,
   listScrapeRequests,
@@ -68,8 +73,56 @@ function QueueBadge({ status }: { status: ScrapeRequestStatus }) {
   return <Badge tone="warning" dot>Menunggu</Badge>;
 }
 
+const OUTREACH_LABEL: Record<OutreachStatus, string> = {
+  contacted: 'Sudah dihubungi',
+  replied: 'Dibalas',
+  interested: 'Tertarik',
+  not_interested: 'Tidak tertarik',
+  deal: 'Deal',
+};
+
+const OUTREACH_ORDER: OutreachStatus[] = [
+  'contacted',
+  'replied',
+  'interested',
+  'not_interested',
+  'deal',
+];
+
+const outreachIcon = (status: OutreachStatus) => {
+  switch (status) {
+    case 'contacted':
+      return <MessageCircle size={12} />;
+    case 'replied':
+      return <CheckCheck size={12} />;
+    case 'interested':
+      return <ThumbsUp size={12} />;
+    case 'not_interested':
+      return <ThumbsDown size={12} />;
+    default:
+      return <Handshake size={12} />;
+  }
+};
+
+function FollowUpBadge({ status }: { status?: OutreachStatus }) {
+  if (!status) return <span className="muted-small">Belum dihubungi</span>;
+  if (status === 'deal') return <Badge tone="success" dot>Deal</Badge>;
+  if (status === 'interested') return <Badge tone="success" dot>Tertarik</Badge>;
+  if (status === 'replied') return <Badge tone="info" dot>Dibalas</Badge>;
+  if (status === 'not_interested') return <Badge tone="neutral" dot>Tidak tertarik</Badge>;
+  return <Badge tone="warning" dot>Sudah dihubungi</Badge>;
+}
+
+/** D1 stores `datetime('now')` as UTC without a zone marker — normalise it. */
+const parseDbDate = (value?: string | null): number => {
+  if (!value) return 0;
+  const normalised = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+  const time = new Date(normalised).getTime();
+  return Number.isNaN(time) ? 0 : time;
+};
+
 export function LeadScraperPage() {
-  const { db, importRawLeadToCrm, toast, syncFromApi } = useStore();
+  const { db, importRawLeadToCrm, toast, syncFromApi, setOutreach } = useStore();
 
   const [keyword, setKeyword] = useState('katering harian');
   const [city, setCity] = useState('Semarang');
@@ -90,6 +143,55 @@ export function LeadScraperPage() {
   const [customPitch, setCustomPitch] = useState('');
 
   const rawLeads = db.rawLeads ?? [];
+
+  const outreachMap = useMemo(
+    () => new Map((db.outreach ?? []).map((row) => [row.leadId, row])),
+    [db.outreach],
+  );
+
+  /** Leads contacted 2+ days ago that never replied — the follow-up backlog. */
+  const needsFollowUp = useMemo(() => {
+    const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    return rawLeads
+      .filter((lead) => {
+        const row = outreachMap.get(lead.id);
+        if (!row || row.status !== 'contacted') return false;
+        return parseDbDate(row.contactedAt) <= cutoff;
+      })
+      .sort(
+        (a, b) =>
+          parseDbDate(outreachMap.get(a.id)?.contactedAt) -
+          parseDbDate(outreachMap.get(b.id)?.contactedAt),
+      );
+  }, [rawLeads, outreachMap]);
+
+  /** Reply-rate per keyword — shows which scrape keyword actually converts. */
+  const keywordStats = useMemo(() => {
+    const stats = new Map<string, { total: number; contacted: number; replied: number }>();
+    rawLeads.forEach((lead) => {
+      const key = lead.category?.trim() || 'Lainnya';
+      const bucket = stats.get(key) ?? { total: 0, contacted: 0, replied: 0 };
+      bucket.total += 1;
+      const row = outreachMap.get(lead.id);
+      if (row) {
+        bucket.contacted += 1;
+        if (row.status === 'replied' || row.status === 'interested' || row.status === 'deal') {
+          bucket.replied += 1;
+        }
+      }
+      stats.set(key, bucket);
+    });
+    return Array.from(stats.entries())
+      .map(([keyword, value]) => ({
+        keyword,
+        ...value,
+        rate: value.contacted ? Math.round((value.replied / value.contacted) * 100) : 0,
+      }))
+      .sort((a, b) => b.contacted - a.contacted || b.total - a.total)
+      .slice(0, 6);
+  }, [rawLeads, outreachMap]);
+
+  const activeOutreach = activeLead ? outreachMap.get(activeLead.id) : undefined;
 
   const counts = {
     all: rawLeads.length,
@@ -202,6 +304,11 @@ export function LeadScraperPage() {
     }
   };
 
+  const handleOutreach = async (lead: RawLead, status: OutreachStatus) => {
+    await setOutreach(lead, status);
+    toast(`Status follow up ${lead.company}: ${OUTREACH_LABEL[status]}.`, 'success');
+  };
+
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
@@ -272,6 +379,101 @@ export function LeadScraperPage() {
         <Fig label="Perlu review" value={counts.raw} hint="Belum disaring manual" icon={<Filter size={17} />} />
         <Fig label="Sudah di Leads" value={counts.imported} hint="Diimpor ke CRM" icon={<Check size={17} />} />
       </div>
+
+      {needsFollowUp.length > 0 && (
+        <Card
+          title="Perlu follow up"
+          sub="Sudah dihubungi lebih dari 2 hari tapi belum ada balasan."
+        >
+          <div className="detail-stack">
+            {needsFollowUp.slice(0, 5).map((lead) => {
+              const row = outreachMap.get(lead.id);
+              const days = Math.max(
+                0,
+                Math.floor((Date.now() - parseDbDate(row?.contactedAt)) / 86_400_000),
+              );
+              return (
+                <div
+                  key={lead.id}
+                  className="detail-inline"
+                  style={{ justifyContent: 'space-between', gap: 10 }}
+                >
+                  <div>
+                    <strong>{lead.company}</strong>
+                    <span className="muted-small"> · {days} hari sejak dihubungi</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {lead.phone && (
+                      <a
+                        href={waLink(
+                          lead.phone,
+                          `Halo ${lead.name}, saya dari playdesign — menindaklanjuti pesan saya sebelumnya soal ${
+                            lead.category ?? 'layanan brand & website'
+                          } untuk ${lead.company}. Apakah sempat dibaca? Saya bisa kirim ringkasan singkat kalau membantu.`,
+                        )}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn btn-wa btn-xs"
+                      >
+                        <WhatsAppIcon size={12} /> Follow up
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-xs"
+                      onClick={() => openLeadDrawer(lead)}
+                    >
+                      Detail
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {needsFollowUp.length > 5 && (
+              <span className="field-hint">
+                +{needsFollowUp.length - 5} lead lain juga menunggu follow up.
+              </span>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {keywordStats.some((row) => row.contacted > 0) && (
+        <Card
+          title="Performa per kata kunci"
+          sub="Rasio balasan dari lead yang sudah benar-benar dihubungi."
+          bodyClass="no-pad"
+        >
+          <div className="table-wrap">
+            <table className="pd-table">
+              <thead>
+                <tr>
+                  <th>Kata kunci</th>
+                  <th>Total lead</th>
+                  <th>Dihubungi</th>
+                  <th>Dibalas</th>
+                  <th className="row-end">Rasio balas</th>
+                </tr>
+              </thead>
+              <tbody>
+                {keywordStats.map((row) => (
+                  <tr key={row.keyword}>
+                    <td>
+                      <span className="cell-main">{row.keyword}</span>
+                    </td>
+                    <td>{row.total}</td>
+                    <td>{row.contacted}</td>
+                    <td>{row.replied}</td>
+                    <td className="row-end">
+                      <strong>{row.rate}%</strong>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       <Card title="Parameter scrape" sub="Tentukan kata kunci, wilayah target, dan jumlah hasil.">
         <div className="scraper-config">
@@ -524,6 +726,7 @@ export function LeadScraperPage() {
                   <th className="scraper-location-col">Lokasi</th>
                   <th>Kontak</th>
                   <th>Status</th>
+                  <th>Follow up</th>
                   <th className="scraper-date">Ditemukan</th>
                   <th className="row-end">Aksi</th>
                 </tr>
@@ -586,6 +789,9 @@ export function LeadScraperPage() {
                       </td>
                       <td>
                         <RawStatusBadge status={lead.status} />
+                      </td>
+                      <td>
+                        <FollowUpBadge status={outreachMap.get(lead.id)?.status} />
                       </td>
                       <td className="scraper-date">
                         <span className="muted-small">{fmtDate(lead.scrapedAt)}</span>
@@ -808,6 +1014,39 @@ export function LeadScraperPage() {
                 placeholder="Sesuaikan pesan sebelum membuka WhatsApp…"
               />
               <span className="field-hint">Pesan hanya mengisi draf. Tidak ada pengiriman otomatis.</span>
+            </div>
+
+            <div className="detail-block">
+              <div className="detail-block-head">
+                <MessageCircle size={14} /> Status follow up
+              </div>
+              <div className="detail-inline" style={{ marginBottom: 8 }}>
+                <FollowUpBadge status={activeOutreach?.status} />
+                {activeOutreach?.contactedAt && (
+                  <span className="muted-small">
+                    Dihubungi {fmtDate(activeOutreach.contactedAt)}
+                    {activeOutreach.repliedAt ? ` · Dibalas ${fmtDate(activeOutreach.repliedAt)}` : ''}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {OUTREACH_ORDER.map((status) => {
+                  const active = activeOutreach?.status === status;
+                  return (
+                    <button
+                      key={status}
+                      type="button"
+                      className={`btn btn-xs ${active ? 'btn-primary' : 'btn-ghost'}`}
+                      onClick={() => handleOutreach(activeLead, status)}
+                    >
+                      {outreachIcon(status)} {OUTREACH_LABEL[status]}
+                    </button>
+                  );
+                })}
+              </div>
+              <span className="field-hint">
+                Catat setelah kamu benar-benar mengirim pesan. Tidak ada pesan yang dikirim otomatis.
+              </span>
             </div>
 
             <div className="notice-inline">

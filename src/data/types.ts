@@ -367,6 +367,29 @@ export interface RawLead {
   confidenceScore?: number;
 }
 
+export interface Outreach {
+  id: string;
+  leadId: string;
+  leadName: string;
+  company: string;
+  phone?: string;
+  category?: string;
+  city?: string;
+  status: OutreachStatus;
+  channel: 'whatsapp';
+  note?: string;
+  contactedAt: string;
+  repliedAt?: string;
+  updatedAt: string;
+}
+
+export type OutreachStatus =
+  | 'contacted'
+  | 'replied'
+  | 'interested'
+  | 'not_interested'
+  | 'deal';
+
 export interface LandingPageConfig {
   hero: {
     badge: string;
@@ -510,5 +533,6 @@ export interface DB {
   usage: UsageRecord[];
   workspaces: Workspace[];
   rawLeads?: RawLead[];
+  outreach?: Outreach[];
   landingConfig?: LandingPageConfig;
 }

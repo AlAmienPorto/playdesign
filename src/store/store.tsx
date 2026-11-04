@@ -27,12 +27,13 @@ import type {
   Approval,
   User,
   RawLead,
+  Outreach,
   LandingPageConfig,
 } from '../data/types';
 import { SEED } from '../data/seed';
 import { hasPermission } from '../lib/permissions';
 import { dayOffset, uid } from '../lib/utils';
-import { fetchOffice, getOfficeToken } from '../lib/api';
+import { fetchOffice, fetchOutreach, getOfficeToken, saveOutreach, type OutreachStatus } from '../lib/api';
 
 const STORE_KEY = 'playdesign.os.v2';
 const THEME_KEY = 'playdesign.theme';
@@ -124,6 +125,7 @@ interface StoreValue {
   updateAgent: (id: string, patch: Partial<Agent>) => void;
   addMemory: (input: { title: string; scope: string; content: string; tags: string[] }) => void;
   syncFromApi: () => Promise<{ ok: boolean; count: number; error?: string }>;
+  setOutreach: (lead: RawLead, status: OutreachStatus, note?: string) => Promise<void>;
   resetData: () => void;
 }
 
@@ -234,7 +236,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const syncFromApi = useCallback(async (): Promise<{ ok: boolean; count: number; error?: string }> => {
     try {
-      const snapshot = await fetchOffice('playdesign');
+      const [snapshot, outreachRows] = await Promise.all([
+        fetchOffice('playdesign'),
+        fetchOutreach().catch(() => []),
+      ]);
       const apiLeads = snapshot.leads ?? [];
       const mapped: RawLead[] = apiLeads.map((lead) => ({
         id: lead.id,
@@ -261,7 +266,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         googleMapsUrl: lead.googleMapsUrl,
         confidenceScore: lead.confidenceScore,
       }));
-      setDb((prev) => ({ ...prev, rawLeads: mapped }));
+      setDb((prev) => ({
+        ...prev,
+        rawLeads: mapped,
+        outreach: outreachRows.map((row) => ({
+          id: row.id,
+          leadId: row.leadId,
+          leadName: row.leadName ?? '',
+          company: row.company ?? '',
+          phone: row.phone ?? undefined,
+          category: row.category ?? undefined,
+          city: row.city ?? undefined,
+          status: row.status,
+          channel: 'whatsapp' as const,
+          note: row.note ?? undefined,
+          contactedAt: row.contactedAt,
+          repliedAt: row.repliedAt ?? undefined,
+          updatedAt: row.updatedAt,
+        })),
+      }));
       return { ok: true, count: mapped.length };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gagal menyinkronkan data dari D1.';
@@ -298,6 +321,60 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
 
   const can = useCallback((permission: Permission) => hasPermission(role, permission), [role]);
+
+  /* ------------------------------------------------------------------ */
+  /* Outreach — WhatsApp follow-up tracking (persisted to D1)            */
+  /* ------------------------------------------------------------------ */
+
+  const setOutreach = useCallback(
+    async (lead: RawLead, status: OutreachStatus, note?: string) => {
+      const now = new Date().toISOString();
+      const replied = status === 'replied' || status === 'interested' || status === 'deal';
+
+      setDb((prev) => {
+        const list = prev.outreach ?? [];
+        const existing = list.find((row) => row.leadId === lead.id);
+        const nextRow: Outreach = {
+          id: existing?.id ?? uid('lo'),
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+          phone: lead.phone,
+          category: lead.category,
+          city: lead.city,
+          status,
+          channel: 'whatsapp',
+          note: note ?? existing?.note,
+          contactedAt: existing?.contactedAt ?? now,
+          repliedAt: replied ? existing?.repliedAt ?? now : existing?.repliedAt,
+          updatedAt: now,
+        };
+        return {
+          ...prev,
+          outreach: existing
+            ? list.map((row) => (row.leadId === lead.id ? nextRow : row))
+            : [nextRow, ...list],
+        };
+      });
+
+      try {
+        await saveOutreach({
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+          phone: lead.phone,
+          category: lead.category,
+          city: lead.city,
+          status,
+          note,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Gagal menyimpan status follow up.';
+        toast(message, 'danger');
+      }
+    },
+    [toast],
+  );
 
   const setRole = useCallback((next: Role) => {
     setRoleState(next);
@@ -1116,6 +1193,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       updateLandingConfig,
       resetData,
       syncFromApi,
+      setOutreach,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [db, role, theme, navCollapsed, toasts, can, user],

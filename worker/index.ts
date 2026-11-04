@@ -1611,6 +1611,99 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json({ ok: true, id, status });
   }
 
+  /* ---- Lead outreach (WhatsApp follow-up tracking) ---------------- */
+  if (path === "/api/outreach" && method === "POST") {
+    const body = (await req.json().catch(() => ({}))) as {
+      leadId?: string;
+      leadName?: string;
+      company?: string;
+      phone?: string;
+      category?: string;
+      city?: string;
+      status?: string;
+      note?: string;
+      workspace?: string;
+    };
+    const leadId = (body.leadId ?? "").trim();
+    if (!leadId) {
+      return json({ error: { code: "invalid_request", message: "leadId wajib diisi." } }, 400);
+    }
+    const allowed = ["contacted", "replied", "interested", "not_interested", "deal"];
+    const status = allowed.includes(body.status ?? "") ? (body.status as string) : "contacted";
+    const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+    const id = `lo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    await env.DB.prepare(
+      `INSERT INTO lead_outreach
+         (id, workspace_id, lead_id, lead_name, company, phone, category, city, status, channel, note,
+          contacted_at, replied_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'whatsapp', ?,
+               datetime('now'),
+               CASE WHEN ? IN ('replied','interested','deal') THEN datetime('now') ELSE NULL END,
+               datetime('now'))
+       ON CONFLICT(workspace_id, lead_id) DO UPDATE SET
+         status = excluded.status,
+         note = COALESCE(excluded.note, lead_outreach.note),
+         category = COALESCE(excluded.category, lead_outreach.category),
+         city = COALESCE(excluded.city, lead_outreach.city),
+         phone = COALESCE(excluded.phone, lead_outreach.phone),
+         replied_at = CASE
+           WHEN excluded.status IN ('replied','interested','deal')
+             THEN COALESCE(lead_outreach.replied_at, datetime('now'))
+           ELSE lead_outreach.replied_at
+         END,
+         updated_at = datetime('now')`,
+    )
+      .bind(
+        id,
+        workspaceId,
+        leadId,
+        body.leadName ?? null,
+        body.company ?? null,
+        body.phone ?? null,
+        body.category ?? null,
+        body.city ?? null,
+        status,
+        body.note ?? null,
+        status,
+      )
+      .run();
+
+    return json({ ok: true, leadId, status });
+  }
+
+  if (path === "/api/outreach" && method === "GET") {
+    const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
+    const rows = await env.DB.prepare(
+      `SELECT id, lead_id, lead_name, company, phone, category, city, status, channel, note,
+              contacted_at, replied_at, updated_at
+         FROM lead_outreach
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 500`,
+    )
+      .bind(workspaceId)
+      .all();
+
+    const outreach = (rows.results ?? []).map((row: Record<string, unknown>) => ({
+      id: row.id,
+      leadId: row.lead_id,
+      leadName: row.lead_name,
+      company: row.company,
+      phone: row.phone,
+      category: row.category,
+      city: row.city,
+      status: row.status,
+      channel: row.channel ?? "whatsapp",
+      note: row.note,
+      contactedAt: row.contacted_at,
+      repliedAt: row.replied_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return json({ outreach });
+  }
+
   if (path === "/api/office" && method === "GET") return office(env, req);
   if (path === "/api/tasks" && method === "GET") {
     const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
