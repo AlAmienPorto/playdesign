@@ -1,6 +1,5 @@
-import { useState } from "react";
-import { setOfficeToken } from "../lib/officeApi";
-import { Button, Field, inputClass } from "./ui";
+import { useState } from 'react';
+import { probeToken, setOfficeToken } from '../lib/api';
 
 /**
  * Layar sekali-pakai untuk menempelkan token akses.
@@ -8,57 +7,67 @@ import { Button, Field, inputClass } from "./ui";
  * reload, cuma muncul pesan error, jadi token bisa langsung ditempel ulang.
  */
 export function TokenGate({ onReady }: { onReady: () => void }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState("");
+  const [value, setValue] = useState('');
+  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    const token = value.replace(/\s+/g, "");
+    const token = value.replace(/\s+/g, '');
     if (token.length < 16) {
-      setError("Token terlalu pendek — tempel 64 karakter dari server.");
+      setError('Token terlalu pendek — tempel 64 karakter dari server.');
       return;
     }
 
     setBusy(true);
-    setError("");
+    setError('');
     try {
-      const probe = await fetch("/api/office?workspace=playdesign", {
-        headers: { "x-actor-id": "ja", authorization: `Bearer ${token}` },
-      });
-      if (probe.status === 401) {
-        setError("Token ditolak. Periksa lagi — pastikan tidak ada karakter terpotong.");
-        return;
-      }
-      if (!probe.ok) {
-        setError(`Server membalas ${probe.status}. Coba beberapa saat lagi.`);
+      const ok = await probeToken(token);
+      if (!ok) {
+        setError('Token ditolak. Periksa lagi — pastikan tidak ada karakter terpotong.');
         return;
       }
       setOfficeToken(token);
+      window.dispatchEvent(new Event('pd-token-set'));
       onReady();
     } catch {
-      setError("Tidak bisa menghubungi server. Periksa koneksi lalu coba lagi.");
+      setError('Tidak bisa menghubungi server. Periksa koneksi lalu coba lagi.');
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-surface px-4">
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--bg)',
+        padding: '24px',
+      }}
+    >
       <form
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-line bg-surface-2 p-6 shadow-sm"
+        className="card"
+        style={{ width: '100%', maxWidth: '440px', padding: '28px' }}
       >
-        <div className="mb-1 text-sm font-semibold text-ink">Playdesign Office CRM</div>
-        <p className="mb-5 text-xs leading-relaxed text-muted">
-          Workspace ini terhubung ke database produksi. Tempel token akses sekali —
-          tersimpan hanya di perangkat ini, tidak pernah dikirim ke mana pun selain
-          API-nya sendiri.
+        <div style={{ marginBottom: '6px', fontSize: '14px', fontWeight: 600, color: 'var(--ink)' }}>
+          Playdesign Office CRM
+        </div>
+        <p style={{ marginBottom: '20px', fontSize: '12px', lineHeight: 1.6, color: 'var(--muted)' }}>
+          Workspace ini terhubung ke database produksi. Tempel token akses sekali — tersimpan
+          hanya di perangkat ini, tidak pernah dikirim ke mana pun selain API-nya sendiri.
         </p>
 
-        <Field label="Access token">
+        <div className="field">
+          <label className="field-label" htmlFor="access-token">
+            Access token
+          </label>
           <input
-            className={inputClass}
+            id="access-token"
+            className="input"
             type="password"
             autoComplete="off"
             spellCheck={false}
@@ -67,16 +76,18 @@ export function TokenGate({ onReady }: { onReady: () => void }) {
             disabled={busy}
             onChange={(event) => {
               setValue(event.target.value);
-              setError("");
+              setError('');
             }}
           />
-        </Field>
+        </div>
 
-        {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
+        {error && (
+          <p style={{ marginTop: '8px', fontSize: '12px', color: 'var(--danger)' }}>{error}</p>
+        )}
 
-        <Button variant="primary" type="submit" className="mt-4 w-full" disabled={busy}>
-          {busy ? "Memeriksa…" : "Masuk"}
-        </Button>
+        <button className="btn btn-primary" type="submit" disabled={busy} style={{ width: '100%', marginTop: '16px' }}>
+          {busy ? 'Memeriksa…' : 'Masuk'}
+        </button>
       </form>
     </div>
   );

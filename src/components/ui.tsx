@@ -1,527 +1,313 @@
+import { useEffect, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import {
-  useEffect,
-  useId,
-  type ButtonHTMLAttributes,
-  type ReactNode,
-} from "react";
-import { createPortal } from "react-dom";
-import { X } from "lucide-react";
-import { cn, initials, toneGradients } from "../lib/utils";
+  AlertTriangle,
+  ArrowUpRight,
+  Check,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Info,
+  Search,
+  X,
+  XCircle,
+} from 'lucide-react';
+import { NavLink } from 'react-router-dom';
+import { cx, initials, avatarTone } from '../lib/utils';
+import { useStore } from '../store/store';
 
-/* ---------------------------------- Avatar --------------------------------- */
-
-const avatarSizes = {
-  xs: "size-6 text-[9px]",
-  sm: "size-7 text-[10px]",
-  md: "size-8 text-[11px]",
-  lg: "size-10 text-[12px]",
-  xl: "size-14 text-base",
-};
-
-export function Avatar({
-  name,
-  tone = 0,
-  size = "md",
-  className,
-  ring,
-}: {
-  name: string;
-  tone?: number;
-  size?: keyof typeof avatarSizes;
-  className?: string;
-  ring?: boolean;
-}) {
-  return (
-    <span
-      title={name}
-      className={cn(
-        "inline-flex shrink-0 select-none items-center justify-center rounded-full bg-gradient-to-br font-semibold tracking-wide text-white",
-        toneGradients[tone % toneGradients.length],
-        avatarSizes[size],
-        ring && "ring-2 ring-surface",
-        className,
-      )}
-    >
-      {initials(name)}
-    </span>
-  );
-}
-
-export function AgentAvatar({
-  size = "md",
-  online = true,
-  className,
-}: {
-  size?: "sm" | "md" | "lg" | "xl";
-  online?: boolean;
-  className?: string;
-}) {
-  const dims = {
-    sm: "size-6 rounded-[7px]",
-    md: "size-8 rounded-[9px]",
-    lg: "size-10 rounded-[11px]",
-    xl: "size-14 rounded-2xl",
-  }[size];
-  const icon = { sm: 11, md: 14, lg: 18, xl: 24 }[size];
-  return (
-    <span className={cn("relative inline-flex shrink-0", className)}>
-      <span
-        className={cn(
-          "grid place-items-center bg-gradient-to-br from-[#d61c1c] via-[#bf0b0b] to-[#7a0505] text-white shadow-[0_6px_18px_-6px_rgba(191,11,11,0.7)]",
-          dims,
-        )}
-      >
-        <svg width={icon} height={icon} viewBox="0 0 24 24" fill="none" aria-hidden>
-          <path
-            d="M12 2.5c.5 4.9 2.6 7 7.5 7.5-4.9.5-7 2.6-7.5 7.5-.5-4.9-2.6-7-7.5-7.5 4.9-.5 7-2.6 7.5-7.5Z"
-            fill="currentColor"
-          />
-          <circle cx="18.5" cy="18" r="2" fill="currentColor" opacity=".75" />
-        </svg>
-      </span>
-      {online && (
-        <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-surface bg-[#2fbf8f]">
-          <span className="absolute inset-0 animate-ping rounded-full bg-[#2fbf8f] opacity-40" />
-        </span>
-      )}
-    </span>
-  );
-}
-
-/* ---------------------------------- Badge ---------------------------------- */
-
-type BadgeTone = "accent" | "success" | "warning" | "info" | "neutral" | "outline";
-
-const badgeTones: Record<BadgeTone, string> = {
-  accent: "bg-accent-soft text-accent-text",
-  success: "bg-success-soft text-success",
-  warning: "bg-warning-soft text-warning",
-  info: "bg-info-soft text-info",
-  neutral: "bg-surface-3 text-muted",
-  outline: "border border-line text-muted",
-};
+type Tone = 'brand' | 'success' | 'warning' | 'danger' | 'info' | 'neutral' | 'violet';
 
 export function Badge({
   children,
-  tone = "neutral",
-  dot,
+  tone = 'neutral',
+  dot = false,
   className,
 }: {
   children: ReactNode;
-  tone?: BadgeTone;
+  tone?: Tone;
   dot?: boolean;
   className?: string;
 }) {
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium leading-5",
-        badgeTones[tone],
-        className,
-      )}
-    >
-      {dot && <span className="size-1.5 rounded-full bg-current opacity-80" />}
+    <span className={cx('badge', `tone-${tone}`, className)}>
+      {dot && <i className="badge-dot" aria-hidden="true" />}
       {children}
     </span>
   );
 }
 
-/* ---------------------------------- Button --------------------------------- */
-
-type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "soft";
-
-const buttonVariants: Record<ButtonVariant, string> = {
-  primary:
-    "bg-accent text-accent-contrast shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_8px_20px_-10px_rgba(191,11,11,0.65)] hover:bg-accent-hover",
-  secondary: "bg-surface-3 text-ink hover:bg-line",
-  outline: "border border-line bg-transparent text-ink hover:bg-surface-2",
-  ghost: "text-muted hover:bg-surface-3 hover:text-ink",
-  soft: "bg-accent-soft text-accent-text hover:bg-accent-soft/70",
+const moduleTone: Record<string, Tone> = {
+  Live: 'success',
+  Foundation: 'info',
+  Planned: 'neutral',
+  'Needs setup': 'warning',
 };
 
-const buttonSizes = {
-  sm: "h-8 gap-1.5 rounded-lg px-2.5 text-xs",
-  md: "h-9 gap-2 rounded-[10px] px-3.5 text-[13px]",
-  lg: "h-10 gap-2 rounded-xl px-4 text-sm",
-  icon: "size-9 rounded-[10px]",
+export function StatusPill({ status }: { status: string }) {
+  return (
+    <Badge tone={moduleTone[status] ?? 'neutral'} dot>
+      {status}
+    </Badge>
+  );
+}
+
+const badgeMap: Record<string, Tone> = {
+  published: 'success',
+  Terbit: 'success',
+  Disetujui: 'success',
+  Sehat: 'success',
+  Aktif: 'success',
+  Terhubung: 'success',
+  Selesai: 'success',
+  Won: 'success',
+  approved: 'info',
+  Completed: 'success',
+  Published: 'success',
+  Scheduled: 'info',
+  scheduled: 'info',
+  in_review: 'warning',
+  Menunggu: 'warning',
+  'Minta Revisi': 'warning',
+  Perhatian: 'warning',
+  Dijeda: 'warning',
+  'Needs setup': 'warning',
+  'Review klien': 'warning',
+  queued: 'neutral',
+  Draft: 'neutral',
+  draft: 'neutral',
+  Idle: 'neutral',
+  'Belum aktif': 'neutral',
+  archived: 'neutral',
+  Baru: 'brand',
+  Tertarik: 'brand',
+  'Terkualifikasi': 'violet',
+  qualified: 'violet',
+  proposal: 'info',
+  negotiation: 'warning',
+  failed: 'danger',
+  Failed: 'danger',
+  Kalah: 'danger',
+  lost: 'danger',
+  Risiko: 'danger',
+  Error: 'danger',
+  Spam: 'danger',
+  cancelled: 'neutral',
+  delivery_uncertain: 'danger',
+  running: 'info',
+  'Review internal': 'info',
+  'Review': 'info',
+  'Diundang': 'info',
 };
 
-export function Button({
+export function AutoBadge({ value }: { value: string }) {
+  const tone = badgeMap[value] ?? 'neutral';
+  return <Badge tone={tone}>{value}</Badge>;
+}
+
+export function TaskPriorityBadge({ priority }: { priority: 'Tinggi' | 'Sedang' | 'Rendah' }) {
+  const tone = priority === 'Tinggi' ? 'danger' : priority === 'Sedang' ? 'warning' : 'neutral';
+  return (
+    <Badge tone={tone} dot>
+      {priority}
+    </Badge>
+  );
+}
+
+export function PageHead({
+  kicker,
+  title,
+  desc,
+  actions,
   children,
-  variant = "secondary",
-  size = "md",
-  className,
-  ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & {
-  variant?: ButtonVariant;
-  size?: keyof typeof buttonSizes;
+}: {
+  kicker?: ReactNode;
+  title: ReactNode;
+  desc?: ReactNode;
+  actions?: ReactNode;
+  children?: ReactNode;
 }) {
   return (
-    <button
-      className={cn(
-        "inline-flex select-none items-center justify-center font-medium transition-colors active:translate-y-px disabled:pointer-events-none disabled:opacity-50",
-        buttonVariants[variant],
-        buttonSizes[size],
-        className,
-      )}
-      {...props}
-    >
+    <header className="page-head">
+      <div className="page-head-row">
+        <div className="page-head-main">
+          {kicker && <div className="page-kicker">{kicker}</div>}
+          <h1 className="page-title">{title}</h1>
+          {desc && <p className="page-desc">{desc}</p>}
+        </div>
+        {actions && <div className="head-actions">{actions}</div>}
+      </div>
       {children}
-    </button>
+    </header>
   );
 }
 
-export function IconButton({
+export function Card({
+  title,
+  sub,
+  action,
   children,
   className,
-  label,
-  ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { label: string }) {
+  bodyClass,
+  id,
+}: {
+  title?: ReactNode;
+  sub?: ReactNode;
+  action?: ReactNode;
+  children: ReactNode;
+  className?: string;
+  bodyClass?: string;
+  id?: string;
+}) {
   return (
-    <button
-      aria-label={label}
-      title={label}
-      className={cn(
-        "grid size-9 shrink-0 place-items-center rounded-[10px] text-muted transition-colors hover:bg-surface-3 hover:text-ink",
-        className,
+    <section className={cx('pd-card', className)} id={id}>
+      {(title || action) && (
+        <div className="card-head">
+          <div>
+            {title && <h2 className="card-title">{title}</h2>}
+            {sub && <p className="card-sub">{sub}</p>}
+          </div>
+          {action && <div className="card-action">{action}</div>}
+        </div>
       )}
-      {...props}
-    >
-      {children}
-    </button>
+      <div className={cx('card-body', bodyClass)}>{children}</div>
+    </section>
   );
 }
 
-/* --------------------------------- Segmented -------------------------------- */
+export function Fig({
+  label,
+  value,
+  hint,
+  icon,
+  delta,
+  deltaTone = 'success',
+  spark,
+  onClick,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: ReactNode;
+  icon?: ReactNode;
+  delta?: string;
+  deltaTone?: 'success' | 'danger' | 'neutral';
+  spark?: ReactNode;
+  onClick?: () => void;
+}) {
+  const content = (
+    <>
+      <div className="fig-top">
+        <span className="fig-label">{label}</span>
+        {icon && <span className="fig-icon">{icon}</span>}
+      </div>
+      <div className="fig-value">{value}</div>
+      <div className="fig-bottom">
+        <div className="fig-meta">
+          {delta && <span className={cx('fig-delta', `is-${deltaTone}`)}>{delta}</span>}
+          {hint && <span className="fig-hint">{hint}</span>}
+        </div>
+        {spark && <div className="fig-spark">{spark}</div>}
+      </div>
+    </>
+  );
+  if (onClick) {
+    return (
+      <button type="button" className="fig fig-clickable" onClick={onClick}>
+        {content}
+      </button>
+    );
+  }
+  return <div className="fig">{content}</div>;
+}
 
-export function Segmented<T extends string>({
-  options,
+export function Tabs({
+  items,
   value,
   onChange,
-  className,
-  size = "md",
+  label,
 }: {
-  options: { value: T; label: string; count?: number }[];
-  value: T;
-  onChange: (value: T) => void;
-  className?: string;
-  size?: "sm" | "md";
+  items: Array<{ key: string; label: string; count?: number }>;
+  value: string;
+  onChange: (key: string) => void;
+  label?: string;
 }) {
   return (
-    <div
-      className={cn(
-        "inline-flex items-center gap-0.5 rounded-[10px] border border-line bg-surface-2 p-0.5",
-        className,
-      )}
-    >
-      {options.map((option) => (
+    <div className="tabs" role="tablist" aria-label={label ?? 'Filter status'}>
+      {items.map((item) => (
         <button
-          key={option.value}
-          onClick={() => onChange(option.value)}
-          className={cn(
-            "inline-flex items-center gap-1.5 rounded-lg font-medium transition-colors",
-            size === "sm" ? "h-7 px-2 text-[11px]" : "h-8 px-3 text-xs",
-            value === option.value
-              ? "bg-surface text-ink shadow-sm ring-1 ring-line"
-              : "text-muted hover:text-ink",
-          )}
+          key={item.key}
+          type="button"
+          role="tab"
+          aria-selected={value === item.key}
+          className={cx('tab', value === item.key && 'active')}
+          onClick={() => onChange(item.key)}
         >
-          {option.label}
-          {option.count !== undefined && (
-            <span
-              className={cn(
-                "rounded-md px-1 font-mono text-[10px]",
-                value === option.value ? "bg-accent-soft text-accent-text" : "bg-surface-3 text-faint",
-              )}
-            >
-              {option.count}
-            </span>
-          )}
+          {item.label}
+          {item.count !== undefined && <span className="tab-count">{item.count}</span>}
         </button>
       ))}
     </div>
   );
 }
 
-/* ---------------------------------- Toggle --------------------------------- */
+export function Toolbar({ children }: { children: ReactNode }) {
+  return <div className="toolbar">{children}</div>;
+}
 
-export function Toggle({
-  checked,
+export function SearchField({
+  value,
   onChange,
-  label,
-  disabled,
+  placeholder = 'Cari…',
+  className,
 }: {
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-  label: string;
-  disabled?: boolean;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  className?: string;
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className={cn(
-        "relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full transition-colors disabled:opacity-50",
-        checked ? "bg-accent" : "bg-line-strong",
+    <div className={cx('search-field', className)}>
+      <Search size={15} aria-hidden="true" />
+      <input
+        type="search"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-label={placeholder}
+      />
+      {value && (
+        <button type="button" className="search-clear" onClick={() => onChange('')} aria-label="Bersihkan pencarian">
+          <X size={13} />
+        </button>
       )}
-    >
-      <span
-        className={cn(
-          "inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
-          checked ? "translate-x-[18px]" : "translate-x-[3px]",
-        )}
-      />
-    </button>
-  );
-}
-
-/* --------------------------------- Progress -------------------------------- */
-
-export function ProgressBar({
-  value,
-  max = 100,
-  className,
-  tone = "accent",
-  height = "h-1.5",
-}: {
-  value: number;
-  max?: number;
-  className?: string;
-  tone?: "accent" | "success" | "warning" | "info";
-  height?: string;
-}) {
-  const tones = {
-    accent: "bg-accent",
-    success: "bg-success",
-    warning: "bg-warning",
-    info: "bg-info",
-  };
-  return (
-    <div className={cn("w-full overflow-hidden rounded-full bg-surface-3", height, className)}>
-      <div
-        className={cn("h-full rounded-full transition-[width] duration-500", tones[tone])}
-        style={{ width: `${Math.min(100, (value / max) * 100)}%` }}
-      />
     </div>
   );
 }
 
-/* --------------------------------- Gauge ----------------------------------- */
-
-export function CircularGauge({
+export function SelectBox({
   value,
-  size = 120,
-  stroke = 8,
+  onChange,
+  options,
   label,
-  sublabel,
-  className,
 }: {
-  value: number;
-  size?: number;
-  stroke?: number;
-  label?: ReactNode;
-  sublabel?: string;
-  className?: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: Array<{ value: string; label: string }>;
+  label: string;
 }) {
-  const radius = (size - stroke) / 2;
-  const circumference = radius * 2 * Math.PI;
-  const offset = circumference - (value / 100) * circumference;
   return (
-    <div className={cn("relative inline-grid place-items-center", className)} style={{ width: size, height: size }}>
-      <svg width={size} height={size} className="-rotate-90">
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          fill="none"
-          strokeWidth={stroke}
-          className="stroke-surface-3"
-        />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          fill="none"
-          strokeWidth={stroke}
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={offset}
-          className="stroke-accent transition-[stroke-dashoffset] duration-700"
-        />
-      </svg>
-      <div className="absolute inset-0 grid place-content-center text-center">
-        <div className="font-mono text-xl font-medium tracking-tight text-ink">{label ?? `${value}%`}</div>
-        {sublabel && <div className="mt-0.5 text-[10px] text-faint">{sublabel}</div>}
-      </div>
-    </div>
+    <label className="select-box">
+      <span className="sr-only">{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)} aria-label={label}>
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
-
-/* --------------------------------- Sparkline -------------------------------- */
-
-export function Sparkline({
-  data,
-  className,
-  height = 32,
-  width = 96,
-  tone = "accent",
-}: {
-  data: number[];
-  className?: string;
-  height?: number;
-  width?: number;
-  tone?: "accent" | "success" | "warning" | "info";
-}) {
-  const gradientId = useId().replace(/:/g, "");
-  const min = Math.min(...data);
-  const max = Math.max(...data);
-  const range = max - min || 1;
-  const step = width / (data.length - 1);
-  const points = data.map((value, index) => [index * step, height - 3 - ((value - min) / range) * (height - 8)]);
-  const line = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
-  const area = `${line} L${width},${height} L0,${height} Z`;
-  const stroke = {
-    accent: "rgb(var(--accent))",
-    success: "rgb(var(--success))",
-    warning: "rgb(var(--warning))",
-    info: "rgb(var(--info))",
-  }[tone];
-
-  return (
-    <svg
-      viewBox={`0 0 ${width} ${height}`}
-      className={cn("overflow-visible", className)}
-      preserveAspectRatio="none"
-      aria-hidden
-    >
-      <defs>
-        <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={stroke} stopOpacity="0.24" />
-          <stop offset="100%" stopColor={stroke} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <path d={area} fill={`url(#${gradientId})`} />
-      <path d={line} fill="none" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx={points[points.length - 1][0]} cy={points[points.length - 1][1]} r="2.2" fill={stroke} />
-    </svg>
-  );
-}
-
-/* ---------------------------------- Modal ---------------------------------- */
-
-export function Modal({
-  open,
-  onClose,
-  title,
-  description,
-  children,
-  footer,
-  size = "md",
-}: {
-  open: boolean;
-  onClose: () => void;
-  title: string;
-  description?: string;
-  children: ReactNode;
-  footer?: ReactNode;
-  size?: "sm" | "md" | "lg";
-}) {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
-    };
-  }, [open, onClose]);
-
-  const widths = { sm: "sm:max-w-md", md: "sm:max-w-xl", lg: "sm:max-w-2xl" };
-
-  if (!open) return null;
-
-  return createPortal(
-    <div className="fixed inset-0 z-[80] flex items-end justify-center sm:items-center sm:p-6">
-      <div
-        className="absolute inset-0 animate-fade-in bg-black/55 backdrop-blur-[3px]"
-        onClick={onClose}
-      />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className={cn(
-          "relative flex max-h-[92dvh] w-full animate-scale-in flex-col overflow-hidden rounded-t-3xl border border-line bg-surface shadow-float sm:rounded-2xl",
-          widths[size],
-        )}
-      >
-        <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4 sm:px-6">
-          <div>
-            <h2 className="text-[15px] font-semibold tracking-tight text-ink">{title}</h2>
-            {description && <p className="mt-0.5 text-xs text-muted">{description}</p>}
-          </div>
-          <IconButton label="Close dialog" onClick={onClose} className="-mr-2 -mt-1">
-            <X size={16} />
-          </IconButton>
-        </div>
-        <div className="overflow-y-auto px-5 py-5 sm:px-6">{children}</div>
-        {footer && (
-          <div className="flex items-center justify-end gap-2 border-t border-line bg-surface-2/60 px-5 py-3.5 sm:px-6">
-            {footer}
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
-export function Drawer({
-  open,
-  onClose,
-  children,
-  title,
-}: {
-  open: boolean;
-  onClose: () => void;
-  children: ReactNode;
-  title: string;
-}) {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
-    };
-  }, [open, onClose]);
-
-  if (!open) return null;
-
-  return createPortal(
-    <div className="fixed inset-0 z-[80] flex justify-end">
-      <div className="absolute inset-0 animate-fade-in bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
-      <aside
-        aria-label={title}
-        className="relative flex h-full w-full max-w-[440px] animate-slide-in flex-col overflow-y-auto border-l border-line bg-surface shadow-float"
-      >
-        {children}
-      </aside>
-    </div>,
-    document.body,
-  );
-}
-
-/* ---------------------------------- Field ---------------------------------- */
 
 export function Field({
   label,
@@ -535,54 +321,326 @@ export function Field({
   className?: string;
 }) {
   return (
-    <label className={cn("block", className)}>
-      <span className="mb-1.5 flex items-center justify-between text-xs font-medium text-muted">
-        {label}
-        {hint && <span className="font-normal text-faint">{hint}</span>}
-      </span>
+    <label className={cx('field', className)}>
+      <span className="field-label">{label}</span>
       {children}
+      {hint && <span className="field-hint">{hint}</span>}
     </label>
   );
 }
 
-export const inputClass =
-  "w-full rounded-[10px] border border-line bg-surface-2 px-3 py-2 text-[13px] text-ink placeholder:text-faint transition-colors focus:border-accent/50 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-accent/15";
-
-/* -------------------------------- PageHeader ------------------------------- */
-
-export function PageHeader({
-  eyebrow,
-  title,
-  description,
-  children,
-  className,
+export function Pager({
+  page,
+  pageCount,
+  total,
+  pageSize,
+  onChange,
 }: {
-  eyebrow?: string;
-  title: string;
-  description?: string;
-  children?: ReactNode;
-  className?: string;
+  page: number;
+  pageCount: number;
+  total: number;
+  pageSize: number;
+  onChange: (p: number) => void;
 }) {
+  if (total === 0) return null;
+  const from = (page - 1) * pageSize + 1;
+  const to = Math.min(page * pageSize, total);
   return (
-    <div className={cn("mb-7 flex flex-wrap items-end justify-between gap-4", className)}>
-      <div>
-        {eyebrow && <div className="overline mb-2">{eyebrow}</div>}
-        <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.02em] text-ink md:text-[30px]">
-          {title}
-        </h1>
-        {description && <p className="mt-1.5 max-w-2xl text-[13px] leading-relaxed text-muted">{description}</p>}
+    <div className="pager">
+      <span className="pager-info">
+        {from}–{to} dari {total}
+      </span>
+      <div className="pager-controls">
+        <button type="button" className="icon-btn" onClick={() => onChange(page - 1)} disabled={page <= 1} aria-label="Halaman sebelumnya">
+          <ChevronLeft size={16} />
+        </button>
+        <span className="pager-page">
+          {page} / {Math.max(pageCount, 1)}
+        </span>
+        <button type="button" className="icon-btn" onClick={() => onChange(page + 1)} disabled={page >= pageCount} aria-label="Halaman berikutnya">
+          <ChevronRight size={16} />
+        </button>
       </div>
-      {children && <div className="flex flex-wrap items-center gap-2">{children}</div>}
     </div>
   );
 }
 
-/* ---------------------------------- Kbd ------------------------------------ */
-
-export function Kbd({ children }: { children: ReactNode }) {
+export function EmptyState({
+  icon,
+  title,
+  desc,
+  action,
+  compact,
+}: {
+  icon?: ReactNode;
+  title: string;
+  desc?: ReactNode;
+  action?: ReactNode;
+  compact?: boolean;
+}) {
   return (
-    <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border border-line bg-surface-2 px-1 font-mono text-[10px] font-medium text-faint">
-      {children}
-    </kbd>
+    <div className={cx('empty', compact && 'empty-compact')}>
+      {icon && <div className="empty-icon">{icon}</div>}
+      <h3>{title}</h3>
+      {desc && <p>{desc}</p>}
+      {action && <div className="empty-action">{action}</div>}
+    </div>
   );
+}
+
+export function Drawer({
+  open,
+  onClose,
+  title,
+  sub,
+  children,
+  footer,
+  width = 520,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: ReactNode;
+  sub?: ReactNode;
+  children: ReactNode;
+  footer?: ReactNode;
+  width?: number;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    document.body.classList.add('no-scroll');
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.classList.remove('no-scroll');
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+  return createPortal(
+    <div className="overlay" onMouseDown={onClose}>
+      <aside
+        className="drawer"
+        style={{ maxWidth: width }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={typeof title === 'string' ? title : 'Detail'}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="drawer-head">
+          <div>
+            <h2 className="drawer-title">{title}</h2>
+            {sub && <p className="drawer-sub">{sub}</p>}
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Tutup panel">
+            <X size={17} />
+          </button>
+        </div>
+        <div className="drawer-body">{children}</div>
+        {footer && <div className="drawer-foot">{footer}</div>}
+      </aside>
+    </div>,
+    document.body,
+  );
+}
+
+export function Modal({
+  open,
+  onClose,
+  title,
+  sub,
+  children,
+  footer,
+  wide,
+  width,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: ReactNode;
+  sub?: ReactNode;
+  children: ReactNode;
+  footer?: ReactNode;
+  wide?: boolean;
+  width?: number;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    document.body.classList.add('no-scroll');
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.classList.remove('no-scroll');
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+  return createPortal(
+    <div className="overlay overlay-center" onMouseDown={onClose}>
+      <div
+        className={cx('modal', wide && 'modal-wide')}
+        role="dialog"
+        aria-modal="true"
+        aria-label={typeof title === 'string' ? title : 'Formulir'}
+        style={width ? { maxWidth: width } : undefined}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="modal-head">
+          <div>
+            <h2>{title}</h2>
+            {sub && <p>{sub}</p>}
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Tutup">
+            <X size={17} />
+          </button>
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-foot">{footer}</div>}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+export function Avatar({ name, size = 30, className }: { name: string; size?: number; className?: string }) {
+  const hue = avatarTone(name);
+  return (
+    <span
+      className={cx('avatar', className)}
+      style={{
+        width: size,
+        height: size,
+        fontSize: Math.max(9, Math.round(size * 0.35)),
+        background: `hsl(${hue} 62% 93%)`,
+        color: `hsl(${hue} 48% 33%)`,
+      }}
+      title={name}
+      aria-hidden="true"
+    >
+      {initials(name)}
+    </span>
+  );
+}
+
+export function AvatarStack({ names, max = 4 }: { names: string[]; max?: number }) {
+  const shown = names.slice(0, max);
+  return (
+    <span className="avatar-stack">
+      {shown.map((n) => (
+        <Avatar key={n} name={n} size={24} />
+      ))}
+      {names.length > max && <span className="avatar-more">+{names.length - max}</span>}
+    </span>
+  );
+}
+
+export function Progress({
+  value,
+  tone = 'brand',
+  thin,
+}: {
+  value: number;
+  tone?: 'brand' | 'success' | 'warning' | 'danger';
+  thin?: boolean;
+}) {
+  return (
+    <div
+      className={cx('progress', thin && 'progress-thin')}
+      role="progressbar"
+      aria-valuenow={Math.round(value)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
+      <span className={`tone-${tone}`} style={{ width: `${Math.min(100, Math.max(0, value))}%` }} />
+    </div>
+  );
+}
+
+export function Toggle({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      className={cx('toggle', checked && 'is-on')}
+      onClick={() => onChange(!checked)}
+    >
+      <span />
+    </button>
+  );
+}
+
+export function SectionTitle({ children, action }: { children: ReactNode; action?: ReactNode }) {
+  return (
+    <div className="section-title">
+      <h2>{children}</h2>
+      {action}
+    </div>
+  );
+}
+
+export function LinkButton({ to, children }: { to: string; children: ReactNode }) {
+  return (
+    <NavLink to={to} className="link-cta">
+      {children}
+      <ArrowUpRight size={13} />
+    </NavLink>
+  );
+}
+
+export function Toasts() {
+  const { toasts, dismissToast } = useStore();
+  return createPortal(
+    <div className="toast-host" role="status" aria-live="polite">
+      {toasts.map((t) => (
+        <div key={t.id} className={cx('toast', `toast-${t.tone}`)}>
+          <span className="toast-icon">
+            {t.tone === 'success' ? (
+              <CheckCircle2 size={16} />
+            ) : t.tone === 'danger' ? (
+              <XCircle size={16} />
+            ) : t.tone === 'warning' ? (
+              <AlertTriangle size={16} />
+            ) : (
+              <Info size={16} />
+            )}
+          </span>
+          <span className="toast-msg">{t.message}</span>
+          <button type="button" onClick={() => dismissToast(t.id)} aria-label="Tutup notifikasi">
+            <X size={13} />
+          </button>
+        </div>
+      ))}
+    </div>,
+    document.body,
+  );
+}
+
+export function CheckMark({ yes }: { yes: boolean }) {
+  return yes ? (
+    <span className="check-yes" aria-label="Ya">
+      <Check size={15} />
+    </span>
+  ) : (
+    <span className="check-no" aria-label="Tidak">
+      <X size={14} />
+    </span>
+  );
+}
+
+export function KeyHint({ children = '⌘K' }: { children?: ReactNode }) {
+  return <kbd className="kbd">{children}</kbd>;
 }
