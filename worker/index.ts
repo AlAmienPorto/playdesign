@@ -10,6 +10,8 @@
 import { handleAgentChat, handleClearAgentMessages, handleGetAgentMessages } from "./chat";
 import { runQcGate, saveQcNote } from "./qc";
 
+import { insertScrapedLeads } from "./scraper";
+
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
@@ -683,6 +685,13 @@ async function office(env: Env, req: Request) {
       tags: parseArray<string>(row.tags as string),
       nextStep: (row.next_step as string | null) ?? undefined,
       notes: (row.notes as string | null) ?? undefined,
+      category: (row.category as string | null) ?? undefined,
+      fullAddress: (row.full_address as string | null) ?? undefined,
+      rating: (row.rating as number | null) ?? undefined,
+      whatsappVerified: row.whatsapp_verified === 1,
+      whatsappLink: (row.whatsapp_link as string | null) ?? undefined,
+      googleMapsUrl: (row.google_maps_url as string | null) ?? undefined,
+      confidenceScore: (row.confidence_score as number | null) ?? undefined,
     })),
     posts: posts.results.map((row) => ({
       id: row.id as string,
@@ -1492,6 +1501,21 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (path === "/api/agent/messages" && method === "DELETE") return handleClearAgentMessages(env, req, json);
 
   if (path === "/api/qc/run" && method === "POST") return json(await runQcGate(env));
+
+  if (path === "/api/leads/sync" && method === "POST") {
+    try {
+      const body = (await req.json().catch(() => ({}))) as { leads?: any[] };
+      const leads = Array.isArray(body?.leads) ? body.leads : [];
+      const result = await insertScrapedLeads(env, leads);
+      return json({
+        ok: true,
+        inserted: result.inserted,
+        errors: result.errors,
+      });
+    } catch (err: any) {
+      return json({ ok: false, error: err.message }, 500);
+    }
+  }
 
   if (path === "/api/qc/report" && method === "POST") {
     const body = (await req.json().catch(() => null)) as

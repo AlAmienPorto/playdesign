@@ -427,6 +427,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return next;
       });
       setAllAudit((current) => [...data.activity, ...current.filter((event) => event.workspaceId !== wid)]);
+      if (data.leads && data.leads.length > 0) {
+        setAllLeads((current) => [...data.leads, ...current.filter((lead) => lead.workspaceId !== wid)]);
+      }
       setSyncState({ status: "live", lastSyncAt: Date.now() });
     } catch (error) {
       if (ticket !== syncTicket.current) return;

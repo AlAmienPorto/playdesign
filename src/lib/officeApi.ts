@@ -1,4 +1,4 @@
-import type { Priority, TaskStatus } from "../data/mock";
+import type { Priority, TaskStatus, LeadStatus } from "../data/mock";
 import {
   type ActorType,
   type ApprovalRecord,
@@ -248,10 +248,37 @@ interface ApiActivity {
   at: string;
 }
 
+export interface ApiLead {
+  id: string;
+  name: string;
+  company: string;
+  role: string;
+  email: string;
+  phone: string;
+  location: string;
+  status: LeadStatus;
+  source: string;
+  score: number;
+  value: number;
+  ownerId: string;
+  lastActivity: string;
+  tags: string[];
+  nextStep: string;
+  notes: string;
+  category?: string;
+  fullAddress?: string;
+  rating?: number;
+  whatsappVerified?: boolean;
+  whatsappLink?: string;
+  googleMapsUrl?: string;
+  confidenceScore?: number;
+}
+
 interface OfficeSnapshot {
   tasks: ApiTask[];
   runs: ApiRun[];
   activity: ApiActivity[];
+  leads?: ApiLead[];
 }
 
 const mapEvidence = (items: ApiEvidence[] | undefined): Evidence[] =>
@@ -357,6 +384,7 @@ export interface OfficeData {
   tasks: OfficeTask[];
   runs: OfficeRun[];
   activity: AuditEvent[];
+  leads: (ApiLead & { workspaceId: WorkspaceId })[];
 }
 
 export async function fetchOffice(workspaceId: WorkspaceId): Promise<OfficeData> {
@@ -365,6 +393,13 @@ export async function fetchOffice(workspaceId: WorkspaceId): Promise<OfficeData>
     tasks: (snapshot.tasks ?? []).map(mapTask),
     runs: (snapshot.runs ?? []).map(mapRun),
     activity: (snapshot.activity ?? []).map((event) => ({ ...mapActivity(event), workspaceId })),
+    leads: (snapshot.leads ?? []).map((lead) => ({
+      ...lead,
+      workspaceId,
+      status: (["new", "contacted", "qualified", "proposal", "negotiation", "won", "lost"].includes(lead.status)
+        ? lead.status
+        : "new") as any,
+    })),
   };
 }
 

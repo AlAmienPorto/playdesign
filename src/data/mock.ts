@@ -691,6 +691,13 @@ export interface Lead {
   tags: string[];
   nextStep: string;
   notes: string;
+  category?: string;
+  fullAddress?: string;
+  rating?: number;
+  whatsappVerified?: boolean;
+  whatsappLink?: string;
+  googleMapsUrl?: string;
+  confidenceScore?: number;
 }
 
 export const LEADS: Lead[] = [

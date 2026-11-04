@@ -45,6 +45,16 @@ const leadStatusStyles: Record<LeadStatus, { tone: "info" | "success" | "warning
 };
 
 function SourceLabel({ source }: { source: string }) {
+  if (source === "gmaps_scraper") {
+    return (
+      <span className="inline-flex items-center gap-1.5 font-medium text-success">
+        <span className="grid size-[22px] place-items-center rounded-[6px] bg-success-soft text-success">
+          <Phone size={11} />
+        </span>
+        <span className="hidden xl:inline">Google Maps WA</span>
+      </span>
+    );
+  }
   if (source === "Instagram" || source === "LinkedIn" || source === "Email" || source === "Web chat") {
     return (
       <span className="inline-flex items-center gap-1.5">
@@ -210,12 +220,23 @@ function LeadDrawer({ lead, onClose }: { lead: Lead; onClose: () => void }) {
         </div>
 
         <div className="mt-4 flex gap-2">
-          <a
-            href={`mailto:${lead.email}`}
-            className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-line text-[12px] font-medium text-ink transition-colors hover:bg-surface-2"
-          >
-            <Mail size={14} className="text-muted" /> Email
-          </a>
+          {lead.whatsappLink || lead.phone ? (
+            <a
+              href={lead.whatsappLink || `https://wa.me/${lead.phone.replace(/\D/g, '')}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-[10px] bg-emerald-600 text-[12px] font-medium text-white transition-colors hover:bg-emerald-700"
+            >
+              <Phone size={14} /> Chat WhatsApp
+            </a>
+          ) : (
+            <a
+              href={`mailto:${lead.email}`}
+              className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-line text-[12px] font-medium text-ink transition-colors hover:bg-surface-2"
+            >
+              <Mail size={14} className="text-muted" /> Email
+            </a>
+          )}
           <button
             onClick={followUp}
             disabled={queued !== null}
@@ -361,13 +382,31 @@ function LeadDrawer({ lead, onClose }: { lead: Lead; onClose: () => void }) {
 }
 
 export default function Leads() {
-  const { leads, addLead, workspace } = useStore();
+  const { leads, addLead, workspace, refresh } = useStore();
   const [filter, setFilter] = useState<LeadFilter>("all");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("score");
   const [source, setSource] = useState("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [scraping, setScraping] = useState(false);
+  const [scrapeNotice, setScrapeNotice] = useState<string | null>(null);
+
+  const runScraper = async () => {
+    if (scraping) return;
+    setScraping(true);
+    setScrapeNotice("Menyinkronkan daftar prospek terbaru dari database produksi...");
+    try {
+      await refresh();
+      setScrapeNotice("Prospek berhasil disinkronkan.");
+      setTimeout(() => setScrapeNotice(null), 4000);
+    } catch {
+      setScrapeNotice("Gagal menyinkronkan data.");
+      setTimeout(() => setScrapeNotice(null), 4000);
+    } finally {
+      setScraping(false);
+    }
+  };
 
   const sources = useMemo(() => Array.from(new Set(leads.map((lead) => lead.source))), [leads]);
 
@@ -402,14 +441,26 @@ export default function Leads() {
   return (
     <div>
       <PageHeader
-        eyebrow="Workspace"
-        title="Leads"
-        description={`Every contact in ${workspace.name}, with AI scores marked as estimates. Click a row to see the full picture.`}
+        eyebrow="Ruang Kerja"
+        title="Prospek & Leads"
+        description={`Direktori prospek di ${workspace.name}, termasuk hasil pemindaian Google Maps UMKM Jawa Tengah tanpa website.`}
       >
-        <Button variant="primary" onClick={() => setAddOpen(true)}>
-          <Plus size={15} /> Add lead
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" onClick={runScraper} disabled={scraping}>
+            <Sparkles size={15} className="text-emerald-500" /> {scraping ? "Menyinkronkan…" : "Scan WA Jateng"}
+          </Button>
+          <Button variant="primary" onClick={() => setAddOpen(true)}>
+            <Plus size={15} /> Tambah Prospek
+          </Button>
+        </div>
       </PageHeader>
+
+      {scrapeNotice && (
+        <div className="mt-3 flex items-center justify-between rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-2.5 text-[12px] text-emerald-400">
+          <span>{scrapeNotice}</span>
+          <button onClick={() => setScrapeNotice(null)} className="text-[11px] hover:underline">Tutup</button>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3.5 xl:grid-cols-4">
         {[
@@ -556,7 +607,19 @@ export default function Leads() {
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-[11.5px] text-ink">{moneyCompact(lead.value)}</td>
                     <td className="px-4 py-3">
-                      <div className="flex justify-end">
+                      <div className="flex items-center justify-end gap-2">
+                        {lead.whatsappLink && (
+                          <a
+                            href={lead.whatsappLink}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex size-7 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500 transition-colors hover:bg-emerald-500 hover:text-white"
+                            title="Chat langsung di WhatsApp"
+                          >
+                            <Phone size={12} />
+                          </a>
+                        )}
                         <Avatar name={owner.name} tone={owner.tone} size="xs" />
                       </div>
                     </td>
