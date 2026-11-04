@@ -6,7 +6,7 @@ import { probeToken, setOfficeToken } from '../lib/api';
  * Token divalidasi dulu ke API sebelum disimpan — kalau salah, halaman TIDAK
  * reload, cuma muncul pesan error, jadi token bisa langsung ditempel ulang.
  */
-export function TokenGate({ onReady }: { onReady: () => void }) {
+export function TokenGate({ onReady, notice }: { onReady: () => void; notice?: string }) {
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -60,6 +60,23 @@ export function TokenGate({ onReady }: { onReady: () => void }) {
           Workspace ini terhubung ke database produksi. Tempel token akses sekali — tersimpan
           hanya di perangkat ini, tidak pernah dikirim ke mana pun selain API-nya sendiri.
         </p>
+
+        {notice && (
+          <div
+            style={{
+              marginBottom: '16px',
+              padding: '10px 12px',
+              borderRadius: '8px',
+              fontSize: '12px',
+              lineHeight: 1.55,
+              color: 'var(--ink)',
+              background: 'var(--warn-soft, #fef3c7)',
+              border: '1px solid var(--warn, #f59e0b)',
+            }}
+          >
+            {notice}
+          </div>
+        )}
 
         <div className="field">
           <label className="field-label" htmlFor="access-token">

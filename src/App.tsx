@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { getOfficeToken } from './lib/api';
 import { TokenGate } from './components/TokenGate';
@@ -75,9 +75,39 @@ import {
 
 export default function App() {
   const [ready, setReady] = useState(() => Boolean(getOfficeToken()));
+  const [notice, setNotice] = useState('');
+
+  // Any 401 from the API clears the stored token; drop back to the gate with a
+  // reason instead of leaving the UI half-broken with raw error messages.
+  useEffect(() => {
+    const onCleared = () => {
+      setNotice(
+        'Token ditolak server — kemungkinan sudah dirotasi. Tempel token terbaru dari .dev.vars.',
+      );
+      setReady(false);
+    };
+    const onSet = () => {
+      setNotice('');
+      setReady(true);
+    };
+    window.addEventListener('pd-auth-cleared', onCleared);
+    window.addEventListener('pd-token-set', onSet);
+    return () => {
+      window.removeEventListener('pd-auth-cleared', onCleared);
+      window.removeEventListener('pd-token-set', onSet);
+    };
+  }, []);
 
   if (!ready) {
-    return <TokenGate onReady={() => setReady(true)} />;
+    return (
+      <TokenGate
+        notice={notice}
+        onReady={() => {
+          setNotice('');
+          setReady(true);
+        }}
+      />
+    );
   }
 
   return (

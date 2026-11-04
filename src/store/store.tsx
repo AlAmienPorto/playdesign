@@ -295,6 +295,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }));
       return { ok: true, count: mapped.length };
     } catch (error) {
+      if ((error as { status?: number } | null)?.status === 401) {
+        return {
+          ok: false,
+          count: 0,
+          error: 'Token ditolak server. Tempel token terbaru di layar akses.',
+        };
+      }
       const message = error instanceof Error ? error.message : 'Gagal menyinkronkan data dari D1.';
       return { ok: false, count: 0, error: message };
     }
