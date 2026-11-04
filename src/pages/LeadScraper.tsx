@@ -7,6 +7,7 @@ import {
   CheckCheck,
   CheckCircle2,
   Clock,
+  ExternalLink,
   Filter,
   Handshake,
   Instagram,
@@ -45,6 +46,28 @@ import {
   type ScrapeRequestRow,
   type ScrapeRequestStatus,
 } from '../lib/api';
+
+const SOURCE_LABEL: Record<string, string> = {
+  gmaps: 'GMaps',
+  instagram: 'Instagram',
+  website: 'Web',
+};
+
+const hostOf = (url?: string) => {
+  if (!url) return '';
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+};
+
+const mapsSearchUrl = (company: string, city?: string) =>
+  `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+    [company, city].filter(Boolean).join(' '),
+  )}`;
+
+const instagramUrl = (handle: string) => `https://instagram.com/${handle.replace(/^@/, '')}`;
 
 const sourceIcon = (source: RawLead['source']) => {
   switch (source) {
@@ -758,9 +781,24 @@ export function LeadScraperPage() {
                         </span>
                       </td>
                       <td>
-                        <span className="scraper-source">
-                          {sourceIcon(lead.source)} {lead.source}
-                        </span>
+                        {lead.sourceUrl ? (
+                          <a
+                            className="scraper-source scraper-source-link"
+                            href={lead.sourceUrl}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            title={`Buka sumber: ${lead.sourceUrl}`}
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            {sourceIcon(lead.source)}{' '}
+                            {SOURCE_LABEL[lead.sourceType ?? 'gmaps'] ?? lead.source}
+                            <ExternalLink size={11} />
+                          </a>
+                        ) : (
+                          <span className="scraper-source" title="Belum ada link sumber">
+                            {sourceIcon(lead.source)} {lead.source}
+                          </span>
+                        )}
                       </td>
                       <td className="scraper-location-col">
                         <span className="scraper-location">
@@ -912,7 +950,20 @@ export function LeadScraperPage() {
               </div>
               <div>
                 <span className="detail-label">Instagram</span>
-                <span className="detail-value">{activeLead.instagram ?? '—'}</span>
+                <span className="detail-value">
+                  {activeLead.instagram ? (
+                    <a
+                      className="detail-link"
+                      href={instagramUrl(activeLead.instagram)}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      {activeLead.instagram} <ExternalLink size={11} />
+                    </a>
+                  ) : (
+                    '—'
+                  )}
+                </span>
               </div>
               <div>
                 <span className="detail-label">Lokasi</span>
@@ -924,7 +975,21 @@ export function LeadScraperPage() {
               </div>
               <div>
                 <span className="detail-label">Sumber</span>
-                <span className="detail-value">{activeLead.source}</span>
+                <span className="detail-value">
+                  {activeLead.sourceUrl ? (
+                    <a
+                      className="detail-link"
+                      href={activeLead.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      title={activeLead.sourceUrl}
+                    >
+                      {hostOf(activeLead.sourceUrl)} <ExternalLink size={11} />
+                    </a>
+                  ) : (
+                    activeLead.source
+                  )}
+                </span>
               </div>
               {activeLead.category && (
                 <div>
@@ -952,19 +1017,55 @@ export function LeadScraperPage() {
                   </span>
                 </div>
               )}
-              {activeLead.googleMapsUrl && (
-                <div>
-                  <span className="detail-label">Google Maps</span>
+              <div className="detail-source-actions">
+                <span className="detail-label">Verifikasi data</span>
+                <div className="detail-inline">
+                  {activeLead.sourceUrl && (
+                    <a
+                      className="btn btn-ghost"
+                      href={activeLead.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      <ExternalLink size={13} /> Buka halaman sumber
+                    </a>
+                  )}
                   <a
-                    className="detail-value"
-                    href={activeLead.googleMapsUrl}
+                    className="btn btn-ghost"
+                    href={mapsSearchUrl(activeLead.company, activeLead.city)}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noreferrer noopener"
                   >
-                    Buka di Google Maps
+                    <MapPin size={13} /> Cek di Google Maps
                   </a>
+                  {activeLead.instagram ? (
+                    <a
+                      className="btn btn-ghost"
+                      href={instagramUrl(activeLead.instagram)}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      <Instagram size={13} /> Buka Instagram
+                    </a>
+                  ) : (
+                    <a
+                      className="btn btn-ghost"
+                      href={`https://www.google.com/search?q=${encodeURIComponent(
+                        `${activeLead.company} ${activeLead.city ?? ''} site:instagram.com`,
+                      )}`}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      <Instagram size={13} /> Cari Instagram
+                    </a>
+                  )}
                 </div>
-              )}
+                {activeLead.sourceUrl && (
+                  <span className="detail-hint" style={{ wordBreak: 'break-all' }}>
+                    {activeLead.sourceUrl}
+                  </span>
+                )}
+              </div>
             </div>
 
             {activeLead.fullAddress && (

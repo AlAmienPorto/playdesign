@@ -9089,6 +9089,48 @@ button.folder-row { cursor: pointer; }
   color: var(--muted);
 }
 
+.scraper-source-link {
+  text-decoration: none;
+  color: var(--brand-ink, #1d4ed8);
+  border-bottom: 1px dashed transparent;
+  cursor: pointer;
+}
+
+.scraper-source-link:hover {
+  border-bottom-color: currentColor;
+}
+
+.scraper-source-link svg:last-child {
+  color: currentColor;
+  opacity: 0.6;
+}
+
+.detail-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--brand-ink, #1d4ed8);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.detail-link:hover { text-decoration: underline; }
+
+.detail-source-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed var(--line, #e2e8f0);
+  border-radius: 10px;
+  background: var(--surface-2, #f8fafc);
+}
+
+.detail-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .scraper-contact {
   display: flex;
   flex-direction: column;

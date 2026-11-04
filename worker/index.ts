@@ -691,6 +691,9 @@ async function office(env: Env, req: Request) {
       whatsappVerified: row.whatsapp_verified === 1,
       whatsappLink: (row.whatsapp_link as string | null) ?? undefined,
       googleMapsUrl: (row.google_maps_url as string | null) ?? undefined,
+      sourceUrl: (row.source_url as string | null) ?? undefined,
+      sourceType: (row.source_type as string | null) ?? undefined,
+      instagram: (row.instagram as string | null) ?? undefined,
       confidenceScore: (row.confidence_score as number | null) ?? undefined,
     })),
     posts: posts.results.map((row) => ({

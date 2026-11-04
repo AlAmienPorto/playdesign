@@ -109,6 +109,80 @@ def extract_phone_and_wa(text: str):
     return None
 
 
+IG_RESERVED = {"p", "reel", "reels", "explore", "accounts", "stories", "tv", "share"}
+
+
+def extract_instagram(*texts: str):
+    """Pull an Instagram handle out of a URL or snippet. Returns '@handle' or None."""
+    pattern = re.compile(r"(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9_.]{2,30})", re.I)
+    for text in texts:
+        if not text:
+            continue
+        match = pattern.search(text)
+        if match:
+            handle = match.group(1).strip(".").lower()
+            if handle not in IG_RESERVED and len(handle) > 1:
+                return f"@{handle}"
+    return None
+
+
+def classify_source(url: str) -> str:
+    """Which kind of page did this lead come from? Drives the badge in the UI."""
+    low = (url or "").lower()
+    if any(
+        token in low
+        for token in (
+            "maps.google",
+            "google.com/maps",
+            "google.co.id/maps",
+            "goo.gl/maps",
+            "maps.app.goo.gl",
+        )
+    ):
+        return "gmaps"
+    if "instagram.com" in low:
+        return "instagram"
+    return "website"
+
+
+
+GENERIC_TOKENS = {
+    "catering", "konveksi", "kaos", "batik", "laundry", "bengkel", "toko", "jasa",
+    "pabrik", "distributor", "umkm", "indonesia", "jawa", "tengah", "harian",
+    "murah", "terdekat", "sablon", "percetakan", "mebel", "kerupuk", "sembako",
+    "kelontong", "pakan", "ternak", "las", "motor", "resmi", "official", "online",
+    "semarang", "surakarta", "solo", "tegal", "magelang", "pekalongan", "klaten",
+    "boyolali", "cilacap", "pati", "kudus", "rembang",
+}
+
+
+def _tokens(text: str):
+    return {t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(t) >= 4}
+
+
+def find_instagram(company: str, city: str):
+    """Look for an IG profile whose name shares a distinctive word with the company.
+
+    Conservative on purpose: attaching the wrong Instagram account would make the
+    lead less trustworthy, not more. Needs a non-generic word to match.
+    """
+    distinctive = _tokens(company) - GENERIC_TOKENS
+    if not distinctive:
+        return None
+    items = search_leads_web(f'"{company}" {city} instagram', limit=4)
+    for item in items:
+        url = item.get("url") or ""
+        if "instagram.com" not in url:
+            continue
+        handle = extract_instagram(url)
+        if not handle:
+            continue
+        haystack = _tokens(f"{item.get('title', '')} {handle}") - GENERIC_TOKENS
+        if haystack & distinctive:
+            return handle
+    return None
+
+
 def scrape_one(city: str, keyword: str, max_leads: int = 10):
     """Scrape a single (city, keyword) pair. Returns deduplicated lead dicts."""
     city = (city or "").strip()
@@ -130,6 +204,10 @@ def scrape_one(city: str, keyword: str, max_leads: int = 10):
         if any(ext in url for ext in [".co.id", ".com/about", ".com/company"]):
             continue
 
+        # A lead without a source page cannot be verified, so it is not a lead.
+        if not url.startswith("http"):
+            continue
+
         phone = extract_phone_and_wa(f"{title} {snippet}")
         if not phone:
             continue
@@ -141,6 +219,9 @@ def scrape_one(city: str, keyword: str, max_leads: int = 10):
         if any(lead["phone"] == phone for lead in found):
             continue
 
+        source_type = classify_source(url)
+        instagram = extract_instagram(url, snippet)
+
         found.append(
             {
                 "name": company_name,
@@ -149,13 +230,24 @@ def scrape_one(city: str, keyword: str, max_leads: int = 10):
                 "category": keyword,
                 "fullAddress": f"{city}, Jawa Tengah, Indonesia",
                 "phone": phone,
-                "rating": 4.5,
-                "googleMapsUrl": url or f"https://maps.google.com/?q={city}+{keyword}",
+                "sourceUrl": url,
+                "sourceType": source_type,
+                "googleMapsUrl": url if source_type == "gmaps" else None,
+                "instagram": instagram,
             }
         )
-        print(f"  + {company_name} (WA +{phone})")
+        print(f"  + {company_name} (WA +{phone}) <- {source_type}: {url[:70]}")
         if len(found) >= max_leads:
             break
+
+    # Best-effort Instagram profile for the first few leads (verification aid).
+    for lead in found[:3]:
+        if lead.get("instagram"):
+            continue
+        handle = find_instagram(lead["company"], city)
+        if handle:
+            lead["instagram"] = handle
+            print(f"  ~ IG {handle} untuk {lead['company']}")
 
     return found
 

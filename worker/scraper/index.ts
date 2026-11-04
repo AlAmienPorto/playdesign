@@ -23,6 +23,9 @@ export interface ScrapedLeadInput {
   phone: string;
   rating?: number;
   googleMapsUrl?: string;
+  sourceUrl?: string;
+  sourceType?: 'gmaps' | 'instagram' | 'website';
+  instagram?: string;
 }
 
 export async function insertScrapedLeads(
@@ -50,6 +53,9 @@ export async function insertScrapedLeads(
     const fullAddress = escapeSql(item.fullAddress || location);
     const rating = item.rating ? Number(item.rating) : 'NULL';
     const mapsUrl = escapeSql(item.googleMapsUrl || '');
+    const sourceUrl = escapeSql(item.sourceUrl || item.googleMapsUrl || '');
+    const sourceType = escapeSql(item.sourceType || 'gmaps');
+    const instagram = item.instagram ? `'${escapeSql(item.instagram)}'` : 'NULL';
     const confidence = calculateConfidenceScore(item.rating ?? null, Boolean(item.fullAddress));
 
     // Note: status 'new', score estimated based on confidence, source 'gmaps_scraper'
@@ -58,7 +64,8 @@ export async function insertScrapedLeads(
         id, workspace_id, name, company, company_name, city, role, email, phone, phone_number, location, 
         status, source, score, value, owner_id, last_activity, tags, 
         next_step, notes, category, full_address, rating, whatsapp_verified, 
-        whatsapp_link, google_maps_url, confidence_score, created_at, updated_at
+        whatsapp_link, google_maps_url, confidence_score, source_url, source_type, instagram,
+        created_at, updated_at
       ) VALUES (
         '${leadId}', 
         'playdesign', 
@@ -87,6 +94,9 @@ export async function insertScrapedLeads(
         '${waLink}', 
         '${mapsUrl}', 
         ${confidence},
+        '${sourceUrl}',
+        '${sourceType}',
+        ${instagram},
         CURRENT_TIMESTAMP,
         CURRENT_TIMESTAMP
       )

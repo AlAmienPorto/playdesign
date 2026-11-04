@@ -53,6 +53,9 @@ export interface ApiLead {
   whatsappVerified?: boolean;
   whatsappLink?: string;
   googleMapsUrl?: string;
+  sourceUrl?: string;
+  sourceType?: 'gmaps' | 'instagram' | 'website' | string;
+  instagram?: string;
   confidenceScore?: number;
 }
 

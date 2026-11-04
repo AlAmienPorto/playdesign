@@ -245,7 +245,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         id: lead.id,
         name: lead.name || lead.company || 'Tanpa nama',
         company: lead.company || lead.name || 'Tanpa nama',
-        source: 'Google Maps',
+        source:
+          lead.sourceType === 'instagram'
+            ? 'Instagram'
+            : lead.sourceType === 'website'
+              ? 'Direktori'
+              : 'Google Maps',
         phone: lead.phone,
         email: lead.email && !lead.email.endsWith('@wa.leads') ? lead.email : undefined,
         city: lead.location,
@@ -264,6 +269,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         whatsappVerified: lead.whatsappVerified,
         whatsappLink: lead.whatsappLink,
         googleMapsUrl: lead.googleMapsUrl,
+        sourceUrl: lead.sourceUrl ?? lead.googleMapsUrl,
+        sourceType: lead.sourceType === 'instagram' || lead.sourceType === 'website' ? lead.sourceType : 'gmaps',
+        instagram: lead.instagram,
         confidenceScore: lead.confidenceScore,
       }));
       setDb((prev) => ({
@@ -873,7 +881,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         raw.fullAddress ? ` Alamat: ${raw.fullAddress}.` : ''
       }${raw.rating != null ? ` Rating GMaps: ${raw.rating}/5.` : ''}${
         raw.email ? ` Email: ${raw.email}.` : ''
-      }`,
+      }${raw.sourceUrl ? ` Sumber: ${raw.sourceUrl}.` : ''}`,
     };
     setDb((prev) => {
       const next = {

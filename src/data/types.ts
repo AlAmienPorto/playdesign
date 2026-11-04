@@ -364,6 +364,8 @@ export interface RawLead {
   whatsappVerified?: boolean;
   whatsappLink?: string;
   googleMapsUrl?: string;
+  sourceUrl?: string;
+  sourceType?: 'gmaps' | 'instagram' | 'website';
   confidenceScore?: number;
 }
 
