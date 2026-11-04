@@ -17,6 +17,8 @@ export interface Env {
   ASSETS: Fetcher;
   AI: Ai;
   API_TOKEN?: string;
+  /** Password manusia untuk login di UI. Disimpan sebagai Worker secret. */
+  ACCESS_PASSWORD?: string;
   /**
    * Set to "1" hanya setelah Cloudflare Access aktif untuk domain ini.
    * Saat aktif, edge Access sudah memvalidasi identitas, jadi header
@@ -153,7 +155,115 @@ const tokenMatches = (provided: string, expected: string) => {
   return diff === 0;
 };
 
-function assertToken(req: Request, env: Env) {
+/* ------------------------------------------------------------------ */
+/* Session tokens (password login)                                     */
+/* ------------------------------------------------------------------ */
+
+const SESSION_PREFIX = "s1";
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const encoder = new TextEncoder();
+
+const b64url = (buffer: ArrayBuffer) =>
+  btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+async function hmac(secret: string, data: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return b64url(await crypto.subtle.sign("HMAC", key, encoder.encode(data)));
+}
+
+/**
+ * Signing key derived from the two secrets. Changing the password therefore
+ * invalidates every existing session, which is the behaviour we want.
+ */
+async function sessionKey(env: Env): Promise<string> {
+  const password = env.ACCESS_PASSWORD?.trim() ?? "";
+  const token = env.API_TOKEN?.trim() ?? "";
+  return b64url(await crypto.subtle.digest("SHA-256", encoder.encode(`pd-session|${password}|${token}`)));
+}
+
+async function issueSession(env: Env): Promise<{ session: string; expiresAt: number }> {
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  const payload = `${SESSION_PREFIX}.${expiresAt}`;
+  const signature = await hmac(await sessionKey(env), payload);
+  return { session: `${payload}.${signature}`, expiresAt };
+}
+
+async function verifySession(env: Env, value: string): Promise<boolean> {
+  const parts = value.split(".");
+  if (parts.length !== 3 || parts[0] !== SESSION_PREFIX) return false;
+  const expiresAt = Number(parts[1]);
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return false;
+  const expected = await hmac(await sessionKey(env), `${SESSION_PREFIX}.${expiresAt}`);
+  return tokenMatches(parts[2], expected);
+}
+
+/**
+ * Brute-force throttle in D1 (shared across isolates): 10 wrong passwords per
+ * IP per 5 minutes. In-memory counters are useless here because Cloudflare
+ * spreads requests over many isolates.
+ */
+async function throttleLogin(env: Env, ip: string) {
+  const now = Date.now();
+  const row = await env.DB.prepare("SELECT count, reset_at FROM login_attempts WHERE ip = ?")
+    .bind(ip)
+    .first<{ count: number; reset_at: string }>();
+
+  if (!row || new Date(row.reset_at).getTime() < now) {
+    await env.DB.prepare(
+      "INSERT INTO login_attempts (ip, count, reset_at) VALUES (?, 1, ?) " +
+        "ON CONFLICT(ip) DO UPDATE SET count = 1, reset_at = excluded.reset_at",
+    )
+      .bind(ip, new Date(now + 5 * 60 * 1000).toISOString())
+      .run();
+    return;
+  }
+
+  if (row.count >= 10) {
+    fail(429, "too_many_attempts", "Terlalu banyak percobaan. Tunggu 5 menit lalu coba lagi.");
+  }
+
+  await env.DB.prepare("UPDATE login_attempts SET count = count + 1 WHERE ip = ?").bind(ip).run();
+}
+
+async function clearLoginAttempts(env: Env, ip: string) {
+  await env.DB.prepare("DELETE FROM login_attempts WHERE ip = ?").bind(ip).run();
+}
+
+async function login(req: Request, env: Env): Promise<Response> {
+  const expected = env.ACCESS_PASSWORD?.trim();
+  if (!expected) {
+    fail(
+      503,
+      "auth_not_configured",
+      "Password belum diset. Jalankan: npx wrangler secret put ACCESS_PASSWORD",
+    );
+  }
+  const ip = req.headers.get("cf-connecting-ip") ?? "unknown";
+  await throttleLogin(env, ip);
+
+  const body = (await req.json().catch(() => null)) as { password?: string } | null;
+  const password = (body?.password ?? "").trim();
+  if (!password) fail(400, "validation_failed", "Password wajib diisi.");
+
+  if (!tokenMatches(password, expected)) {
+    fail(401, "unauthorized", "Password salah.");
+  }
+
+  await clearLoginAttempts(env, ip);
+  const { session, expiresAt } = await issueSession(env);
+  return json({ ok: true, session, expiresAt });
+}
+
+async function assertToken(req: Request, env: Env) {
   // Jalur Cloudflare Access: edge sudah menolak request tanpa sesi valid, dan
   // header ini hanya bisa muncul kalau Access aktif untuk domain ini
   // (workers.dev dimatikan). Digerbangi env flag supaya tidak jadi celah
@@ -167,9 +277,14 @@ function assertToken(req: Request, env: Env) {
   }
   const header = req.headers.get("authorization") ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
-  if (!match || !tokenMatches((match[1] ?? "").trim(), expected)) {
+  const provided = (match?.[1] ?? "").trim();
+  if (!provided) {
     fail(401, "unauthorized", "A valid bearer token is required.");
   }
+  // Mesin/script pakai API_TOKEN, manusia pakai sesi dari login password.
+  if (tokenMatches(provided, expected)) return;
+  if (await verifySession(env, provided)) return;
+  fail(401, "unauthorized", "A valid bearer token is required.");
 }
 
 const actorTypeFor = (role: ActorRole): ActorType => role;
@@ -1494,7 +1609,9 @@ async function route(req: Request, env: Env): Promise<Response> {
     return env.ASSETS.fetch(req);
   }
 
-  if (path !== "/api/health") assertToken(req, env);
+  if (path === "/api/auth/login" && method === "POST") return login(req, env);
+
+  if (path !== "/api/health") await assertToken(req, env);
 
   if (path === "/api/health" && method === "GET") return health(env);
 

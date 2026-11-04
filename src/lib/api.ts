@@ -30,6 +30,36 @@ export const clearOfficeToken = () => {
   }
 };
 
+const SESSION_KEY = 'pd_office_session';
+
+export const getOfficeSession = (): string => {
+  try {
+    return localStorage.getItem(SESSION_KEY) ?? '';
+  } catch {
+    return '';
+  }
+};
+
+export const setOfficeSession = (value: string) => {
+  try {
+    localStorage.setItem(SESSION_KEY, value);
+  } catch {
+    /* storage blocked */
+  }
+};
+
+/** What we send as the bearer: a login session first, then a raw API token. */
+export const getCredential = (): string => getOfficeSession() || getOfficeToken();
+
+export const clearCredential = () => {
+  clearOfficeToken();
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    /* ignore */
+  }
+};
+
 export interface ApiLead {
   id: string;
   name: string;
@@ -79,19 +109,19 @@ export class ApiError extends Error {
 }
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
-  const token = getOfficeToken();
+  const credential = getCredential();
   const response = await fetch(path, {
     ...init,
     headers: {
       'content-type': 'application/json',
       'x-actor-id': 'ja',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(credential ? { authorization: `Bearer ${credential}` } : {}),
       ...(init?.headers ?? {}),
     },
   });
 
   if (response.status === 401) {
-    clearOfficeToken();
+    clearCredential();
     if (typeof window !== 'undefined') window.dispatchEvent(new Event('pd-auth-cleared'));
   }
 
@@ -192,6 +222,26 @@ export async function saveOutreach(input: {
     method: 'POST',
     body: JSON.stringify({ ...input, workspace: 'playdesign' }),
   });
+}
+
+export async function loginWithPassword(password: string): Promise<void> {
+  const response = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  const payload = (await response.json().catch(() => null)) as
+    | { session?: string; error?: { message?: string; code?: string } }
+    | null;
+  if (!response.ok || !payload?.session) {
+    throw new ApiError(
+      payload?.error?.message ?? 'Password ditolak.',
+      response.status,
+      payload?.error?.code ?? 'login_failed',
+    );
+  }
+  clearOfficeToken();
+  setOfficeSession(payload.session);
 }
 
 export async function probeToken(token: string): Promise<boolean> {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
-import { getOfficeToken } from './lib/api';
+import { getCredential } from './lib/api';
 import { TokenGate } from './components/TokenGate';
 import { StoreProvider } from './store/store';
 import { Shell } from './components/Shell';
@@ -74,16 +74,14 @@ import {
 } from './pages/System';
 
 export default function App() {
-  const [ready, setReady] = useState(() => Boolean(getOfficeToken()));
+  const [ready, setReady] = useState(() => Boolean(getCredential()));
   const [notice, setNotice] = useState('');
 
   // Any 401 from the API clears the stored token; drop back to the gate with a
   // reason instead of leaving the UI half-broken with raw error messages.
   useEffect(() => {
     const onCleared = () => {
-      setNotice(
-        'Token ditolak server — kemungkinan sudah dirotasi. Tempel token terbaru dari .dev.vars.',
-      );
+      setNotice('Sesi berakhir — atau password/token sudah diganti. Silakan masuk lagi.');
       setReady(false);
     };
     const onSet = () => {

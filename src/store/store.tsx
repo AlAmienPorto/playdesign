@@ -33,7 +33,7 @@ import type {
 import { SEED } from '../data/seed';
 import { hasPermission } from '../lib/permissions';
 import { dayOffset, uid } from '../lib/utils';
-import { fetchOffice, fetchOutreach, getOfficeToken, saveOutreach, type OutreachStatus } from '../lib/api';
+import { fetchOffice, fetchOutreach, getCredential, saveOutreach, type OutreachStatus } from '../lib/api';
 
 const STORE_KEY = 'playdesign.os.v2';
 const THEME_KEY = 'playdesign.theme';
@@ -308,7 +308,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (getOfficeToken()) {
+    if (getCredential()) {
       void syncFromApi();
     }
     const onTokenSet = () => {

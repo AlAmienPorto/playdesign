@@ -1,20 +1,27 @@
 import { useState } from 'react';
-import { probeToken, setOfficeToken } from '../lib/api';
+import { loginWithPassword, probeToken, setOfficeToken } from '../lib/api';
 
 /**
- * Layar sekali-pakai untuk menempelkan token akses.
- * Token divalidasi dulu ke API sebelum disimpan — kalau salah, halaman TIDAK
- * reload, cuma muncul pesan error, jadi token bisa langsung ditempel ulang.
+ * Layar masuk. Dua jalur:
+ * - password  → minta sesi bertanda tangan ke Worker (dipakai sehari-hari)
+ * - API token → tempel token 64 hex (untuk mesin/script atau kalau password belum diset)
+ * Kredensial divalidasi dulu ke API sebelum disimpan — kalau salah, halaman
+ * TIDAK reload, cuma muncul pesan error, jadi bisa langsung coba lagi.
  */
 export function TokenGate({ onReady, notice }: { onReady: () => void; notice?: string }) {
+  const [mode, setMode] = useState<'password' | 'token'>('password');
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    const token = value.replace(/\s+/g, '');
-    if (token.length < 16) {
+    const secret = value.trim();
+    if (!secret) {
+      setError(mode === 'password' ? 'Password belum diisi.' : 'Token belum diisi.');
+      return;
+    }
+    if (mode === 'token' && secret.replace(/\s+/g, '').length < 16) {
       setError('Token terlalu pendek — tempel 64 karakter dari server.');
       return;
     }
@@ -22,16 +29,21 @@ export function TokenGate({ onReady, notice }: { onReady: () => void; notice?: s
     setBusy(true);
     setError('');
     try {
-      const ok = await probeToken(token);
-      if (!ok) {
-        setError('Token ditolak. Periksa lagi — pastikan tidak ada karakter terpotong.');
-        return;
+      if (mode === 'password') {
+        await loginWithPassword(secret);
+      } else {
+        const ok = await probeToken(secret.replace(/\s+/g, ''));
+        if (!ok) {
+          setError('Token ditolak. Periksa lagi — pastikan tidak ada karakter terpotong.');
+          return;
+        }
+        setOfficeToken(secret);
       }
-      setOfficeToken(token);
       window.dispatchEvent(new Event('pd-token-set'));
       onReady();
-    } catch {
-      setError('Tidak bisa menghubungi server. Periksa koneksi lalu coba lagi.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '';
+      setError(message || 'Tidak bisa menghubungi server. Periksa koneksi lalu coba lagi.');
     } finally {
       setBusy(false);
     }
@@ -57,8 +69,9 @@ export function TokenGate({ onReady, notice }: { onReady: () => void; notice?: s
           Playdesign Office CRM
         </div>
         <p style={{ marginBottom: '20px', fontSize: '12px', lineHeight: 1.6, color: 'var(--muted)' }}>
-          Workspace ini terhubung ke database produksi. Tempel token akses sekali — tersimpan
-          hanya di perangkat ini, tidak pernah dikirim ke mana pun selain API-nya sendiri.
+          {mode === 'password'
+            ? 'Masuk dengan password workspace. Sesi berlaku 30 hari di perangkat ini.'
+            : 'Tempel API token 64 karakter. Untuk mesin/script, atau kalau password belum diset.'}
         </p>
 
         {notice && (
@@ -79,16 +92,16 @@ export function TokenGate({ onReady, notice }: { onReady: () => void; notice?: s
         )}
 
         <div className="field">
-          <label className="field-label" htmlFor="access-token">
-            Access token
+          <label className="field-label" htmlFor="access-secret">
+            {mode === 'password' ? 'Password' : 'Access token'}
           </label>
           <input
-            id="access-token"
+            id="access-secret"
             className="input"
             type="password"
-            autoComplete="off"
+            autoComplete={mode === 'password' ? 'current-password' : 'off'}
             spellCheck={false}
-            placeholder="64 karakter hex"
+            placeholder={mode === 'password' ? 'password workspace' : '64 karakter hex'}
             value={value}
             disabled={busy}
             onChange={(event) => {
@@ -102,8 +115,26 @@ export function TokenGate({ onReady, notice }: { onReady: () => void; notice?: s
           <p style={{ marginTop: '8px', fontSize: '12px', color: 'var(--danger)' }}>{error}</p>
         )}
 
-        <button className="btn btn-primary" type="submit" disabled={busy} style={{ width: '100%', marginTop: '16px' }}>
+        <button
+          className="btn btn-primary"
+          type="submit"
+          disabled={busy}
+          style={{ width: '100%', marginTop: '16px' }}
+        >
           {busy ? 'Memeriksa…' : 'Masuk'}
+        </button>
+
+        <button
+          type="button"
+          className="btn btn-ghost"
+          style={{ width: '100%', marginTop: '8px', fontSize: '12px' }}
+          onClick={() => {
+            setMode(mode === 'password' ? 'token' : 'password');
+            setValue('');
+            setError('');
+          }}
+        >
+          {mode === 'password' ? 'Masuk pakai API token' : 'Kembali ke password'}
         </button>
       </form>
     </div>
