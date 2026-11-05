@@ -59,6 +59,8 @@ export function VideoComposer({
   const [revisingId, setRevisingId] = useState<string | null>(null);
 
   const patch = (next: Partial<VideoSpec>) => setSpec((current) => normalizeSpec({ ...current, ...next }, current.render.aspect));
+  const patchScenes = (updater: (scenes: VideoSpec['scenes']) => VideoSpec['scenes']) =>
+    setSpec((current) => normalizeSpec({ ...current, scenes: updater(current.scenes) }, current.render.aspect));
   const patchStyle = (next: Partial<VideoSpec['style']>) => patch({ style: { ...spec.style, ...next } });
   const patchAudio = (next: Partial<VideoSpec['audio']>) => patch({ audio: { ...spec.audio, ...next } });
   const patchRender = (next: Partial<VideoSpec['render']>) => patch({ render: { ...spec.render, ...next } });
@@ -103,7 +105,7 @@ export function VideoComposer({
         sceneIndex: index,
         sceneCount: spec.scenes.length,
       });
-      patch({ scenes: replaceScene(spec.scenes, scene.id, next) });
+      patchScenes((scenes) => replaceScene(scenes, scene.id, next));
       setInstructions((current) => ({ ...current, [scene.id]: '' }));
       onToast(`Scene ${index + 1} direvisi. Scene lain tidak berubah.`, 'success');
     } catch (err) {
@@ -578,6 +580,7 @@ export function VideoComposer({
                 <div className="scene-revise">
                   <textarea
                     className="input scene-revise-input"
+                    aria-label={`Instruksi revisi untuk scene ${index + 1}`}
                     rows={2}
                     maxLength={600}
                     value={instructions[scene.id] ?? ''}

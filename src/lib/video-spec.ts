@@ -106,7 +106,7 @@ export interface VideoRender {
 export interface VideoGeneration {
   provider: 'none' | 'replicate';
   enabled: boolean;
-  mode: 'text-to-video';
+  mode: 'text-to-video' | 'image-to-video';
   model?: string;
 }
 
@@ -329,7 +329,7 @@ export function defaultSpec(partial: Partial<VideoSpec> = {}): VideoSpec {
     generation: {
       provider: partial.generation?.provider ?? 'none',
       enabled: partial.generation?.enabled ?? false,
-      mode: 'text-to-video',
+      mode: partial.generation?.mode === 'image-to-video' ? 'image-to-video' : 'text-to-video',
       model: partial.generation?.model?.slice(0, 200),
     },
     audio: {
@@ -444,7 +444,7 @@ export function normalizeSpec(raw: unknown, fallbackAspect: VideoRender['aspect'
     generation: {
       provider: pick(generationRaw.provider, GENERATION_PROVIDERS, 'none'),
       enabled: bool(generationRaw.enabled, false),
-      mode: 'text-to-video',
+      mode: pick(generationRaw.mode, ['text-to-video', 'image-to-video'] as const, 'text-to-video'),
       model: str(generationRaw.model).slice(0, 200) || undefined,
     },
     audio: {

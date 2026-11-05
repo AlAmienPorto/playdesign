@@ -79,15 +79,44 @@ export function extractSceneRevision(response: unknown): unknown {
   if (typeof response !== 'string') throw new Error('Respons AI tidak mengandung JSON yang valid.');
 
   const trimmed = response.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  const source = fenced?.[1] ?? trimmed;
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [trimmed, fenced?.[1]?.trim(), firstBalancedObject(trimmed)]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
 
-  try {
-    return objectRecord(JSON.parse(source));
-  } catch (error) {
-    if (error instanceof Error && error.message === 'Respons AI harus berupa objek JSON.') throw error;
-    throw new Error('Respons AI tidak mengandung JSON yang valid.');
+  for (const source of candidates) {
+    try {
+      return objectRecord(JSON.parse(source));
+    } catch {
+      continue;
+    }
   }
+  throw new Error('Respons AI tidak mengandung JSON yang valid.');
+}
+
+/** Ambil objek JSON pertama yang kurawalnya seimbang, mengabaikan kurawal di dalam string. */
+function firstBalancedObject(text: string): string | null {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{') depth += 1;
+    else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return null;
 }
 
 export function sanitizeSceneRevision(current: VideoScene, candidate: unknown): VideoScene {
@@ -96,7 +125,7 @@ export function sanitizeSceneRevision(current: VideoScene, candidate: unknown): 
     ? input.media as Record<string, unknown>
     : {};
 
-  const allowed = {
+  const allowed: Record<string, unknown> = {
     id: current.id,
     kind: input.kind,
     durationSec: input.durationSec,
@@ -104,12 +133,14 @@ export function sanitizeSceneRevision(current: VideoScene, candidate: unknown): 
     body: input.body,
     items: input.items,
     transitionIn: input.transitionIn,
-    media: {
-      refId: current.media?.refId,
+  };
+  if (current.media) {
+    allowed.media = {
+      refId: current.media.refId,
       fit: media.fit,
       motion: media.motion,
-    },
-  };
+    };
+  }
 
   return normalizeScene(allowed, current);
 }

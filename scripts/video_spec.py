@@ -162,7 +162,7 @@ def normalize(raw: Any) -> dict[str, Any] | None:
         "generation": {
             "provider": _pick(generation_raw.get("provider"), {"none", "replicate"}, "none"),
             "enabled": generation_raw.get("enabled") is True,
-            "mode": "text-to-video",
+            "mode": _pick(generation_raw.get("mode"), {"text-to-video", "image-to-video"}, "text-to-video"),
             "model": (_text(generation_raw.get("model"))[:200] or None),
         },
         "audio": {

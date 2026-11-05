@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { defaultScene, replaceScene } from './video-spec';
+import { defaultScene, normalizeSpec, replaceScene } from './video-spec';
 
 test('replaceScene hanya mengganti scene dengan id yang sama', () => {
   const first = defaultScene({ kind: 'title', title: 'Lama' });
@@ -33,4 +33,15 @@ test('replaceScene tidak menambah scene saat id tidak ditemukan', () => {
 
   assert.equal(result.length, 1);
   assert.equal(result[0].title, scene.title);
+});
+
+test('normalizeSpec mempertahankan mode image-to-video', () => {
+  const spec = normalizeSpec({ generation: { provider: 'replicate', enabled: true, mode: 'image-to-video' } } as any);
+  assert.equal(spec.generation.mode, 'image-to-video');
+  assert.equal(spec.generation.enabled, true);
+});
+
+test('normalizeSpec memaksa mode tak dikenal kembali ke text-to-video', () => {
+  const spec = normalizeSpec({ generation: { provider: 'none', enabled: false, mode: 'video-ajaib' } } as any);
+  assert.equal(spec.generation.mode, 'text-to-video');
 });

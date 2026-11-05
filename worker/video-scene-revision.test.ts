@@ -132,7 +132,48 @@ test('sceneRevisionChanged false ketika AI mengembalikan scene yang sama', () =>
 });
 
 test('sceneRevisionChanged mendeteksi perubahan items dan media', () => {
-  const before = normalizeScene({ id: 'sc-1', kind: 'list', durationSec: 4, title: 'Lama', items: ['a'] });
-  assert.equal(sceneRevisionChanged(before, sanitizeSceneRevision(before, { items: ['a', 'b'] })), true);
-  assert.equal(sceneRevisionChanged(before, sanitizeSceneRevision(before, { media: { motion: 'parallax' } })), true);
+  const list = normalizeScene({ id: 'sc-1', kind: 'list', durationSec: 4, title: 'Lama', items: ['a'] });
+  assert.equal(sceneRevisionChanged(list, sanitizeSceneRevision(list, { items: ['a', 'b'] })), true);
+
+  const image = normalizeScene({ id: 'sc-2', kind: 'image', durationSec: 4, media: { refId: 'ref-1', motion: 'none' } });
+  assert.equal(sceneRevisionChanged(image, sanitizeSceneRevision(image, { media: { motion: 'parallax' } })), true);
+});
+
+test('extractSceneRevision menerima fenced JSON dengan teks pengantar', () => {
+  const raw = 'Berikut revisinya:\n```json\n{"title":"Promo Hari Ini"}\n```\nSemoga membantu.';
+  assert.deepEqual(extractSceneRevision(raw), { title: 'Promo Hari Ini' });
+});
+
+test('extractSceneRevision menerima JSON mentah setelah teks pengantar', () => {
+  const raw = 'Revisi scene: {"title":"Promo Hari Ini","body":"Isi baru"} selesai.';
+  assert.deepEqual(extractSceneRevision(raw), { title: 'Promo Hari Ini', body: 'Isi baru' });
+});
+
+test('extractSceneRevision menolak teks tanpa objek JSON', () => {
+  assert.throws(() => extractSceneRevision('Maaf, saya tidak bisa membantu.'), /tidak mengandung JSON/);
+});
+
+test('sanitizeSceneRevision tidak menambah media pada scene teks tanpa media', () => {
+  const before = normalizeScene({ id: 'sc-teks', kind: 'statement', durationSec: 3, title: 'Lama' });
+  const after = sanitizeSceneRevision(before, { title: 'Baru', media: { fit: 'contain' } });
+  assert.equal(after.media, undefined);
+});
+
+test('sanitizeSceneRevision mempertahankan refId dan hanya mengubah fit/motion', () => {
+  const before = normalizeScene({ id: 'sc-img', kind: 'image', durationSec: 3, media: { refId: 'ref-1', fit: 'cover', motion: 'kenburns' } });
+  const after = sanitizeSceneRevision(before, { media: { refId: 'ref-palsu', fit: 'contain', motion: 'parallax' } });
+  assert.equal(after.media?.refId, 'ref-1');
+  assert.equal(after.media?.fit, 'contain');
+  assert.equal(after.media?.motion, 'parallax');
+});
+
+test('validateSceneRevisionInput membuang items bukan array dan context berbentuk array', () => {
+  const input = validateSceneRevisionInput({
+    workspace: 'playdesign',
+    instruction: 'ubah judul',
+    scene: { id: 'sc-1', kind: 'list', durationSec: 4, title: 'Lama', items: 'bukan array' },
+    context: ['bukan', 'objek'],
+  });
+  assert.deepEqual(input.scene.items, []);
+  assert.deepEqual(input.context, { prompt: '', style: {}, sceneIndex: 0, sceneCount: 1 });
 });

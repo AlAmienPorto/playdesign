@@ -28,7 +28,7 @@ dashboard baru.
                 "durationSec": 4, "title": "…", "body": "…",
                 "items": ["…"], "transitionIn": "fade", "media": {…} } ],
   "references": [ { "role": "style|motion|subject|music|sfx", "url": "…", "strength": 0.6 } ],
-  "generation": { "provider": "none|replicate", "enabled": false, "mode": "text-to-video" },
+  "generation": { "provider": "none|replicate", "enabled": false, "mode": "text-to-video|image-to-video" },
   "audio": { "script": "…", "voice": { "enabled": true, "voiceId": "id-ID-GadisNeural", "rate": 0, "pitch": 0 },
              "music": { "enabled": false, "volume": 18 } },
   "subtitle": { "enabled": true, "position": "bottom|center|top", "fontSizePct": 4.2, "boxed": true },
@@ -131,6 +131,9 @@ per scene. Hanya scene itu yang diganti (`replaceScene()`), scene lain memakai o
   dengan pesan `Provider footage generatif belum dikonfigurasi.`; tidak ada klip
   placeholder dan tidak ada tombol generate di UI. Remotion hanya menyusun
   footage/teks/audio yang diberikan.
+- Endpoint revisi scene belum punya kuota per workspace; satu sesi login bisa memanggil
+  model 70B berulang. Batas panjang instruksi (600 karakter) dan `max_tokens: 500` menahan
+  biaya per panggilan, tetapi belum ada rate limit. Diterima sebagai risiko fase ini.
 - Versioning spec belum ada; mengubah spec hanya bisa saat job masih `queued`
   (`spec_locked` setelah rendering). Revisi scene mengubah draft di editor, bukan job
   yang sudah dirender.
