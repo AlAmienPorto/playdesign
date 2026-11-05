@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CloudUpload, ExternalLink, Film, RefreshCw, Sparkles } from 'lucide-react';
+import { CloudUpload, ExternalLink, Film, Play, RefreshCw, Sparkles, X } from 'lucide-react';
 import { Badge, Card, EmptyState, Field, Fig, PageHead } from '../components/ui';
 import {
   createVideoJob,
@@ -10,6 +10,7 @@ import {
   type VideoTemplate,
 } from '../lib/api';
 import { useStore } from '../store/store';
+import './VideoStudio.css';
 
 const STATUS_TONE: Record<VideoJobStatus, 'neutral' | 'info' | 'success' | 'danger' | 'warning'> = {
   queued: 'neutral',
@@ -42,6 +43,18 @@ const formatWhen = (iso?: string | null) => {
   return date.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
 };
 
+// Pratinjau tidak pernah melewati server ini: thumbnail & player memakai
+// endpoint Drive langsung dari browser, jadi tidak ada byte video di Worker/D1.
+const DRIVE_ID = /^[A-Za-z0-9_-]{10,}$/;
+
+const driveIdOf = (job: VideoJob): string => {
+  const id = job.driveFileId ?? '';
+  return DRIVE_ID.test(id) ? id : '';
+};
+
+const thumbUrl = (id: string, width = 320) => `https://drive.google.com/thumbnail?id=${id}&sz=w${width}`;
+const embedUrl = (id: string) => `https://drive.google.com/file/d/${id}/preview`;
+
 type FormState = Record<string, string>;
 
 const defaultsFor = (template?: VideoTemplate): FormState => {
@@ -62,6 +75,8 @@ export function VideoStudioPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [preview, setPreview] = useState<VideoJob | null>(null);
+  const [brokenThumbs, setBrokenThumbs] = useState<Record<string, boolean>>({});
 
   const template = useMemo(() => templates.find((item) => item.id === templateId), [templates, templateId]);
 
@@ -94,6 +109,16 @@ export function VideoStudioPage() {
   useEffect(() => {
     setForm(defaultsFor(templates.find((item) => item.id === templateId)));
   }, [templateId, templates]);
+
+  // Esc menutup pemutar pratinjau.
+  useEffect(() => {
+    if (!preview) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPreview(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [preview]);
 
   const activeCount = jobs.filter((job) => ['queued', 'rendering', 'uploading'].includes(job.status)).length;
 
@@ -131,6 +156,46 @@ export function VideoStudioPage() {
 
   const doneCount = jobs.filter((job) => job.status === 'done').length;
   const failedCount = jobs.filter((job) => job.status === 'failed').length;
+
+  // Sel pratinjau: thumbnail dari Drive, diklik untuk memutar di modal.
+  const previewCell = (job: VideoJob) => {
+    const id = driveIdOf(job);
+    if (id) {
+      return (
+        <button type="button" className="video-thumb" onClick={() => setPreview(job)} title="Putar pratinjau">
+          {brokenThumbs[id] ? (
+            <span className="video-thumb-fallback">
+              <Play size={13} />
+              Putar
+            </span>
+          ) : (
+            <>
+              <img
+                src={thumbUrl(id)}
+                alt={`Pratinjau ${job.title}`}
+                loading="lazy"
+                onError={() => setBrokenThumbs((current) => ({ ...current, [id]: true }))}
+              />
+              <span className="video-thumb-play">
+                <Play size={13} />
+              </span>
+            </>
+          )}
+        </button>
+      );
+    }
+    if (job.status === 'queued' || job.status === 'rendering' || job.status === 'uploading') {
+      return <span className="muted-small">Menunggu render</span>;
+    }
+    if (job.status === 'done') {
+      return (
+        <span className="muted-small" title="File hasil ada di disk runner, bukan di Drive — pratinjau butuh file Drive.">
+          Lokal (uji)
+        </span>
+      );
+    }
+    return <span className="muted-small">—</span>;
+  };
 
   return (
     <>
@@ -217,6 +282,7 @@ export function VideoStudioPage() {
                 <th>Judul</th>
                 <th>Template</th>
                 <th>Status</th>
+                <th>Pratinjau</th>
                 <th>Resolusi</th>
                 <th>Ukuran</th>
                 <th>Dibuat</th>
@@ -237,6 +303,7 @@ export function VideoStudioPage() {
                     </Badge>
                     {job.status === 'failed' && job.error && <div className="cell-sub">{job.error}</div>}
                   </td>
+                  <td>{previewCell(job)}</td>
                   <td>
                     {job.width}×{job.height}
                   </td>
@@ -257,6 +324,47 @@ export function VideoStudioPage() {
           </table>
         )}
       </Card>
+
+      {preview && driveIdOf(preview) && (
+        <div className="overlay overlay-center" onClick={() => setPreview(null)}>
+          <div className="modal modal-wide" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <h2>{preview.title}</h2>
+                <p>
+                  {preview.width}×{preview.height} · {formatBytes(preview.bytes)} · diputar langsung dari Google Drive
+                </p>
+              </div>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPreview(null)} aria-label="Tutup">
+                <X size={14} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <iframe
+                className="video-preview-frame"
+                style={
+                  preview.height > preview.width
+                    ? { aspectRatio: '9 / 16', width: 'auto', height: 'min(62vh, 560px)', maxWidth: '100%', margin: '0 auto' }
+                    : undefined
+                }
+                src={embedUrl(driveIdOf(preview))}
+                title={`Pratinjau ${preview.title}`}
+                allow="autoplay; fullscreen"
+                allowFullScreen
+              />
+              <p className="muted-small" style={{ marginTop: 10 }}>
+                Kalau pemutar kosong, file belum dibagikan ke akun Google yang sedang login di browser ini. Buka di Drive
+                untuk memutar langsung.
+              </p>
+            </div>
+            <div className="modal-foot">
+              <a className="btn btn-ghost btn-sm" href={preview.driveWebLink ?? '#'} target="_blank" rel="noreferrer">
+                Buka di Drive <ExternalLink size={12} />
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

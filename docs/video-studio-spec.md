@@ -185,3 +185,12 @@ Selama remote belum ada, runner **tidak** menggagalkan job — job tetap `queued
 - `props` divalidasi ≤8 KB dan wajib `Idempotency-Key`; kiriman ulang dengan key sama mengembalikan job yang sama.
 - Status tidak bisa melompat (`queued` → `done` ditolak 409); urutannya `queued → rendering → uploading → done|failed`.
 - Cloudflare menolak User-Agent default Python (`error 1010`), jadi semua script memakai UA eksplisit `playdesign-runner/1.0`.
+
+### Pratinjau di UI
+
+Kolom **Pratinjau** pada tabel riwayat memakai thumbnail Drive (`drive.google.com/thumbnail?id=…`) dan memutar file lewat iframe `drive.google.com/file/d/<id>/preview` di modal. Keduanya dipanggil langsung dari browser, jadi prinsip #1 tetap utuh: Worker tidak pernah menyajikan byte video.
+
+- Job `queued`/`rendering`/`uploading` → "Menunggu render".
+- Job selesai dengan `drive_file_id` sah → thumbnail + tombol putar.
+- Thumbnail gagal dimuat (file belum dibagikan) → tombol "Putar" tetap bisa diklik; modal menampilkan tautan "Buka di Drive".
+- Job dari remote non-Drive (uji lokal) → "Lokal (uji)", karena file tidak bisa dipratinjau dari browser.

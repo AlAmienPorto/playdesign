@@ -1,0 +1,60 @@
+/* Video Studio — pratinjau hasil render.
+   Thumbnail & pemutar memakai endpoint Drive langsung dari browser; tidak ada
+   byte video yang dilayani Worker ini. */
+
+.video-thumb {
+  position: relative;
+  display: block;
+  width: 76px;
+  height: 48px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(11, 15, 23, 0.06);
+  cursor: pointer;
+}
+
+.video-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.video-thumb-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgba(11, 15, 23, 0.34);
+  transition: background 0.15s ease;
+}
+
+.video-thumb:hover .video-thumb-play,
+.video-thumb:focus-visible .video-thumb-play {
+  background: rgba(11, 15, 23, 0.12);
+}
+
+.video-thumb-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.video-preview-frame {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 0;
+  border-radius: 11px;
+  background: #05070d;
+}
