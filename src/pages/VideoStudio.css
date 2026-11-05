@@ -323,3 +323,114 @@
   .studio-mode { width: 100%; justify-content: space-between; }
   .studio-check { padding: 9px 10px; }
 }
+
+/* ---------- Pustaka referensi ---------- */
+
+.ref-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.ref-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.ref-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.ref-card.is-used {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 1px var(--ink) inset;
+}
+
+.ref-thumb {
+  aspect-ratio: 16 / 10;
+  background: var(--surface-3);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.ref-thumb img,
+.ref-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ref-audio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  width: 100%;
+  color: var(--muted);
+}
+
+.ref-audio audio { width: 100%; height: 30px; }
+
+.ref-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px 10px;
+}
+
+.ref-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ref-title strong {
+  font-size: 12.4px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ref-palette {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ref-palette span {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  border: 1px solid var(--line-strong);
+  display: inline-block;
+}
+
+.ref-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ref-actions .btn { flex: 1; justify-content: center; }
+.ref-actions .btn:last-child { flex: none; }
+
+@media (max-width: 560px) {
+  .ref-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+}

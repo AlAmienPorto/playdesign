@@ -1,6 +1,7 @@
 import { Suspense, lazy, useMemo, useState } from 'react';
 import { GripVertical, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { Field } from './ui';
+import { ReferenceManager } from './ReferenceManager';
 
 import { createVideoJob, type VideoJob } from '../lib/api';
 import {
@@ -52,7 +53,7 @@ export function VideoComposer({
   const [spec, setSpec] = useState<VideoSpec>(() => defaultSpec());
   const [title, setTitle] = useState('');
   const [saving, setSaving] = useState(false);
-  const [tab, setTab] = useState<'brief' | 'style' | 'scenes' | 'audio'>('brief');
+  const [tab, setTab] = useState<'brief' | 'style' | 'scenes' | 'refs' | 'audio'>('brief');
 
   const patch = (next: Partial<VideoSpec>) => setSpec((current) => normalizeSpec({ ...current, ...next }, current.render.aspect));
   const patchStyle = (next: Partial<VideoSpec['style']>) => patch({ style: { ...spec.style, ...next } });
@@ -146,6 +147,7 @@ export function VideoComposer({
               ['brief', 'Prompt & brief'],
               ['style', 'Gaya'],
               ['scenes', `Scene (${spec.scenes.length})`],
+              ['refs', `Referensi (${spec.references.length})`],
               ['audio', 'Suara & subtitle'],
             ] as const
           ).map(([key, label]) => (
@@ -459,6 +461,65 @@ export function VideoComposer({
                   placeholder="Teks pendukung / narasi scene"
                   onChange={(event) => updateScene(index, { body: event.target.value })}
                 />
+                {scene.kind === 'image' || scene.kind === 'video' ? (
+                  <div className="studio-row">
+                    <Field label="Referensi media">
+                      <select
+                        className="input input-sm"
+                        value={scene.media?.refId ?? ''}
+                        onChange={(event) =>
+                          updateScene(index, {
+                            media: event.target.value
+                              ? { ...scene.media, refId: event.target.value }
+                              : undefined,
+                          })
+                        }
+                      >
+                        <option value="">— tanpa media —</option>
+                        {spec.references
+                          .filter((ref) => ref.kind === (scene.kind === 'video' ? 'video' : 'image'))
+                          .map((ref) => (
+                            <option key={ref.id} value={ref.id}>
+                              {ref.name}
+                            </option>
+                          ))}
+                      </select>
+                    </Field>
+                    <Field label="Penyesuaian">
+                      <select
+                        className="input input-sm"
+                        value={scene.media?.fit ?? 'cover'}
+                        onChange={(event) =>
+                          updateScene(index, {
+                            media: { ...scene.media, fit: event.target.value as 'cover' | 'contain' },
+                          })
+                        }
+                      >
+                        <option value="cover">Isi penuh (cover)</option>
+                        <option value="contain">Utuh (contain)</option>
+                      </select>
+                    </Field>
+                    <Field label="Gerak">
+                      <select
+                        className="input input-sm"
+                        value={scene.media?.motion ?? 'kenburns'}
+                        onChange={(event) =>
+                          updateScene(index, {
+                            media: {
+                              ...scene.media,
+                              motion: event.target.value as 'none' | 'kenburns' | 'parallax',
+                            },
+                          })
+                        }
+                      >
+                        <option value="none">Diam</option>
+                        <option value="kenburns">Ken Burns</option>
+                        <option value="parallax">Paralaks</option>
+                      </select>
+                    </Field>
+                  </div>
+                ) : null}
+
                 {scene.kind === 'list' ? (
                   <textarea
                     className="input"
@@ -481,6 +542,22 @@ export function VideoComposer({
               </button>
             </div>
           </div>
+        ) : null}
+
+        {tab === 'refs' ? (
+          <ReferenceManager
+            selected={spec.references}
+            onChange={(references) => patch({ references })}
+            onApplyPalette={(palette) => {
+              patchStyle({
+                bg: palette.bg ?? spec.style.bg,
+                accent: palette.accent ?? spec.style.accent,
+                preset: 'custom',
+              });
+              onToast('Palet dari referensi dipakai; preset diubah ke Custom.', 'success');
+            }}
+            onToast={onToast}
+          />
         ) : null}
 
         {tab === 'audio' ? (
@@ -621,24 +698,46 @@ export function VideoComposer({
               />
               <span>
                 <strong>Musik latar</strong>
-                <em>Butuh berkas musik di Reference Manager (tahap berikutnya). Tanpa berkas, bagian ini dilewati.</em>
+                <em>Pilih berkas dari tab Referensi (jenis audio). Tanpa berkas, bagian ini dilewati.</em>
               </span>
             </label>
 
             {spec.audio.music.enabled ? (
-              <Field label="Volume musik" hint={`${spec.audio.music.volume}%`}>
-                <input
-                  className="input"
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={2}
-                  value={spec.audio.music.volume}
-                  onChange={(event) =>
-                    patchAudio({ music: { ...spec.audio.music, volume: Number(event.target.value) } })
-                  }
-                />
-              </Field>
+              <div className="studio-row">
+                <Field label="Berkas musik" hint="Diambil dari pustaka referensi (jenis audio).">
+                  <select
+                    className="input"
+                    value={spec.audio.music.refId ?? ''}
+                    onChange={(event) =>
+                      patchAudio({
+                        music: { ...spec.audio.music, refId: event.target.value || undefined },
+                      })
+                    }
+                  >
+                    <option value="">— pilih referensi audio —</option>
+                    {spec.references
+                      .filter((ref) => ref.kind === 'audio')
+                      .map((ref) => (
+                        <option key={ref.id} value={ref.id}>
+                          {ref.name}
+                        </option>
+                      ))}
+                  </select>
+                </Field>
+                <Field label="Volume musik" hint={`${spec.audio.music.volume}%`}>
+                  <input
+                    className="input"
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={2}
+                    value={spec.audio.music.volume}
+                    onChange={(event) =>
+                      patchAudio({ music: { ...spec.audio.music, volume: Number(event.target.value) } })
+                    }
+                  />
+                </Field>
+              </div>
             ) : null}
           </div>
         ) : null}

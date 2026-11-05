@@ -324,6 +324,59 @@ export async function fetchVideoJobs(limit = 20): Promise<VideoJob[]> {
   return payload.jobs ?? [];
 }
 
+export interface VideoReferenceRecord {
+  id: string;
+  name: string;
+  kind: 'image' | 'video' | 'audio';
+  role: 'style' | 'motion' | 'subject' | 'music' | 'sfx';
+  url: string;
+  strength: number;
+  tags: string[];
+  note: string | null;
+  palette: { bg?: string; accent?: string } | null;
+  width: number | null;
+  height: number | null;
+  durationMs: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listVideoReferences(): Promise<VideoReferenceRecord[]> {
+  const payload = await request<{ references: VideoReferenceRecord[] }>('/api/video/references');
+  return payload.references ?? [];
+}
+
+export async function createVideoReference(input: {
+  name: string;
+  kind: VideoReferenceRecord['kind'];
+  url: string;
+  role?: VideoReferenceRecord['role'];
+  strength?: number;
+  tags?: string[];
+  note?: string;
+}): Promise<VideoReferenceRecord> {
+  const payload = await request<{ reference: VideoReferenceRecord }>('/api/video/references', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+  return payload.reference;
+}
+
+export async function updateVideoReference(
+  id: string,
+  patch: Partial<Pick<VideoReferenceRecord, 'name' | 'role' | 'url' | 'strength' | 'tags' | 'note'>>,
+): Promise<VideoReferenceRecord> {
+  const payload = await request<{ reference: VideoReferenceRecord }>(`/api/video/references/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+  return payload.reference;
+}
+
+export async function deleteVideoReference(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/video/references/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 export async function createVideoJob(input: {
   templateId: string;
   title: string;

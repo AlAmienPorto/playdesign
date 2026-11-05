@@ -259,6 +259,14 @@ def run() -> int:
         lock.close()
 
 
+def patch_reference(ref_id: str, payload: dict) -> None:
+    """Simpan metadata hasil baca berkas (palet/dimensi) ke pustaka referensi."""
+    try:
+        api("PATCH", f"/api/video/references/{ref_id}", payload)
+    except Exception:  # noqa: BLE001 - metadata opsional, render tidak boleh gagal
+        pass
+
+
 def needs_upload(job: dict) -> bool:
     """Job tanpa spec selalu diunggah; job berspec mengikuti render.upload."""
     spec = job.get("spec")
@@ -305,17 +313,121 @@ def prepare_assets(spec: dict, job_id: str) -> tuple[dict, list[Path]]:
         if (spec.get("subtitle") or {}).get("enabled") and srt.exists():
             assets["captions"] = video_spec.parse_srt(srt.read_text(encoding="utf-8"))
 
-    music = (spec.get("audio") or {}).get("music") or {}
-    if music.get("enabled"):
-        ref = next(
-            (item for item in spec.get("references") or [] if item.get("id") == music.get("refId")),
-            None,
-        )
-        url = (ref or {}).get("url") or ""
-        if url.startswith(("http://", "https://")):
-            assets["music"] = url
-
     return assets, cleanup
+
+
+# ---------------------------------------------------------------------------
+# Referensi: unduh ke public/refs/<job>/ supaya `staticFile` bisa membacanya
+# ---------------------------------------------------------------------------
+
+def _ref_ext(url: str, kind: str) -> str:
+    name = url.split("?")[0].split("#")[0]
+    suffix = Path(name).suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".mp3", ".wav", ".m4a", ".aac"}:
+        return suffix
+    return {"image": ".png", "video": ".mp4", "audio": ".mp3"}.get(kind, ".bin")
+
+
+def _fetch_reference(url: str, dest: Path) -> None:
+    """`local:` dibaca dari mesin ini; selain itu diunduh lewat HTTP."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if url.startswith("local:"):
+        source = Path(url[6:]).expanduser()
+        if not source.is_file():
+            raise RuntimeError(f"Referensi lokal tidak ditemukan: {source}")
+        shutil.copy2(source, dest)
+        return
+    req = urllib.request.Request(url, headers={"User-Agent": "playdesign-runner/1.0"})
+    with urllib.request.urlopen(req, timeout=180) as resp, dest.open("wb") as out:
+        shutil.copyfileobj(resp, out)
+    if dest.stat().st_size == 0:
+        raise RuntimeError(f"Referensi kosong setelah diunduh: {url}")
+
+
+def _probe(path: Path) -> dict:
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=width,height,duration:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        data = json.loads(proc.stdout or "{}")
+    except (subprocess.SubprocessError, ValueError):
+        return {}
+    stream = (data.get("streams") or [{}])[0]
+    duration = stream.get("duration") or (data.get("format") or {}).get("duration")
+    meta: dict = {}
+    if stream.get("width"):
+        meta["width"] = int(stream["width"])
+    if stream.get("height"):
+        meta["height"] = int(stream["height"])
+    if duration:
+        try:
+            meta["durationMs"] = int(float(duration) * 1000)
+        except ValueError:
+            pass
+    return meta
+
+
+def _palette(path: Path) -> dict:
+    """Ambil palet dari gambar tanpa AI: rata-rata 8x8 piksel lewat ffmpeg."""
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-vf", "scale=8:8", "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, timeout=60,
+    )
+    raw = proc.stdout or b""
+    if len(raw) < 3 * 64:
+        return {}
+    pixels = [tuple(raw[i:i + 3]) for i in range(0, 3 * 64, 3)]
+    avg = tuple(sum(channel) // 64 for channel in zip(*pixels))
+    # aksen = piksel paling jenuh, supaya warna khas gambar tidak hilang jadi abu-abu
+    accent = max(pixels, key=lambda px: (max(px) - min(px)) + sum(px) / 6)
+    return {"bg": "#%02x%02x%02x" % avg, "accent": "#%02x%02x%02x" % accent}
+
+
+def prepare_references(spec: dict, job_id: str) -> tuple[dict, dict, list[Path], list[tuple[str, dict]]]:
+    """Unduh semua referensi job, rapikan URL-nya, dan hitung palet gambar gaya."""
+    refs = spec.get("references") or []
+    if not refs:
+        return spec, {}, [], []
+
+    ref_dir = REMOTION_DIR / "public" / "refs" / job_id
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    files: list[Path] = []
+    updates: list[tuple[str, dict]] = []
+    assets: dict = {}
+
+    for index, ref in enumerate(refs):
+        url = (ref.get("url") or "").strip()
+        if not url:
+            continue
+        kind = ref.get("kind") or "image"
+        dest = ref_dir / f"{index:02d}-{slugify(ref.get('name') or 'ref', 24)}{_ref_ext(url, kind)}"
+        _fetch_reference(url, dest)
+        files.append(dest)
+        ref["url"] = f"refs/{job_id}/{dest.name}"
+        meta = _probe(dest)
+        if kind == "image" and ref.get("role") in ("style", "subject"):
+            meta.update(_palette(dest))
+        if meta:
+            updates.append((str(ref.get("id") or ""), meta))
+
+    music = (spec.get("audio") or {}).get("music") or {}
+    if music.get("enabled") and music.get("refId"):
+        target = next((r for r in refs if r.get("id") == music.get("refId")), None)
+        if target and target.get("url", "").startswith("refs/"):
+            assets["music"] = target["url"]
+
+    sfx: list[dict] = []
+    for effect in (spec.get("audio") or {}).get("sfx") or []:
+        target = next((r for r in refs if r.get("id") == effect.get("refId")), None)
+        if target and target.get("url", "").startswith("refs/"):
+            sfx.append({"src": target["url"], "atSec": effect.get("atSec") or 0, "volume": effect.get("volume") or 60})
+    if sfx:
+        assets["sfx"] = sfx
+
+    return spec, assets, files, updates
 
 
 def _run_locked() -> int:
@@ -365,7 +477,13 @@ def _run_locked() -> int:
         try:
             props = claimed.get("props") or {}
             if story_mode:
+                spec, ref_assets, ref_files, ref_updates = prepare_references(spec, job_id)
                 assets, asset_files = prepare_assets(spec, job_id)
+                assets.update(ref_assets)
+                asset_files.extend(ref_files)
+                for ref_id, meta in ref_updates:
+                    if ref_id:
+                        patch_reference(ref_id, meta)
                 props = {"spec": spec, "assets": assets}
             render(composition_id, props, out_file)
             size = out_file.stat().st_size
@@ -414,6 +532,7 @@ def _run_locked() -> int:
             for asset in asset_files:
                 asset.unlink(missing_ok=True)
             shutil.rmtree(tmp_dir, ignore_errors=True)
+            shutil.rmtree(REMOTION_DIR / "public" / "refs" / job_id, ignore_errors=True)
 
     if done or failed or cancelled:
         for job_id, name, size in done:

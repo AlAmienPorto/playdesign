@@ -1837,6 +1837,12 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (videoJobMatch && method === "GET") return getVideoJob(env, req, decodeURIComponent(videoJobMatch[1]));
   if (videoJobMatch && method === "PATCH") return patchVideoJob(env, req, decodeURIComponent(videoJobMatch[1]));
 
+  if (path === "/api/video/references" && method === "GET") return listVideoReferences(env, req);
+  if (path === "/api/video/references" && method === "POST") return createVideoReference(env, req);
+  const videoRefMatch = /^\/api\/video\/references\/([^/]+)$/.exec(path);
+  if (videoRefMatch && method === "PATCH") return patchVideoReference(env, req, decodeURIComponent(videoRefMatch[1]));
+  if (videoRefMatch && method === "DELETE") return deleteVideoReference(env, req, decodeURIComponent(videoRefMatch[1]));
+
   if (path === "/api/office" && method === "GET") return office(env, req);
   if (path === "/api/tasks" && method === "GET") {
     const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
@@ -2079,6 +2085,59 @@ async function getVideoJob(env: Env, _req: Request, id: string) {
   return json({ job: videoJobView(row) });
 }
 
+/** Tempelkan metadata referensi dari D1 ke spec job supaya runner tahu gambar/audio mana yang dipakai. */
+async function attachSpecReferences(env: Env, workspaceId: string, spec: Record<string, unknown>) {
+  const scenes = Array.isArray(spec.scenes) ? (spec.scenes as Record<string, unknown>[]) : [];
+  const ids = new Set<string>();
+  for (const scene of scenes) {
+    const media = scene.media as { refId?: string } | undefined;
+    if (media?.refId) ids.add(media.refId);
+  }
+  const audio = (spec.audio ?? {}) as { music?: { refId?: string }; sfx?: { refId?: string }[] };
+  if (audio.music?.refId) ids.add(audio.music.refId);
+  for (const effect of audio.sfx ?? []) if (effect?.refId) ids.add(effect.refId);
+  if (!ids.size) return;
+
+  const list = Array.from(ids);
+  const marks = list.map(() => "?").join(", ");
+  const rows = await env.DB.prepare(
+    `SELECT id, kind, name, role, url, strength, note FROM video_references
+      WHERE workspace_id = ? AND id IN (${marks})`,
+  )
+    .bind(workspaceId, ...list)
+    .all<{
+      id: string;
+      kind: string;
+      name: string;
+      role: string;
+      url: string;
+      strength: number | null;
+      note: string | null;
+    }>();
+
+  const byId = new Map((rows.results ?? []).map((row) => [row.id, row]));
+  const existing = new Map(
+    (Array.isArray(spec.references) ? (spec.references as Record<string, unknown>[]) : []).map((ref) => [
+      String(ref.id ?? ""),
+      ref,
+    ]),
+  );
+  for (const id of list) {
+    const row = byId.get(id);
+    if (!row) continue;
+    existing.set(id, {
+      id: row.id,
+      kind: row.kind,
+      name: row.name,
+      role: row.role,
+      url: row.url,
+      strength: row.strength ?? undefined,
+      note: row.note ?? undefined,
+    });
+  }
+  spec.references = Array.from(existing.values()).filter((ref) => ref.id).slice(0, 12);
+}
+
 async function createVideoJob(env: Env, req: Request) {
   const key = (req.headers.get("idempotency-key") ?? "").trim();
   if (!key) {
@@ -2130,6 +2189,7 @@ async function createVideoJob(env: Env, req: Request) {
     : VIDEO_ASPECTS[template.aspect] ?? VIDEO_ASPECTS["9:16"];
   const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
   const engine = body.engine === "browser" ? "browser" : "runner";
+  if (normalized) await attachSpecReferences(env, workspaceId, normalized.spec as Record<string, unknown>);
 
   // Dua penjaga: laju per jam (spec) dan jumlah job aktif, supaya antrean
   // runner tidak menumpuk tanpa batas saat mesin runner sedang mati.
@@ -2314,13 +2374,158 @@ async function claimVideoJob(env: Env, req: Request, id: string) {
   return json({ ok: true, job: videoJobView(row) });
 }
 
+/* ------------------------------------------------------------------ */
+/* Pustaka referensi video (gambar/video/audio)                        */
+/* ------------------------------------------------------------------ */
+
+const REFERENCE_KINDS = ["image", "video", "audio"] as const;
+const REFERENCE_ROLES = ["style", "motion", "subject", "music", "sfx"] as const;
+
+interface VideoReferenceRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  kind: string;
+  role: string;
+  url: string;
+  strength: number;
+  tags: string;
+  note: string | null;
+  palette: string | null;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function videoReferenceView(row: VideoReferenceRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    kind: row.kind,
+    role: row.role,
+    url: row.url,
+    strength: row.strength,
+    tags: row.tags ? row.tags.split(",").filter(Boolean) : [],
+    note: row.note,
+    palette: parseJsonSafe(row.palette, null) as Record<string, string> | null,
+    width: row.width,
+    height: row.height,
+    durationMs: row.duration_ms,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Referensi tidak menyimpan byte: hanya URL https atau path `local:` di mesin
+ * runner. Skema lain ditolak supaya runner tidak bisa disuruh membaca apa pun.
+ */
+function referenceUrl(raw: unknown): string {
+  const value = str(raw, "url", 8, 2000).trim();
+  const ok = /^https?:\/\//i.test(value) || /^local:[\/\\]/.test(value);
+  if (!ok) {
+    fail(400, "invalid_reference_url", "URL referensi harus https://… atau local:/path/di/mesin/runner.");
+  }
+  return value;
+}
+
+async function listVideoReferences(env: Env, req: Request) {
+  const url = new URL(req.url);
+  const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace") ?? "playdesign");
+  await authenticate(env, workspaceId, req);
+  const rows = await env.DB.prepare(
+    `SELECT * FROM video_references WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 200`,
+  )
+    .bind(workspaceId)
+    .all<VideoReferenceRow>();
+  return json({ references: (rows.results ?? []).map(videoReferenceView) });
+}
+
+async function createVideoReference(env: Env, req: Request) {
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const workspaceId = await assertWorkspace(env, (body.workspace as string) ?? "playdesign");
+  const actor = await authenticate(env, workspaceId, req);
+  const name = str(body.name, "name", 2, 120);
+  const kind = oneOf(body.kind, "kind", REFERENCE_KINDS);
+  const role = body.role === undefined ? (kind === "audio" ? "music" : "subject") : oneOf(body.role, "role", REFERENCE_ROLES);
+  const url = referenceUrl(body.url);
+  const strength = Math.min(Math.max(Number(body.strength ?? 0.6) || 0.6, 0), 1);
+  const tags = Array.isArray(body.tags)
+    ? body.tags.map((tag) => str(tag, "tags", 1, 40)).slice(0, 8).join(",")
+    : typeof body.tags === "string"
+      ? body.tags.slice(0, 240)
+      : "";
+  const note = optionalStr(body.note, "note", 400);
+  const id = uid("vr");
+  const at = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO video_references
+       (id, workspace_id, name, kind, role, url, strength, tags, note, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, workspaceId, name, kind, role, url, strength, tags, note ?? null, actor.id, at, at)
+    .run();
+  const row = await env.DB.prepare(`SELECT * FROM video_references WHERE id = ?`).bind(id).first<VideoReferenceRow>();
+  return json({ reference: row ? videoReferenceView(row) : null }, 201);
+}
+
+async function patchVideoReference(env: Env, req: Request, id: string) {
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const current = await env.DB.prepare(`SELECT * FROM video_references WHERE id = ?`).bind(id).first<VideoReferenceRow>();
+  if (!current) fail(404, "reference_not_found", "Referensi tidak ditemukan.");
+  await authenticate(env, current.workspace_id, req);
+
+  const name = body.name === undefined ? current.name : str(body.name, "name", 2, 120);
+  const role = body.role === undefined ? current.role : oneOf(body.role, "role", REFERENCE_ROLES);
+  const url = body.url === undefined ? current.url : referenceUrl(body.url);
+  const strength =
+    body.strength === undefined ? current.strength : Math.min(Math.max(Number(body.strength) || 0, 0), 1);
+  const note = body.note === undefined ? current.note : optionalStr(body.note, "note", 400);
+  const tags = Array.isArray(body.tags)
+    ? body.tags.map((tag) => str(tag, "tags", 1, 40)).slice(0, 8).join(",")
+    : body.tags === undefined
+      ? current.tags
+      : typeof body.tags === "string"
+        ? body.tags.slice(0, 240)
+        : current.tags;
+  // Palette/waktu tempuh diisi runner setelah membaca berkasnya.
+  const palette = body.palette === undefined ? current.palette : JSON.stringify(body.palette).slice(0, 2000);
+  const width = (body.width === undefined ? current.width : optionalInt(body.width, "width", 0, 8000)) ?? null;
+  const height = (body.height === undefined ? current.height : optionalInt(body.height, "height", 0, 8000)) ?? null;
+  const durationMs =
+    (body.durationMs === undefined ? current.duration_ms : optionalInt(body.durationMs, "durationMs", 0, 3600000)) ?? null;
+
+  await env.DB.prepare(
+    `UPDATE video_references
+        SET name = ?, role = ?, url = ?, strength = ?, tags = ?, note = ?, palette = ?,
+            width = ?, height = ?, duration_ms = ?, updated_at = ?
+      WHERE id = ?`,
+  )
+    .bind(name, role, url, strength, tags, note ?? null, palette ?? null, width, height, durationMs, nowIso(), id)
+    .run();
+  const row = await env.DB.prepare(`SELECT * FROM video_references WHERE id = ?`).bind(id).first<VideoReferenceRow>();
+  return json({ reference: row ? videoReferenceView(row) : null });
+}
+
+async function deleteVideoReference(env: Env, req: Request, id: string) {
+  const current = await env.DB.prepare(`SELECT * FROM video_references WHERE id = ?`).bind(id).first<VideoReferenceRow>();
+  if (!current) fail(404, "reference_not_found", "Referensi tidak ditemukan.");
+  await authenticate(env, current.workspace_id, req);
+  await env.DB.prepare(`DELETE FROM video_references WHERE id = ?`).bind(id).run();
+  return json({ ok: true, id });
+}
+
 export default {
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
       if (req.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
-          headers: { allow: "GET, POST, PATCH, OPTIONS" },
+          headers: { allow: "GET, POST, PATCH, DELETE, OPTIONS" },
         });
       }
       return await route(req, env);
