@@ -31,3 +31,32 @@ class GenerationGuardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuardPlacementTest(unittest.TestCase):
+    """Guard harus berjalan untuk semua template, bukan hanya jalur story."""
+
+    def test_guard_tidak_berada_di_dalam_cabang_story_mode(self) -> None:
+        import ast
+
+        tree = ast.parse(Path(runner.__file__).read_text(encoding="utf-8"))
+        parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "assert_generation_supported"
+        ]
+        self.assertTrue(calls, "assert_generation_supported tidak dipanggil di runner")
+
+        for call in calls:
+            node: ast.AST = call
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, ast.If) and "story_mode" in ast.dump(node.test):
+                    self.fail("guard hanya berjalan bila story_mode aktif")

@@ -2055,7 +2055,7 @@ async function reviseVideoScene(env: Env, req: Request) {
   try {
     input = validateSceneRevisionInput(body);
   } catch (error) {
-    fail(400, "invalid_request", error instanceof Error ? error.message : "Payload revisi scene tidak valid.");
+    fail(400, "validation_failed", error instanceof Error ? error.message : "Payload revisi scene tidak valid.");
   }
 
   await assertWorkspace(env, input.workspace);

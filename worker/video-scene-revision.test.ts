@@ -177,3 +177,16 @@ test('validateSceneRevisionInput membuang items bukan array dan context berbentu
   assert.deepEqual(input.scene.items, []);
   assert.deepEqual(input.context, { prompt: '', style: {}, sceneIndex: 0, sceneCount: 1 });
 });
+
+test('sanitizeSceneRevision tidak membiarkan AI mengubah scene teks menjadi media tanpa klip', () => {
+  const before = normalizeScene({ id: 'sc-teks', kind: 'statement', durationSec: 3, title: 'Lama' });
+  const after = sanitizeSceneRevision(before, { kind: 'video', title: 'Baru' });
+  assert.equal(after.kind, 'statement');
+  assert.equal(after.title, 'Baru');
+});
+
+test('sanitizeSceneRevision tetap mengizinkan kind media bila scene memang punya referensi', () => {
+  const before = normalizeScene({ id: 'sc-img', kind: 'image', durationSec: 3, media: { refId: 'ref-1' } });
+  const after = sanitizeSceneRevision(before, { kind: 'video' });
+  assert.equal(after.kind, 'video');
+});

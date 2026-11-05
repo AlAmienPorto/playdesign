@@ -9,7 +9,7 @@ export interface SceneRevisionInput {
   scene: VideoScene;
   context: {
     prompt: string;
-    style: Record<string, string>;
+    style: Record<string, unknown>;
     sceneIndex: number;
     sceneCount: number;
   };
@@ -140,6 +140,13 @@ export function sanitizeSceneRevision(current: VideoScene, candidate: unknown): 
       fit: media.fit,
       motion: media.motion,
     };
+  }
+
+  // Tanpa klip yang benar-benar ada, scene tidak boleh berlabel image/video:
+  // itu akan menampilkan media yang tidak pernah dirender.
+  const mediaKinds = new Set(["image", "video"]);
+  if (!current.media?.refId && typeof input.kind === "string" && mediaKinds.has(input.kind)) {
+    allowed.kind = current.kind;
   }
 
   return normalizeScene(allowed, current);

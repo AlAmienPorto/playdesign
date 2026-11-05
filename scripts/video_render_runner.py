@@ -496,8 +496,10 @@ def _run_locked() -> int:
         asset_files: list[Path] = []
         try:
             props = claimed.get("props") or {}
+            # Guard berlaku untuk semua template: provider generatif nonaktif harus
+            # menolak sebelum aset apa pun disiapkan, bukan hanya di jalur story.
+            assert_generation_supported(spec)
             if story_mode:
-                assert_generation_supported(spec)
                 spec, ref_assets, ref_files, ref_updates = prepare_references(spec, job_id)
                 assets, asset_files = prepare_assets(spec, job_id)
                 assets.update(ref_assets)
