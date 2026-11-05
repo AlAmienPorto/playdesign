@@ -1900,6 +1900,7 @@ interface VideoJobRow {
   drive_web_link: string | null;
   drive_folder_id: string | null;
   error: string | null;
+  attempts: number | null;
   created_by: string | null;
   created_at: string;
   started_at: string | null;
@@ -1919,8 +1920,12 @@ const VIDEO_TRANSITIONS: Record<string, string[]> = {
   uploading: ["done", "failed"],
   done: [],
   failed: ["queued"],
-  canceled: [],
+  canceled: ["queued"],
 };
+
+/** Batas wajar supaya satu orang tidak membanjiri antrean runner. */
+const VIDEO_RATE_LIMIT_PER_HOUR = 10;
+const VIDEO_MAX_ACTIVE = 3;
 
 const parseJsonSafe = (raw: string | null | undefined, fallback: unknown) => {
   if (!raw) return fallback;
@@ -1945,6 +1950,7 @@ const videoJobView = (row: VideoJobRow) => ({
   driveFileId: row.drive_file_id,
   driveWebLink: row.drive_web_link,
   error: row.error,
+  attempts: row.attempts ?? 0,
   createdBy: row.created_by,
   createdAt: row.created_at,
   startedAt: row.started_at,
@@ -2050,6 +2056,29 @@ async function createVideoJob(env: Env, req: Request) {
   const aspect = VIDEO_ASPECTS[template.aspect] ?? VIDEO_ASPECTS["9:16"];
   const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
   const engine = body.engine === "browser" ? "browser" : "runner";
+
+  // Dua penjaga: laju per jam (spec) dan jumlah job aktif, supaya antrean
+  // runner tidak menumpuk tanpa batas saat mesin runner sedang mati.
+  const activity = await env.DB.prepare(
+    `SELECT
+        SUM(CASE WHEN created_at > datetime('now', '-1 hour') THEN 1 ELSE 0 END) AS last_hour,
+        SUM(CASE WHEN status IN ('queued', 'rendering', 'uploading') THEN 1 ELSE 0 END) AS active
+       FROM video_jobs
+      WHERE workspace_id = ?`,
+  )
+    .bind(workspaceId)
+    .first<{ last_hour: number | null; active: number | null }>();
+  if (Number(activity?.last_hour ?? 0) >= VIDEO_RATE_LIMIT_PER_HOUR) {
+    fail(429, "rate_limited", `Maksimal ${VIDEO_RATE_LIMIT_PER_HOUR} job video per jam. Coba lagi nanti.`);
+  }
+  if (Number(activity?.active ?? 0) >= VIDEO_MAX_ACTIVE) {
+    fail(
+      409,
+      "too_many_active",
+      `Sudah ada ${VIDEO_MAX_ACTIVE} job berjalan. Tunggu salah satunya selesai atau batalkan.`,
+    );
+  }
+
   const id = `vj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
   await env.DB.prepare(
@@ -2106,14 +2135,29 @@ async function patchVideoJob(env: Env, req: Request, id: string) {
     fail(400, "drive_file_required", "Job hanya bisa selesai kalau driveFileId terisi.");
   }
 
-  const driveFileId = body.driveFileId?.trim() || current.drive_file_id;
-  const driveWebLink =
-    body.driveWebLink?.trim() ||
-    current.drive_web_link ||
-    (driveFileId ? `https://drive.google.com/file/d/${driveFileId}/view` : null);
-  const bytes = Number.isFinite(Number(body.bytes)) && body.bytes !== undefined ? Math.max(0, Number(body.bytes)) : current.bytes;
+  // `queued` = job diulang: bersihkan sisa percobaan sebelumnya supaya UI tidak
+  // menampilkan error/link/ukuran lama, dan naikkan penghitung percobaan.
+  const isRetry = next === "queued";
+  const driveFileId = isRetry ? null : body.driveFileId?.trim() || current.drive_file_id;
+  const driveWebLink = isRetry
+    ? null
+    : body.driveWebLink?.trim() ||
+      current.drive_web_link ||
+      (driveFileId ? `https://drive.google.com/file/d/${driveFileId}/view` : null);
+  const bytes =
+    !isRetry && Number.isFinite(Number(body.bytes)) && body.bytes !== undefined
+      ? Math.max(0, Number(body.bytes))
+      : isRetry
+        ? null
+        : current.bytes;
   const finalStatus = next ?? current.status;
-  const finishedAt = ["done", "failed", "canceled"].includes(finalStatus) ? nowIso() : current.finished_at;
+  const finishedAt = isRetry
+    ? null
+    : ["done", "failed", "canceled"].includes(finalStatus)
+      ? nowIso()
+      : current.finished_at;
+  const error = isRetry ? null : body.error === undefined ? current.error : body.error;
+  const attempts = isRetry ? (current.attempts ?? 0) + 1 : current.attempts ?? 0;
 
   await env.DB.prepare(
     `UPDATE video_jobs
@@ -2123,7 +2167,11 @@ async function patchVideoJob(env: Env, req: Request, id: string) {
             drive_web_link = ?,
             drive_folder_id = ?,
             error = ?,
-            started_at = CASE WHEN ? = 'rendering' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+            attempts = ?,
+            started_at = CASE
+              WHEN ? = 1 THEN NULL
+              WHEN ? = 'rendering' AND started_at IS NULL THEN datetime('now')
+              ELSE started_at END,
             finished_at = ?
       WHERE id = ?`,
   )
@@ -2132,8 +2180,10 @@ async function patchVideoJob(env: Env, req: Request, id: string) {
       bytes,
       driveFileId,
       driveWebLink,
-      body.driveFolderId?.trim() || current.drive_folder_id,
-      body.error === undefined ? current.error : body.error,
+      isRetry ? null : body.driveFolderId?.trim() || current.drive_folder_id,
+      error,
+      attempts,
+      isRetry ? 1 : 0,
       finalStatus,
       finishedAt,
       id,

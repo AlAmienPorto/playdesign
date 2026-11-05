@@ -58,3 +58,64 @@
   border-radius: 11px;
   background: #05070d;
 }
+
+/* Aksi per baris (Detail / Batal / Ulangi) */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Daftar kunci-nilai untuk detail job & brief */
+.brief-list {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.brief-list > div {
+  display: grid;
+  grid-template-columns: 116px 1fr;
+  gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.brief-list > div:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.brief-list dt {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.brief-list dd {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.brief-title {
+  margin: 18px 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.detail-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  color: #b42318;
+  background: rgba(180, 35, 24, 0.08);
+}

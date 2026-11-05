@@ -290,10 +290,22 @@ export interface VideoJob {
   driveFileId?: string | null;
   driveWebLink?: string | null;
   error?: string | null;
+  attempts?: number;
   createdAt: string;
   startedAt?: string | null;
   finishedAt?: string | null;
   props: Record<string, unknown>;
+}
+
+export async function updateVideoJob(
+  id: string,
+  patch: { status?: VideoJobStatus; error?: string | null },
+): Promise<VideoJob> {
+  const payload = await request<{ job: VideoJob }>(`/api/video/jobs/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+  return payload.job;
 }
 
 export async function fetchVideoTemplates(): Promise<VideoTemplate[]> {

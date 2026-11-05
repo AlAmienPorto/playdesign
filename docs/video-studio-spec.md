@@ -91,7 +91,7 @@ Catatan: `props` menyimpan JSON kecil (teks/warna/angka), **bukan** data biner. 
 | POST | `/api/video/jobs/:id/claim` | runner mengambil satu job `queued` (atomik, `UPDATE ... WHERE status='queued'`) |
 | GET | `/api/video/config` | `clientId` OAuth publik + `folderId` tujuan |
 
-Batas: maks 10 job/jam per user, 1 job aktif per user, `title` ≤120 char, `props` ≤8 KB, `duration_frames` ≤3600.
+Batas: maks 10 job/jam per user, maks 3 job aktif per user (dinaikkan dari 1 saat implementasi: runner bisa mati beberapa jam, dan brief yang tidak bisa dibuat sama sekali lebih buruk daripada antrean pendek), `title` ≤120 char, `props` ≤8 KB, `duration_frames` ≤3600.
 
 ## 6. Ketentuan template (karena render di browser)
 
@@ -194,3 +194,24 @@ Kolom **Pratinjau** pada tabel riwayat memakai thumbnail Drive (`drive.google.co
 - Job selesai dengan `drive_file_id` sah → thumbnail + tombol putar.
 - Thumbnail gagal dimuat (file belum dibagikan) → tombol "Putar" tetap bisa diklik; modal menampilkan tautan "Buka di Drive".
 - Job dari remote non-Drive (uji lokal) → "Lokal (uji)", karena file tidak bisa dipratinjau dari browser.
+
+### Kendali job (tahap 1)
+
+| Kemampuan | Endpoint / UI | Bukti uji |
+| --- | --- | --- |
+| Batalkan job berjalan | `PATCH {status:'canceled'}` dari `queued`/`rendering`/`uploading`; tombol **Batal** | `canceled`, `finished_at` terisi |
+| Ulangi job gagal/dibatalkan | `PATCH {status:'queued'}`; tombol **Ulangi** | `attempts` 0→1, `error`/`drive_file_id`/`started_at`/`finished_at` dikosongkan |
+| Hitung percobaan | kolom `attempts`; UI menampilkan "percobaan ke-N" | percobaan ke-2 muncul setelah satu kali ulang |
+| Lihat brief yang dipakai | modal **Detail** (props, durasi, timestamp, error terakhir) | props job tampil lengkap |
+| Batas laju | 10 job/jam per workspace | create ke-11 → `429 rate_limited` |
+| Batas antrean | maks 3 job aktif | job ke-4 → `409 too_many_active` |
+| Job `done` tidak bisa diulang | transisi `done` = final | `done → queued` → `409 invalid_transition` |
+
+Catatan: `failed → queued` sebenarnya sudah ada di state machine sejak awal; yang belum ada adalah **tombolnya** dan pembersihan field lama saat mengulang. Retry dulu menyisakan `error`/`finished_at` lama, sehingga job yang diulang tampak seperti masih gagal.
+
+Runner juga diperkuat:
+
+- `flock` pada `~/.cache/playdesign/video_runner.lock` — dua runner tidak bisa berjalan bersamaan (cron tumpang tindih dengan proses manual).
+- Unggah diulang 3× dengan jeda 5 s dan 10 s sebelum job dinyatakan gagal.
+- Folder temp `pd-video-*` lebih tua dari 24 jam dibersihkan tiap kali runner mulai.
+- `PATCH` yang mengembalikan 409 (job dibatalkan saat render) tidak lagi melempar error: file tetap terunggah, status dibiarkan `canceled`, dan barisnya dicetak sebagai `batal`.

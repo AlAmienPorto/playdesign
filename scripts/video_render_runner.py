@@ -17,6 +17,7 @@ Env yang dibaca:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -120,6 +121,55 @@ def upload(local: Path, dest_name: str) -> tuple[str, str, str]:
     return file_id, link, folder
 
 
+def patch_soft(job_id: str, body: dict) -> dict | None:
+    """PATCH status; 409 (mis. job dibatalkan di tengah render) bukan error fatal."""
+    try:
+        return api("PATCH", f"/api/video/jobs/{job_id}", body)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (409, 404):
+            return None
+        raise
+
+
+def upload_with_retry(local: Path, dest_name: str, attempts: int = 3) -> tuple[str, str, str]:
+    """rclone bisa gagal sesaat (jaringan/Drive rate limit) — coba ulang sebelum menyerah."""
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return upload(local, dest_name)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt < attempts:
+                time.sleep(5 * attempt)
+    raise RuntimeError(f"unggah gagal setelah {attempts} percobaan: {last}")
+
+
+def cleanup_temp(max_age_hours: int = 24) -> None:
+    """Folder temp yang tertinggal dari proses yang mati mendadak."""
+    cutoff = time.time() - max_age_hours * 3600
+    for path in Path(tempfile.gettempdir()).glob("pd-video-*"):
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def acquire_lock():
+    """Cegah dua runner berjalan bersamaan (cron tumpang tindih dengan proses manual)."""
+    lock_path = Path.home() / ".cache" / "playdesign" / "video_runner.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
 def warn_once(job_id: str, message: str) -> bool:
     """True kalau peringatan untuk job ini belum pernah dicetak."""
     path = Path.home() / ".cache" / "playdesign" / "video_runner_warn.json"
@@ -136,6 +186,18 @@ def warn_once(job_id: str, message: str) -> bool:
 
 
 def run() -> int:
+    lock = acquire_lock()
+    if lock is None:
+        return 0  # runner lain sedang jalan
+    try:
+        cleanup_temp()
+        return _run_locked()
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
+
+def _run_locked() -> int:
     jobs = api("GET", f"/api/video/jobs?workspace={WORKSPACE}&status=queued&limit=5").get("jobs", [])
     if not jobs:
         return 0
@@ -150,7 +212,7 @@ def run() -> int:
         return 0
 
     templates = {t["id"]: t for t in api("GET", "/api/video/templates").get("templates", [])}
-    done, failed = [], []
+    done, failed, cancelled = [], [], []
     for job in jobs:
         job_id = job["id"]
         try:
@@ -172,14 +234,13 @@ def run() -> int:
         try:
             render(template["compositionId"], claimed.get("props") or {}, out_file)
             size = out_file.stat().st_size
-            api("PATCH", f"/api/video/jobs/{job_id}", {"status": "uploading", "bytes": size})
+            patch_soft(job_id, {"status": "uploading", "bytes": size})
 
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
             dest_name = f"{stamp}-{slugify(claimed.get('title', 'video'))}-{template['id']}-{job_id[-6:]}.mp4"
-            file_id, link, folder = upload(out_file, dest_name)
-            api(
-                "PATCH",
-                f"/api/video/jobs/{job_id}",
+            file_id, link, folder = upload_with_retry(out_file, dest_name)
+            updated = patch_soft(
+                job_id,
                 {
                     "status": "done",
                     "bytes": size,
@@ -189,16 +250,23 @@ def run() -> int:
                     "error": None,
                 },
             )
-            done.append((job_id, dest_name, size))
+            if updated is None:
+                # Job dibatalkan saat sedang dirender: filenya sudah terunggah,
+                # tapi status tidak boleh dipaksa `done`.
+                cancelled.append((job_id, dest_name))
+            else:
+                done.append((job_id, dest_name, size))
         except Exception as exc:  # noqa: BLE001 - satu job gagal tidak boleh menghentikan batch
-            api("PATCH", f"/api/video/jobs/{job_id}", {"status": "failed", "error": str(exc)[:500]})
+            patch_soft(job_id, {"status": "failed", "error": str(exc)[:500]})
             failed.append((job_id, str(exc)[:120]))
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    if done or failed:
+    if done or failed or cancelled:
         for job_id, name, size in done:
             print(f"ok   {job_id} -> {name} ({size / 1024 / 1024:.1f} MB)")
+        for job_id, name in cancelled:
+            print(f"batal {job_id} -> {name} sudah terunggah, status dibiarkan canceled")
         for job_id, err in failed:
             print(f"fail {job_id} -> {err}")
     return 0

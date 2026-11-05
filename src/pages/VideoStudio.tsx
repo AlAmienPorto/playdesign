@@ -5,6 +5,7 @@ import {
   createVideoJob,
   fetchVideoJobs,
   fetchVideoTemplates,
+  updateVideoJob,
   type VideoJob,
   type VideoJobStatus,
   type VideoTemplate,
@@ -76,6 +77,8 @@ export function VideoStudioPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [preview, setPreview] = useState<VideoJob | null>(null);
+  const [detail, setDetail] = useState<VideoJob | null>(null);
+  const [busyId, setBusyId] = useState('');
   const [brokenThumbs, setBrokenThumbs] = useState<Record<string, boolean>>({});
 
   const template = useMemo(() => templates.find((item) => item.id === templateId), [templates, templateId]);
@@ -112,13 +115,15 @@ export function VideoStudioPage() {
 
   // Esc menutup pemutar pratinjau.
   useEffect(() => {
-    if (!preview) return;
+    if (!preview && !detail) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setPreview(null);
+      if (event.key !== 'Escape') return;
+      setPreview(null);
+      setDetail(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [preview]);
+  }, [preview, detail]);
 
   const activeCount = jobs.filter((job) => ['queued', 'rendering', 'uploading'].includes(job.status)).length;
 
@@ -156,6 +161,25 @@ export function VideoStudioPage() {
 
   const doneCount = jobs.filter((job) => job.status === 'done').length;
   const failedCount = jobs.filter((job) => job.status === 'failed').length;
+
+  // Batal / ulangi. Server yang memutuskan transisi mana yang sah — UI hanya
+  // menampilkan tombol untuk status yang memang punya jalan keluar.
+  const act = async (job: VideoJob, next: 'canceled' | 'queued') => {
+    setBusyId(job.id);
+    try {
+      const updated = await updateVideoJob(job.id, { status: next });
+      setJobs((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setDetail((current) => (current && current.id === updated.id ? updated : current));
+      toast(
+        next === 'canceled' ? `Job "${job.title}" dibatalkan.` : `Job "${job.title}" masuk antrean lagi.`,
+        'success',
+      );
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Gagal memperbarui job.', 'danger');
+    } finally {
+      setBusyId('');
+    }
+  };
 
   // Sel pratinjau: thumbnail dari Drive, diklik untuk memutar di modal.
   const previewCell = (job: VideoJob) => {
@@ -287,6 +311,7 @@ export function VideoStudioPage() {
                 <th>Ukuran</th>
                 <th>Dibuat</th>
                 <th>File</th>
+                <th>Aksi</th>
               </tr>
             </thead>
             <tbody>
@@ -301,6 +326,7 @@ export function VideoStudioPage() {
                     <Badge tone={STATUS_TONE[job.status]} dot>
                       {STATUS_LABEL[job.status]}
                     </Badge>
+                    {(job.attempts ?? 0) > 0 && <div className="cell-sub">percobaan ke-{(job.attempts ?? 0) + 1}</div>}
                     {job.status === 'failed' && job.error && <div className="cell-sub">{job.error}</div>}
                   </td>
                   <td>{previewCell(job)}</td>
@@ -317,6 +343,33 @@ export function VideoStudioPage() {
                     ) : (
                       <span className="muted-small">—</span>
                     )}
+                  </td>
+                  <td>
+                    <div className="row-actions">
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDetail(job)}>
+                        Detail
+                      </button>
+                      {(job.status === 'queued' || job.status === 'rendering' || job.status === 'uploading') && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => void act(job, 'canceled')}
+                          disabled={busyId === job.id}
+                        >
+                          Batal
+                        </button>
+                      )}
+                      {(job.status === 'failed' || job.status === 'canceled') && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => void act(job, 'queued')}
+                          disabled={busyId === job.id}
+                        >
+                          Ulangi
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -361,6 +414,111 @@ export function VideoStudioPage() {
               <a className="btn btn-ghost btn-sm" href={preview.driveWebLink ?? '#'} target="_blank" rel="noreferrer">
                 Buka di Drive <ExternalLink size={12} />
               </a>
+            </div>
+          </div>
+        </div>
+      )}
+      {detail && (
+        <div className="overlay overlay-center" onClick={() => setDetail(null)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <h2>{detail.title}</h2>
+                <p>
+                  {detail.id} · {STATUS_LABEL[detail.status]} · {detail.width}×{detail.height}
+                </p>
+              </div>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDetail(null)} aria-label="Tutup">
+                <X size={14} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <dl className="brief-list">
+                <div>
+                  <dt>Template</dt>
+                  <dd>{templates.find((item) => item.id === detail.templateId)?.name ?? detail.templateId}</dd>
+                </div>
+                <div>
+                  <dt>Durasi</dt>
+                  <dd>
+                    {(detail.durationFrames / (detail.fps || 30)).toFixed(1)} s · {detail.fps} fps ·{' '}
+                    {detail.durationFrames} frame
+                  </dd>
+                </div>
+                <div>
+                  <dt>Percobaan</dt>
+                  <dd>ke-{(detail.attempts ?? 0) + 1}</dd>
+                </div>
+                <div>
+                  <dt>Dibuat</dt>
+                  <dd>{formatWhen(detail.createdAt)}</dd>
+                </div>
+                <div>
+                  <dt>Mulai render</dt>
+                  <dd>{formatWhen(detail.startedAt)}</dd>
+                </div>
+                <div>
+                  <dt>Selesai</dt>
+                  <dd>{formatWhen(detail.finishedAt)}</dd>
+                </div>
+                {detail.bytes ? (
+                  <div>
+                    <dt>Ukuran</dt>
+                    <dd>{formatBytes(detail.bytes)}</dd>
+                  </div>
+                ) : null}
+              </dl>
+
+              <h3 className="brief-title">Brief yang dipakai</h3>
+              <dl className="brief-list">
+                {Object.entries(detail.props ?? {}).length === 0 ? (
+                  <div>
+                    <dt>—</dt>
+                    <dd>Job ini tidak menyimpan props.</dd>
+                  </div>
+                ) : (
+                  Object.entries(detail.props ?? {}).map(([key, value]) => (
+                    <div key={key}>
+                      <dt>{key}</dt>
+                      <dd>{String(value)}</dd>
+                    </div>
+                  ))
+                )}
+              </dl>
+
+              {detail.error ? (
+                <>
+                  <h3 className="brief-title">Error terakhir</h3>
+                  <p className="detail-error">{detail.error}</p>
+                </>
+              ) : null}
+            </div>
+            <div className="modal-foot">
+              {detail.driveWebLink ? (
+                <a className="btn btn-ghost btn-sm" href={detail.driveWebLink} target="_blank" rel="noreferrer">
+                  Buka file <ExternalLink size={12} />
+                </a>
+              ) : null}
+              {(detail.status === 'failed' || detail.status === 'canceled') && (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => void act(detail, 'queued')}
+                  disabled={busyId === detail.id}
+                >
+                  Ulangi job ini
+                </button>
+              )}
+              {(detail.status === 'queued' || detail.status === 'rendering' || detail.status === 'uploading') && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => void act(detail, 'canceled')}
+                  disabled={busyId === detail.id}
+                >
+                  Batalkan
+                </button>
+              )}
             </div>
           </div>
         </div>
