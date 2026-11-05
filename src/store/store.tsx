@@ -27,11 +27,13 @@ import type {
   Approval,
   User,
   RawLead,
+  Outreach,
   LandingPageConfig,
 } from '../data/types';
 import { SEED } from '../data/seed';
 import { hasPermission } from '../lib/permissions';
 import { dayOffset, uid } from '../lib/utils';
+import { fetchOffice, fetchOutreach, getCredential, saveOutreach, type OutreachStatus } from '../lib/api';
 
 const STORE_KEY = 'playdesign.os.v2';
 const THEME_KEY = 'playdesign.theme';
@@ -122,6 +124,8 @@ interface StoreValue {
   schedulePost: (postId: string, date: string) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
   addMemory: (input: { title: string; scope: string; content: string; tags: string[] }) => void;
+  syncFromApi: () => Promise<{ ok: boolean; count: number; error?: string }>;
+  setOutreach: (lead: RawLead, status: OutreachStatus, note?: string) => Promise<void>;
   resetData: () => void;
 }
 
@@ -226,6 +230,93 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(ROLE_KEY, role);
   }, [role]);
 
+  /* ------------------------------------------------------------------ */
+  /* D1 sync — pull scraped leads from the Worker API                    */
+  /* ------------------------------------------------------------------ */
+
+  const syncFromApi = useCallback(async (): Promise<{ ok: boolean; count: number; error?: string }> => {
+    try {
+      const [snapshot, outreachRows] = await Promise.all([
+        fetchOffice('playdesign'),
+        fetchOutreach().catch(() => []),
+      ]);
+      const apiLeads = snapshot.leads ?? [];
+      const mapped: RawLead[] = apiLeads.map((lead) => ({
+        id: lead.id,
+        name: lead.name || lead.company || 'Tanpa nama',
+        company: lead.company || lead.name || 'Tanpa nama',
+        source:
+          lead.sourceType === 'instagram'
+            ? 'Instagram'
+            : lead.sourceType === 'website'
+              ? 'Direktori'
+              : 'Google Maps',
+        phone: lead.phone,
+        email: lead.email && !lead.email.endsWith('@wa.leads') ? lead.email : undefined,
+        city: lead.location,
+        status:
+          lead.status === 'verified'
+            ? 'Verified'
+            : lead.status === 'imported'
+              ? 'Imported'
+              : lead.status === 'invalid'
+                ? 'Ignored'
+                : 'Raw',
+        scrapedAt: lead.lastActivity || new Date().toISOString(),
+        category: lead.category,
+        fullAddress: lead.fullAddress,
+        rating: lead.rating,
+        whatsappVerified: lead.whatsappVerified,
+        whatsappLink: lead.whatsappLink,
+        googleMapsUrl: lead.googleMapsUrl,
+        sourceUrl: lead.sourceUrl ?? lead.googleMapsUrl,
+        sourceType: lead.sourceType === 'instagram' || lead.sourceType === 'website' ? lead.sourceType : 'gmaps',
+        instagram: lead.instagram,
+        confidenceScore: lead.confidenceScore,
+      }));
+      setDb((prev) => ({
+        ...prev,
+        rawLeads: mapped,
+        outreach: outreachRows.map((row) => ({
+          id: row.id,
+          leadId: row.leadId,
+          leadName: row.leadName ?? '',
+          company: row.company ?? '',
+          phone: row.phone ?? undefined,
+          category: row.category ?? undefined,
+          city: row.city ?? undefined,
+          status: row.status,
+          channel: 'whatsapp' as const,
+          note: row.note ?? undefined,
+          contactedAt: row.contactedAt,
+          repliedAt: row.repliedAt ?? undefined,
+          updatedAt: row.updatedAt,
+        })),
+      }));
+      return { ok: true, count: mapped.length };
+    } catch (error) {
+      if ((error as { status?: number } | null)?.status === 401) {
+        return {
+          ok: false,
+          count: 0,
+          error: 'Token ditolak server. Tempel token terbaru di layar akses.',
+        };
+      }
+      const message = error instanceof Error ? error.message : 'Gagal menyinkronkan data dari D1.';
+      return { ok: false, count: 0, error: message };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (getCredential()) {
+      void syncFromApi();
+    }
+    const onTokenSet = () => {
+      void syncFromApi();
+    };
+    window.addEventListener('pd-token-set', onTokenSet);
+    return () => window.removeEventListener('pd-token-set', onTokenSet);
+  }, [syncFromApi]);
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
     if (timers.current[id]) {
@@ -245,6 +336,61 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const can = useCallback((permission: Permission) => hasPermission(role, permission), [role]);
 
+  /* ------------------------------------------------------------------ */
+  /* Outreach — WhatsApp follow-up tracking (persisted to D1)            */
+  /* ------------------------------------------------------------------ */
+
+  const setOutreach = useCallback(
+    async (lead: RawLead, status: OutreachStatus, note?: string) => {
+      const now = new Date().toISOString();
+      const replied = status === 'replied' || status === 'interested' || status === 'deal';
+
+      setDb((prev) => {
+        const list = prev.outreach ?? [];
+        const existing = list.find((row) => row.leadId === lead.id);
+        const nextRow: Outreach = {
+          id: existing?.id ?? uid('lo'),
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+          phone: lead.phone,
+          category: lead.category,
+          city: lead.city,
+          status,
+          channel: 'whatsapp',
+          note: note ?? existing?.note,
+          contactedAt: existing?.contactedAt ?? now,
+          repliedAt: replied ? existing?.repliedAt ?? now : existing?.repliedAt,
+          updatedAt: now,
+        };
+        return {
+          ...prev,
+          outreach: existing
+            ? list.map((row) => (row.leadId === lead.id ? nextRow : row))
+            : [nextRow, ...list],
+        };
+      });
+
+      try {
+        await saveOutreach({
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+          phone: lead.phone,
+          category: lead.category,
+          city: lead.city,
+          status,
+          note,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Gagal menyimpan status follow up.';
+        toast(message, 'danger');
+      }
+    },
+    [toast],
+  );
+
+>>>>>>> upstream/main
   const setRole = useCallback((next: Role) => {
     setRoleState(next);
   }, []);
@@ -725,20 +871,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       name: raw.name,
       company: raw.company,
       phone: raw.phone ?? '',
-      businessType: 'Lainnya',
+      businessType: raw.source === 'Google Maps' ? 'UMKM' : 'Lainnya',
       source:
         raw.source === 'Instagram'
           ? 'Instagram'
           : raw.source === 'LinkedIn'
           ? 'LinkedIn'
           : 'Outbound',
-      value: 0,
+      value: raw.source === 'Google Maps' ? 5_000_000 : 0,
       ownerId: user.id,
       status: 'Baru',
       createdAt: now(),
-      note: `Diimpor dari Lead Scraper (${raw.source}). Kota: ${raw.city ?? 'Tidak diketahui'}.${
+      note: `Diimpor dari Lead Scraper (${raw.source}).${
+        raw.category ? ` Kategori: ${raw.category}.` : ''
+      } Kota: ${raw.city ?? 'Tidak diketahui'}.${
+        raw.fullAddress ? ` Alamat: ${raw.fullAddress}.` : ''
+      }${raw.rating != null ? ` Rating GMaps: ${raw.rating}/5.` : ''}${
         raw.email ? ` Email: ${raw.email}.` : ''
-      }`,
+      }${raw.sourceUrl ? ` Sumber: ${raw.sourceUrl}.` : ''}`,
     };
     setDb((prev) => {
       const next = {
@@ -1057,6 +1207,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       addScrapedLeads,
       updateLandingConfig,
       resetData,
+      syncFromApi,
+      setOutreach,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [db, role, theme, navCollapsed, toasts, can, user],

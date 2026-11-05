@@ -3,6 +3,7 @@ import {
   Building2,
   CalendarClock,
   CalendarDays,
+  Clapperboard,
   FileCheck2,
   Image as ImageIcon,
   Inbox,
@@ -42,6 +43,7 @@ export const MODULE_TABS: Record<string, SubTab[]> = {
     { label: 'Social Planner', path: '/marketing/social', icon: CalendarClock },
     { label: 'Landing Pages', path: '/marketing/landing-cms', icon: LayoutTemplate },
     { label: 'Media', path: '/marketing/media', icon: ImageIcon },
+    { label: 'Video Studio', path: '/marketing/video', icon: Clapperboard },
     { label: 'Content Library', path: '/marketing/library', icon: Library },
   ],
   leads: [
@@ -152,6 +154,7 @@ export const CRUMBS: Record<string, { section: string; page: string }> = {
   '/marketing/pages': { section: 'Marketing & Content', page: 'Pages' },
   '/marketing/editor': { section: 'Marketing & Content', page: 'Post Editor' },
   '/marketing/media': { section: 'Marketing & Content', page: 'Media' },
+  '/marketing/video': { section: 'Marketing & Content', page: 'Video Studio' },
   '/marketing/social': { section: 'Marketing & Content', page: 'Social Planner' },
   '/marketing/library': { section: 'Marketing & Content', page: 'Content Library' },
   '/marketing/comments': { section: 'Marketing & Content', page: 'Comments' },

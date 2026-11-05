@@ -7,11 +7,16 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Node modules
 node_modules
 dist
 dist-ssr
 *.local
+_legacy/
+*.tsbuildinfo
+
+# Cloudflare
+.wrangler
+.dev.vars
 
 # Editor directories and files
 .vscode/*
@@ -24,11 +29,11 @@ dist-ssr
 *.sln
 *.sw?
 
-# TypeScript cache
-*.tsbuildinfo
-
 # Environment variables
 .env
 .env.*
 !.env.example
 
+# Python
+__pycache__/
+*.pyc

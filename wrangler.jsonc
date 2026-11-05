@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "playdesign-office-crm",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "office-crm",
+      "database_id": "6edc7e5e-b448-49dc-8654-94ea3bc9d7a1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "triggers": {
+    "crons": ["0 1 * * *"]
+  },
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "kantor.playdesign.my.id", "custom_domain": true }
+  ]
+}

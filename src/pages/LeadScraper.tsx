@@ -1,15 +1,20 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight,
   Building2,
   Check,
+  CheckCheck,
   CheckCircle2,
+  Clock,
+  ExternalLink,
   Filter,
+  Handshake,
   Instagram,
   Linkedin,
   Mail,
   MapPin,
+  MessageCircle,
   Phone,
   Play,
   Plus,
@@ -17,6 +22,8 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
 } from 'lucide-react';
 import { useStore } from '../store/store';
 import {
@@ -27,62 +34,40 @@ import {
   Field,
   Fig,
   PageHead,
-  Progress,
   SearchField,
   Tabs,
 } from '../components/ui';
 import { WhatsAppIcon } from '../components/icons';
 import { fmtDate, waLink } from '../lib/utils';
-import type { RawLead } from '../data/types';
+import type { RawLead, OutreachStatus } from '../data/types';
+import {
+  createScrapeRequest,
+  listScrapeRequests,
+  type ScrapeRequestRow,
+  type ScrapeRequestStatus,
+} from '../lib/api';
 
-const DEMO_PEOPLE = [
-  'Dewi Pratama',
-  'Rizky Hidayat',
-  'Sinta Lestari',
-  'Fajar Kusuma',
-  'Nadia Anggraini',
-  'Bima Saputra',
-  'Ayu Wulandari',
-  'Hendra Wijaya',
-  'Maya Sari',
-  'Galih Permana',
-];
-
-const DEMO_SUFFIXES = [
-  'Studio',
-  'Group',
-  'Kreatif',
-  'Digital',
-  'Lab',
-  'Kolektif',
-  'Prima',
-  'Nusantara',
-  'Works',
-  'Haus',
-];
-
-const slugify = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
-
-const buildDemoLeads = (
-  source: RawLead['source'],
-  keyword: string,
-  city: string,
-  total: number,
-): RawLead[] => {
-  const base = slugify(keyword) || 'prospek';
-  return Array.from({ length: total }, (_, index) => ({
-    id: `rl-demo-${Date.now()}-${index}`,
-    name: DEMO_PEOPLE[index % DEMO_PEOPLE.length],
-    company: `${keyword.trim()} ${DEMO_SUFFIXES[index % DEMO_SUFFIXES.length]}`,
-    source,
-    phone: `08${Math.floor(1000000000 + Math.random() * 8999999999)}`,
-    email: `hello@${base}${index + 1}.id`,
-    instagram: `@${base}${index + 1}`,
-    city: city.trim(),
-    status: index % 4 === 0 ? 'Raw' : 'Verified',
-    scrapedAt: new Date().toISOString(),
-  }));
+const SOURCE_LABEL: Record<string, string> = {
+  gmaps: 'GMaps',
+  instagram: 'Instagram',
+  website: 'Web',
 };
+
+const hostOf = (url?: string) => {
+  if (!url) return '';
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+};
+
+const mapsSearchUrl = (company: string, city?: string) =>
+  `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+    [company, city].filter(Boolean).join(' '),
+  )}`;
+
+const instagramUrl = (handle: string) => `https://instagram.com/${handle.replace(/^@/, '')}`;
 
 const sourceIcon = (source: RawLead['source']) => {
   switch (source) {
@@ -104,15 +89,73 @@ function RawStatusBadge({ status }: { status: RawLead['status'] }) {
   return <Badge tone="warning" dot>Perlu review</Badge>;
 }
 
-export function LeadScraperPage() {
-  const { db, importRawLeadToCrm, addScrapedLeads, toast } = useStore();
+function QueueBadge({ status }: { status: ScrapeRequestStatus }) {
+  if (status === 'running') return <Badge tone="info" dot>Diproses</Badge>;
+  if (status === 'done') return <Badge tone="success" dot>Selesai</Badge>;
+  if (status === 'failed') return <Badge tone="danger" dot>Gagal</Badge>;
+  return <Badge tone="warning" dot>Menunggu</Badge>;
+}
 
-  const [source, setSource] = useState<RawLead['source']>('Google Maps');
-  const [keyword, setKeyword] = useState('Skincare & Aesthetic Clinic');
-  const [city, setCity] = useState('Bandung');
-  const [limit, setLimit] = useState(2);
-  const [isScraping, setIsScraping] = useState(false);
-  const [progress, setProgress] = useState(0);
+const OUTREACH_LABEL: Record<OutreachStatus, string> = {
+  contacted: 'Sudah dihubungi',
+  replied: 'Dibalas',
+  interested: 'Tertarik',
+  not_interested: 'Tidak tertarik',
+  deal: 'Deal',
+};
+
+const OUTREACH_ORDER: OutreachStatus[] = [
+  'contacted',
+  'replied',
+  'interested',
+  'not_interested',
+  'deal',
+];
+
+const outreachIcon = (status: OutreachStatus) => {
+  switch (status) {
+    case 'contacted':
+      return <MessageCircle size={12} />;
+    case 'replied':
+      return <CheckCheck size={12} />;
+    case 'interested':
+      return <ThumbsUp size={12} />;
+    case 'not_interested':
+      return <ThumbsDown size={12} />;
+    default:
+      return <Handshake size={12} />;
+  }
+};
+
+function FollowUpBadge({ status }: { status?: OutreachStatus }) {
+  if (!status) return <span className="muted-small">Belum dihubungi</span>;
+  if (status === 'deal') return <Badge tone="success" dot>Deal</Badge>;
+  if (status === 'interested') return <Badge tone="success" dot>Tertarik</Badge>;
+  if (status === 'replied') return <Badge tone="info" dot>Dibalas</Badge>;
+  if (status === 'not_interested') return <Badge tone="neutral" dot>Tidak tertarik</Badge>;
+  return <Badge tone="warning" dot>Sudah dihubungi</Badge>;
+}
+
+/** D1 stores `datetime('now')` as UTC without a zone marker — normalise it. */
+const parseDbDate = (value?: string | null): number => {
+  if (!value) return 0;
+  const normalised = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+  const time = new Date(normalised).getTime();
+  return Number.isNaN(time) ? 0 : time;
+};
+
+export function LeadScraperPage() {
+  const { db, importRawLeadToCrm, toast, syncFromApi, setOutreach } = useStore();
+
+  const [keyword, setKeyword] = useState('katering harian');
+  const [city, setCity] = useState('Semarang');
+  const [limit, setLimit] = useState(5);
+  const [requesting, setRequesting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  const [requests, setRequests] = useState<ScrapeRequestRow[]>([]);
+  const handledRef = useRef<Set<string>>(new Set());
+  const primedRef = useRef(false);
 
   const [tab, setTab] = useState('all');
   const [cityFilter, setCityFilter] = useState('all');
@@ -123,6 +166,55 @@ export function LeadScraperPage() {
   const [customPitch, setCustomPitch] = useState('');
 
   const rawLeads = db.rawLeads ?? [];
+
+  const outreachMap = useMemo(
+    () => new Map((db.outreach ?? []).map((row) => [row.leadId, row])),
+    [db.outreach],
+  );
+
+  /** Leads contacted 2+ days ago that never replied — the follow-up backlog. */
+  const needsFollowUp = useMemo(() => {
+    const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    return rawLeads
+      .filter((lead) => {
+        const row = outreachMap.get(lead.id);
+        if (!row || row.status !== 'contacted') return false;
+        return parseDbDate(row.contactedAt) <= cutoff;
+      })
+      .sort(
+        (a, b) =>
+          parseDbDate(outreachMap.get(a.id)?.contactedAt) -
+          parseDbDate(outreachMap.get(b.id)?.contactedAt),
+      );
+  }, [rawLeads, outreachMap]);
+
+  /** Reply-rate per keyword — shows which scrape keyword actually converts. */
+  const keywordStats = useMemo(() => {
+    const stats = new Map<string, { total: number; contacted: number; replied: number }>();
+    rawLeads.forEach((lead) => {
+      const key = lead.category?.trim() || 'Lainnya';
+      const bucket = stats.get(key) ?? { total: 0, contacted: 0, replied: 0 };
+      bucket.total += 1;
+      const row = outreachMap.get(lead.id);
+      if (row) {
+        bucket.contacted += 1;
+        if (row.status === 'replied' || row.status === 'interested' || row.status === 'deal') {
+          bucket.replied += 1;
+        }
+      }
+      stats.set(key, bucket);
+    });
+    return Array.from(stats.entries())
+      .map(([keyword, value]) => ({
+        keyword,
+        ...value,
+        rate: value.contacted ? Math.round((value.replied / value.contacted) * 100) : 0,
+      }))
+      .sort((a, b) => b.contacted - a.contacted || b.total - a.total)
+      .slice(0, 6);
+  }, [rawLeads, outreachMap]);
+
+  const activeOutreach = activeLead ? outreachMap.get(activeLead.id) : undefined;
 
   const counts = {
     all: rawLeads.length,
@@ -150,27 +242,94 @@ export function LeadScraperPage() {
   const selectable = filtered.filter((lead) => lead.status !== 'Imported');
   const allSelected = selectable.length > 0 && selectable.every((lead) => selectedIds.includes(lead.id));
 
-  const handleStartScrape = () => {
+  /* --- queue polling ------------------------------------------------- */
+  const refreshRequests = useCallback(async () => {
+    try {
+      const rows = await listScrapeRequests();
+      setRequests(rows);
+
+      if (!primedRef.current) {
+        rows.forEach((row) => handledRef.current.add(row.id));
+        primedRef.current = true;
+        return;
+      }
+
+      const finished = rows.filter(
+        (row) => row.status === 'done' && !handledRef.current.has(row.id),
+      );
+      const failed = rows.filter(
+        (row) => row.status === 'failed' && !handledRef.current.has(row.id),
+      );
+      if (!finished.length && !failed.length) return;
+
+      [...finished, ...failed].forEach((row) => handledRef.current.add(row.id));
+
+      failed.forEach((row) => {
+        toast(
+          `Scraping "${row.keyword}" di ${row.city} gagal. ${row.error ?? ''}`.trim(),
+          'danger',
+        );
+      });
+
+      if (finished.length) {
+        const inserted = finished.reduce((sum, row) => sum + Number(row.inserted ?? 0), 0);
+        const result = await syncFromApi();
+        if (!result.ok) {
+          toast(result.error ?? 'Hasil scraping masuk, tapi gagal ditarik ke UI.', 'danger');
+        } else if (inserted > 0) {
+          toast(`${inserted} prospek baru dari hasil scraping sudah masuk antrean.`, 'success');
+        } else {
+          toast('Scraping selesai, tapi tidak ada kontak baru yang ditemukan.', 'warning');
+        }
+      }
+    } catch {
+      /* offline / token issue — TokenGate handles auth */
+    }
+  }, [syncFromApi, toast]);
+
+  useEffect(() => {
+    refreshRequests();
+    const timer = window.setInterval(refreshRequests, 20_000);
+    return () => window.clearInterval(timer);
+  }, [refreshRequests]);
+
+  /* --- actions ------------------------------------------------------- */
+  const handleRequestScrape = async () => {
     if (!keyword.trim() || !city.trim()) {
       toast('Kata kunci dan kota target wajib diisi.', 'danger');
       return;
     }
 
-    setIsScraping(true);
-    setProgress(15);
+    setRequesting(true);
+    try {
+      await createScrapeRequest({ city: city.trim(), keyword: keyword.trim(), maxLeads: limit });
+      await refreshRequests();
+      toast(
+        `Permintaan scraping "${keyword.trim()}" di ${city.trim()} dikirim ke antrean. Runner memproses tiap ±5 menit.`,
+        'success',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Gagal mengirim permintaan scraping.';
+      toast(message, 'danger');
+    } finally {
+      setRequesting(false);
+    }
+  };
 
-    window.setTimeout(() => setProgress(55), 450);
-    window.setTimeout(() => setProgress(85), 950);
+  const handleSyncFromD1 = async () => {
+    setSyncing(true);
+    const result = await syncFromApi();
+    setSyncing(false);
+    if (result.ok) {
+      toast(`${result.count} prospek ditarik dari database D1.`, 'success');
+    } else {
+      toast(result.error ?? 'Gagal menyinkronkan data dari D1.', 'danger');
+    }
+  };
 
-    window.setTimeout(() => {
-      addScrapedLeads(buildDemoLeads(source, keyword, city, limit), { silent: true });
-      setIsScraping(false);
-      setProgress(100);
-      setTab('all');
-      setCityFilter('all');
-      setQuery('');
-      toast(`Simulasi selesai. ${limit} prospek demo masuk ke antrean review.`, 'success');
-    }, 1450);
+  const handleOutreach = async (lead: RawLead, status: OutreachStatus) => {
+    await setOutreach(lead, status);
+    toast(`Status follow up ${lead.company}: ${OUTREACH_LABEL[status]}.`, 'success');
   };
 
   const toggleSelect = (id: string) => {
@@ -202,15 +361,29 @@ export function LeadScraperPage() {
     );
   };
 
+  const pendingCount = requests.filter(
+    (row) => row.status === 'pending' || row.status === 'running',
+  ).length;
+
   return (
     <>
       <PageHead
         kicker="CRM · Lead generation"
         title="Lead Scraper"
-        desc="Kumpulkan prospek dari sumber publik, review kualitasnya, lalu impor ke Leads. Saat ini mode demo — hasil scrape masih simulasi."
+        desc="Prospek UMKM Jawa Tengah hasil scraping nyata yang tersimpan di database D1. Minta scrape baru, lalu review hasilnya sebelum diimpor ke Leads."
         actions={
           <div className="head-inline">
-            <Badge tone="warning" dot>Mode demo</Badge>
+            <Badge tone="success" dot>Live D1</Badge>
+            {pendingCount > 0 && <Badge tone="warning" dot>{pendingCount} antre</Badge>}
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={handleSyncFromD1}
+              disabled={syncing}
+            >
+              <RefreshCw size={13} className={syncing ? 'spin' : undefined} />
+              {syncing ? 'Menarik data…' : 'Sync dari D1'}
+            </button>
             <Link to="/crm/leads" className="btn btn-ghost btn-sm">
               Buka Leads <ArrowRight size={13} />
             </Link>
@@ -230,7 +403,102 @@ export function LeadScraperPage() {
         <Fig label="Sudah di Leads" value={counts.imported} hint="Diimpor ke CRM" icon={<Check size={17} />} />
       </div>
 
-      <Card title="Parameter scrape" sub="Tentukan sumber, kata kunci, dan wilayah target.">
+      {needsFollowUp.length > 0 && (
+        <Card
+          title="Perlu follow up"
+          sub="Sudah dihubungi lebih dari 2 hari tapi belum ada balasan."
+        >
+          <div className="detail-stack">
+            {needsFollowUp.slice(0, 5).map((lead) => {
+              const row = outreachMap.get(lead.id);
+              const days = Math.max(
+                0,
+                Math.floor((Date.now() - parseDbDate(row?.contactedAt)) / 86_400_000),
+              );
+              return (
+                <div
+                  key={lead.id}
+                  className="detail-inline"
+                  style={{ justifyContent: 'space-between', gap: 10 }}
+                >
+                  <div>
+                    <strong>{lead.company}</strong>
+                    <span className="muted-small"> · {days} hari sejak dihubungi</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {lead.phone && (
+                      <a
+                        href={waLink(
+                          lead.phone,
+                          `Halo ${lead.name}, saya dari playdesign — menindaklanjuti pesan saya sebelumnya soal ${
+                            lead.category ?? 'layanan brand & website'
+                          } untuk ${lead.company}. Apakah sempat dibaca? Saya bisa kirim ringkasan singkat kalau membantu.`,
+                        )}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn btn-wa btn-xs"
+                      >
+                        <WhatsAppIcon size={12} /> Follow up
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-xs"
+                      onClick={() => openLeadDrawer(lead)}
+                    >
+                      Detail
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {needsFollowUp.length > 5 && (
+              <span className="field-hint">
+                +{needsFollowUp.length - 5} lead lain juga menunggu follow up.
+              </span>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {keywordStats.some((row) => row.contacted > 0) && (
+        <Card
+          title="Performa per kata kunci"
+          sub="Rasio balasan dari lead yang sudah benar-benar dihubungi."
+          bodyClass="no-pad"
+        >
+          <div className="table-wrap">
+            <table className="pd-table">
+              <thead>
+                <tr>
+                  <th>Kata kunci</th>
+                  <th>Total lead</th>
+                  <th>Dihubungi</th>
+                  <th>Dibalas</th>
+                  <th className="row-end">Rasio balas</th>
+                </tr>
+              </thead>
+              <tbody>
+                {keywordStats.map((row) => (
+                  <tr key={row.keyword}>
+                    <td>
+                      <span className="cell-main">{row.keyword}</span>
+                    </td>
+                    <td>{row.total}</td>
+                    <td>{row.contacted}</td>
+                    <td>{row.replied}</td>
+                    <td className="row-end">
+                      <strong>{row.rate}%</strong>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      <Card title="Parameter scrape" sub="Tentukan kata kunci, wilayah target, dan jumlah hasil.">
         <div className="scraper-config">
           <div className="scraper-source-row">
             <span className="field-label">Sumber platform</span>
@@ -242,18 +510,21 @@ export function LeadScraperPage() {
                   ['LinkedIn', <Linkedin key="li" size={14} />],
                   ['Direktori', <Building2 key="dir" size={14} />],
                 ] as Array<[RawLead['source'], JSX.Element]>
-              ).map(([value, icon]) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={`source-pill ${source === value ? 'is-active' : ''}`}
-                  onClick={() => setSource(value)}
-                  disabled={isScraping}
-                >
-                  {icon}
-                  {value === 'Direktori' ? 'Direktori bisnis' : value}
-                </button>
-              ))}
+              ).map(([value, icon]) => {
+                const supported = value === 'Google Maps';
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`source-pill ${supported ? 'is-active' : ''}`}
+                    disabled
+                    title={supported ? 'Didukung runner' : 'Belum didukung runner otomatis'}
+                  >
+                    {icon}
+                    {value === 'Direktori' ? 'Direktori bisnis' : value}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -263,8 +534,8 @@ export function LeadScraperPage() {
                 className="input"
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
-                placeholder="Misal: skincare clinic, kedai kopi, software house"
-                disabled={isScraping}
+                placeholder="Misal: katering harian, konveksi kaos"
+                disabled={requesting}
               />
             </Field>
 
@@ -273,68 +544,110 @@ export function LeadScraperPage() {
                 className="input"
                 value={city}
                 onChange={(event) => setCity(event.target.value)}
-                placeholder="Misal: Bandung, Jakarta Selatan"
-                disabled={isScraping}
+                placeholder="Misal: Semarang, Solo, Kudus"
+                disabled={requesting}
               />
             </Field>
 
-            <Field label="Jumlah hasil (demo)">
+            <Field label="Jumlah hasil">
               <select
                 className="input"
                 value={limit}
                 onChange={(event) => setLimit(Number(event.target.value))}
-                disabled={isScraping}
+                disabled={requesting}
               >
-                <option value={2}>2 prospek</option>
+                <option value={3}>3 prospek</option>
                 <option value={5}>5 prospek</option>
                 <option value={10}>10 prospek</option>
+                <option value={20}>20 prospek</option>
               </select>
             </Field>
           </div>
-
-          {isScraping && (
-            <div className="scraper-inline-progress" role="status" aria-live="polite">
-              <RefreshCw size={15} className="spin" />
-              <div className="scraper-progress-body">
-                <div className="scraper-progress-meta">
-                  <span>
-                    Menyiapkan hasil simulasi untuk <strong>{keyword}</strong> di{' '}
-                    <strong>{city}</strong>…
-                  </span>
-                  <strong>{progress}%</strong>
-                </div>
-                <Progress value={progress} tone="brand" />
-              </div>
-            </div>
-          )}
 
           <div className="scraper-run-row">
             <div className="notice-inline">
               <ShieldCheck size={14} />
               <span>
-                Mode demo: data yang dihasilkan adalah simulasi, bukan hasil scraping nyata. Tidak
-                ada credential yang disimpan.
+                Permintaan masuk ke antrean D1 dan diproses runner otomatis tiap ±5 menit. Hasilnya
+                adalah kontak nyata (bukan simulasi) yang muncul di antrean review.
               </span>
             </div>
             <button
               type="button"
               className="btn btn-primary"
-              onClick={handleStartScrape}
-              disabled={isScraping}
+              onClick={handleRequestScrape}
+              disabled={requesting}
             >
-              {isScraping ? (
+              {requesting ? (
                 <>
-                  <RefreshCw size={14} className="spin" /> Menyiapkan…
+                  <RefreshCw size={14} className="spin" /> Mengirim…
                 </>
               ) : (
                 <>
-                  <Play size={14} /> Jalankan demo
+                  <Play size={14} /> Minta Scrape Sekarang
                 </>
               )}
             </button>
           </div>
         </div>
       </Card>
+
+      {requests.length > 0 && (
+        <Card
+          title="Antrean permintaan"
+          sub="Diproses otomatis oleh runner scraper. Halaman ini menyegarkan status tiap 20 detik."
+          bodyClass="no-pad"
+        >
+          <div className="table-wrap">
+            <table className="pd-table">
+              <thead>
+                <tr>
+                  <th>Kata kunci</th>
+                  <th>Kota</th>
+                  <th>Target</th>
+                  <th>Status</th>
+                  <th>Hasil</th>
+                  <th className="row-end">Diminta</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requests.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <span className="cell-main">{row.keyword}</span>
+                    </td>
+                    <td>
+                      <span className="scraper-location">
+                        <MapPin size={12} /> {row.city}
+                      </span>
+                    </td>
+                    <td>{row.max_leads}</td>
+                    <td>
+                      <QueueBadge status={row.status} />
+                    </td>
+                    <td>
+                      {row.inserted ? (
+                        <span className="muted-small">{row.inserted} lead</span>
+                      ) : row.error ? (
+                        <span className="muted-small" title={row.error}>
+                          —
+                        </span>
+                      ) : (
+                        <span className="muted-small">—</span>
+                      )}
+                    </td>
+                    <td className="row-end">
+                      <span className="muted-small">
+                        <Clock size={11} /> {fmtDate(row.requested_at)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {selectedIds.length > 0 && (
         <div className="scraper-bulk-bar" role="status" aria-live="polite">
@@ -402,12 +715,17 @@ export function LeadScraperPage() {
             desc={
               rawLeads.length
                 ? 'Ubah filter status, kota, atau kata kunci pencarian.'
-                : 'Jalankan scraper demo untuk mengisi antrean review.'
+                : 'Minta scrape baru untuk mengisi antrean review dari hasil pencarian nyata.'
             }
             action={
               rawLeads.length === 0 ? (
-                <button type="button" className="btn btn-primary btn-sm" onClick={handleStartScrape}>
-                  <Play size={14} /> Jalankan demo
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={handleRequestScrape}
+                  disabled={requesting}
+                >
+                  <Play size={14} /> Minta Scrape Sekarang
                 </button>
               ) : undefined
             }
@@ -431,6 +749,7 @@ export function LeadScraperPage() {
                   <th className="scraper-location-col">Lokasi</th>
                   <th>Kontak</th>
                   <th>Status</th>
+                  <th>Follow up</th>
                   <th className="scraper-date">Ditemukan</th>
                   <th className="row-end">Aksi</th>
                 </tr>
@@ -462,9 +781,24 @@ export function LeadScraperPage() {
                         </span>
                       </td>
                       <td>
-                        <span className="scraper-source">
-                          {sourceIcon(lead.source)} {lead.source}
-                        </span>
+                        {lead.sourceUrl ? (
+                          <a
+                            className="scraper-source scraper-source-link"
+                            href={lead.sourceUrl}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            title={`Buka sumber: ${lead.sourceUrl}`}
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            {sourceIcon(lead.source)}{' '}
+                            {SOURCE_LABEL[lead.sourceType ?? 'gmaps'] ?? lead.source}
+                            <ExternalLink size={11} />
+                          </a>
+                        ) : (
+                          <span className="scraper-source" title="Belum ada link sumber">
+                            {sourceIcon(lead.source)} {lead.source}
+                          </span>
+                        )}
                       </td>
                       <td className="scraper-location-col">
                         <span className="scraper-location">
@@ -493,6 +827,9 @@ export function LeadScraperPage() {
                       </td>
                       <td>
                         <RawStatusBadge status={lead.status} />
+                      </td>
+                      <td>
+                        <FollowUpBadge status={outreachMap.get(lead.id)?.status} />
                       </td>
                       <td className="scraper-date">
                         <span className="muted-small">{fmtDate(lead.scrapedAt)}</span>
@@ -613,7 +950,20 @@ export function LeadScraperPage() {
               </div>
               <div>
                 <span className="detail-label">Instagram</span>
-                <span className="detail-value">{activeLead.instagram ?? '—'}</span>
+                <span className="detail-value">
+                  {activeLead.instagram ? (
+                    <a
+                      className="detail-link"
+                      href={instagramUrl(activeLead.instagram)}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      {activeLead.instagram} <ExternalLink size={11} />
+                    </a>
+                  ) : (
+                    '—'
+                  )}
+                </span>
               </div>
               <div>
                 <span className="detail-label">Lokasi</span>
@@ -625,9 +975,109 @@ export function LeadScraperPage() {
               </div>
               <div>
                 <span className="detail-label">Sumber</span>
-                <span className="detail-value">{activeLead.source}</span>
+                <span className="detail-value">
+                  {activeLead.sourceUrl ? (
+                    <a
+                      className="detail-link"
+                      href={activeLead.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      title={activeLead.sourceUrl}
+                    >
+                      {hostOf(activeLead.sourceUrl)} <ExternalLink size={11} />
+                    </a>
+                  ) : (
+                    activeLead.source
+                  )}
+                </span>
+              </div>
+              {activeLead.category && (
+                <div>
+                  <span className="detail-label">Kategori</span>
+                  <span className="detail-value">{activeLead.category}</span>
+                </div>
+              )}
+              {activeLead.rating != null && (
+                <div>
+                  <span className="detail-label">Rating Google Maps</span>
+                  <span className="detail-value">{activeLead.rating} / 5</span>
+                </div>
+              )}
+              {activeLead.confidenceScore != null && (
+                <div>
+                  <span className="detail-label">Skor kepercayaan</span>
+                  <span className="detail-value">{Math.round(activeLead.confidenceScore * 100)}%</span>
+                </div>
+              )}
+              {activeLead.whatsappLink && (
+                <div>
+                  <span className="detail-label">Link WhatsApp</span>
+                  <span className="detail-value" style={{ wordBreak: 'break-all' }}>
+                    {activeLead.whatsappLink}
+                  </span>
+                </div>
+              )}
+              <div className="detail-source-actions">
+                <span className="detail-label">Verifikasi data</span>
+                <div className="detail-inline">
+                  {activeLead.sourceUrl && (
+                    <a
+                      className="btn btn-ghost"
+                      href={activeLead.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      <ExternalLink size={13} /> Buka halaman sumber
+                    </a>
+                  )}
+                  <a
+                    className="btn btn-ghost"
+                    href={mapsSearchUrl(activeLead.company, activeLead.city)}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    <MapPin size={13} /> Cek di Google Maps
+                  </a>
+                  {activeLead.instagram ? (
+                    <a
+                      className="btn btn-ghost"
+                      href={instagramUrl(activeLead.instagram)}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      <Instagram size={13} /> Buka Instagram
+                    </a>
+                  ) : (
+                    <a
+                      className="btn btn-ghost"
+                      href={`https://www.google.com/search?q=${encodeURIComponent(
+                        `${activeLead.company} ${activeLead.city ?? ''} site:instagram.com`,
+                      )}`}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      <Instagram size={13} /> Cari Instagram
+                    </a>
+                  )}
+                </div>
+                {activeLead.sourceUrl && (
+                  <span className="detail-hint" style={{ wordBreak: 'break-all' }}>
+                    {activeLead.sourceUrl}
+                  </span>
+                )}
               </div>
             </div>
+
+            {activeLead.fullAddress && (
+              <div className="detail-block">
+                <div className="detail-block-head">
+                  <MapPin size={14} /> Alamat lengkap
+                </div>
+                <p style={{ margin: 0, fontSize: '12.5px', lineHeight: 1.6, color: 'var(--ink-2)' }}>
+                  {activeLead.fullAddress}
+                </p>
+              </div>
+            )}
 
             <div className="ai-pitch-card">
               <div className="ai-pitch-head">
@@ -667,11 +1117,44 @@ export function LeadScraperPage() {
               <span className="field-hint">Pesan hanya mengisi draf. Tidak ada pengiriman otomatis.</span>
             </div>
 
+            <div className="detail-block">
+              <div className="detail-block-head">
+                <MessageCircle size={14} /> Status follow up
+              </div>
+              <div className="detail-inline" style={{ marginBottom: 8 }}>
+                <FollowUpBadge status={activeOutreach?.status} />
+                {activeOutreach?.contactedAt && (
+                  <span className="muted-small">
+                    Dihubungi {fmtDate(activeOutreach.contactedAt)}
+                    {activeOutreach.repliedAt ? ` · Dibalas ${fmtDate(activeOutreach.repliedAt)}` : ''}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {OUTREACH_ORDER.map((status) => {
+                  const active = activeOutreach?.status === status;
+                  return (
+                    <button
+                      key={status}
+                      type="button"
+                      className={`btn btn-xs ${active ? 'btn-primary' : 'btn-ghost'}`}
+                      onClick={() => handleOutreach(activeLead, status)}
+                    >
+                      {outreachIcon(status)} {OUTREACH_LABEL[status]}
+                    </button>
+                  );
+                })}
+              </div>
+              <span className="field-hint">
+                Catat setelah kamu benar-benar mengirim pesan. Tidak ada pesan yang dikirim otomatis.
+              </span>
+            </div>
+
             <div className="notice-inline">
               <ShieldCheck size={14} />
               <span>
-                Hasil scraping demo tidak menyimpan credential. Beberapa sumber memiliki ketentuan
-                penggunaan masing-masing.
+                Data ini berasal dari database D1 hasil scraping Google Maps. Tidak ada credential
+                yang disimpan. Beberapa sumber memiliki ketentuan penggunaan masing-masing.
               </span>
             </div>
           </div>

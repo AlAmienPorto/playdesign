@@ -1,4 +1,7 @@
+import { useEffect, useState } from 'react';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { getCredential } from './lib/api';
+import { TokenGate } from './components/TokenGate';
 import { StoreProvider } from './store/store';
 import { Shell } from './components/Shell';
 import { Overview } from './pages/Overview';
@@ -11,6 +14,7 @@ import {
   PipelinePage,
 } from './pages/Crm';
 import { LeadScraperPage } from './pages/LeadScraper';
+import { VideoStudioPage } from './pages/VideoStudio';
 import { LandingCmsPage } from './pages/LandingCms';
 import { CrmTemplates } from './pages/CrmTemplates';
 import {
@@ -71,6 +75,39 @@ import {
 } from './pages/System';
 
 export default function App() {
+  const [ready, setReady] = useState(() => Boolean(getCredential()));
+  const [notice, setNotice] = useState('');
+
+  // Any 401 from the API clears the stored token; drop back to the gate with a
+  // reason instead of leaving the UI half-broken with raw error messages.
+  useEffect(() => {
+    const onCleared = () => {
+      setNotice('Sesi berakhir — atau password/token sudah diganti. Silakan masuk lagi.');
+      setReady(false);
+    };
+    const onSet = () => {
+      setNotice('');
+      setReady(true);
+    };
+    window.addEventListener('pd-auth-cleared', onCleared);
+    window.addEventListener('pd-token-set', onSet);
+    return () => {
+      window.removeEventListener('pd-auth-cleared', onCleared);
+      window.removeEventListener('pd-token-set', onSet);
+    };
+  }, []);
+
+  if (!ready) {
+    return (
+      <TokenGate
+        notice={notice}
+        onReady={() => {
+          setNotice('');
+          setReady(true);
+        }}
+      />
+    );
+  }
   return (
     <StoreProvider>
       <HashRouter>
@@ -101,6 +138,7 @@ export default function App() {
             <Route path="/marketing/pages" element={<PagesPage />} />
             <Route path="/marketing/editor" element={<PostEditorPage />} />
             <Route path="/marketing/media" element={<MediaPage />} />
+            <Route path="/marketing/video" element={<VideoStudioPage />} />
             <Route path="/marketing/social" element={<SocialPlannerPage />} />
             <Route path="/marketing/library" element={<ContentLibraryPage />} />
             <Route path="/marketing/comments" element={<CommentsPage />} />
