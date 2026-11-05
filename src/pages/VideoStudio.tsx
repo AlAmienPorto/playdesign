@@ -300,6 +300,7 @@ export function VideoStudioPage() {
         {jobs.length === 0 ? (
           <EmptyState title="Belum ada job video" desc="Buat job pertama di panel atas." />
         ) : (
+          <div className="table-wrap">
           <table className="pd-table">
             <thead>
               <tr>
@@ -375,6 +376,7 @@ export function VideoStudioPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </Card>
 

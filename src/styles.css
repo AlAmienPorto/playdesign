@@ -3688,6 +3688,7 @@ select.input {
 }
 
 .schedule-title {
+  display: block;
   font-size: 11.9px;
   font-weight: 550;
   color: var(--ink);
@@ -3697,6 +3698,7 @@ select.input {
 }
 
 .schedule-meta {
+  display: block;
   font-size: 10.2px;
   color: var(--muted);
   white-space: nowrap;
@@ -9304,3 +9306,226 @@ button.folder-row { cursor: pointer; }
 
 
 
+
+
+/* ============================================================
+   MOBILE PROPORTIONS — 2026-11-05
+   Tujuan: tidak ada halaman yang meluber horizontal di 320–900px,
+   target sentuh >= 36px, dan tabel panjang bisa digeser tanpa
+   kehilangan kolom identitas (kolom pertama menempel).
+   ============================================================ */
+
+@media (max-width: 900px) {
+  /* --- target sentuh --- */
+  .topbar-menu,
+  .icon-btn {
+    width: 38px;
+    height: 38px;
+  }
+
+  .sidebar-mobile-close {
+    width: 34px;
+    height: 34px;
+  }
+
+  .nav-toggle {
+    width: 34px;
+    height: 34px;
+  }
+
+  .btn-sm {
+    min-height: 36px;
+    padding: 8px 12px;
+  }
+
+  .nav-entry {
+    min-height: 42px;
+  }
+
+  /* --- tabel: geser horizontal, kolom pertama menempel --- */
+  .table-wrap {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+
+  .table-wrap .pd-table th:first-child,
+  .table-wrap .pd-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--surface);
+    box-shadow: inset -1px 0 0 var(--line);
+  }
+
+  .table-wrap .pd-table tbody tr:hover td:first-child {
+    background: var(--surface-2);
+  }
+
+  .table-wrap .pd-table thead th:first-child {
+    z-index: 3;
+    background: var(--surface-2);
+  }
+
+  /* --- kartu & panel --- */
+  .card-head,
+  .card-body {
+    min-width: 0;
+  }
+
+  .page-head {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .page-head .page-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .page-head .page-actions .btn {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  /* topbar: yang menyusut adalah kolom pencarian, bukan tombol kanan */
+  .topbar {
+    gap: 8px;
+  }
+
+  .topbar-left {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .search-trigger {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .search-trigger span {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .topbar-right {
+    flex: none;
+    gap: 5px;
+  }
+
+  /* negative margin item jadwal bocor ~8px ke kanan */
+  .schedule-item {
+    margin: 0;
+  }
+
+  .schedule-item > * {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    height: 58px;
+    padding: 0 13px;
+  }
+
+  .main-content {
+    padding: 16px 13px 42px;
+  }
+
+  .page-title {
+    font-size: 21px;
+  }
+
+  .btn {
+    min-height: 38px;
+  }
+
+  .search-trigger .kbd {
+    display: none;
+  }
+
+  .btn-sm {
+    min-height: 34px;
+    padding: 7px 11px;
+    font-size: 12px;
+  }
+
+  .pd-table {
+    font-size: 12px;
+  }
+
+  .pd-table th,
+  .pd-table td {
+    padding: 9px 10px;
+  }
+
+  /* label kecil dinaikkan agar tetap terbaca */
+  .popover-label,
+  .nav-status,
+  .nav-section-label {
+    font-size: 10.5px;
+  }
+
+  /* modal penuh tapi tetap berjarak */
+  .overlay-center {
+    padding: 10px;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: 92dvh;
+    border-radius: 13px;
+  }
+
+  .modal-foot {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .modal-foot .btn {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  /* pratinjau video tetap dalam layar */
+  .video-preview-frame {
+    max-width: 100%;
+  }
+
+  .video-thumb,
+  .video-thumb-empty {
+    width: 66px;
+    height: 42px;
+  }
+}
+
+@media (max-width: 400px) {
+  .topbar {
+    padding: 0 11px;
+  }
+
+  .main-content {
+    padding: 14px 11px 38px;
+  }
+
+  .pd-table th,
+  .pd-table td {
+    padding: 8px 9px;
+  }
+
+  .modal-foot .btn {
+    flex-basis: 100%;
+  }
+
+  .search-trigger {
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .search-trigger span {
+    display: none;
+  }
+}
