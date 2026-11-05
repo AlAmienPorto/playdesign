@@ -259,6 +259,8 @@ export async function probeToken(token: string): Promise<boolean> {
 /* Video Studio — jobs point at Google Drive, never at this server     */
 /* ------------------------------------------------------------------ */
 
+import type { VideoSpec } from './video-spec';
+
 export type VideoJobStatus = 'queued' | 'rendering' | 'uploading' | 'done' | 'failed' | 'canceled';
 
 export interface VideoTemplateField {
@@ -296,11 +298,14 @@ export interface VideoJob {
   startedAt?: string | null;
   finishedAt?: string | null;
   props: Record<string, unknown>;
+  spec?: VideoSpec | null;
+  specVersion?: number;
+  localPath?: string | null;
 }
 
 export async function updateVideoJob(
   id: string,
-  patch: { status?: VideoJobStatus; error?: string | null },
+  patch: { status?: VideoJobStatus; error?: string | null; spec?: VideoSpec; localPath?: string | null },
 ): Promise<VideoJob> {
   const payload = await request<{ job: VideoJob }>(`/api/video/jobs/${encodeURIComponent(id)}`, {
     method: 'PATCH',
@@ -322,7 +327,8 @@ export async function fetchVideoJobs(limit = 20): Promise<VideoJob[]> {
 export async function createVideoJob(input: {
   templateId: string;
   title: string;
-  props: Record<string, unknown>;
+  props?: Record<string, unknown>;
+  spec?: VideoSpec;
 }): Promise<VideoJob> {
   const key =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto

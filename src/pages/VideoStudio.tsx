@@ -10,6 +10,7 @@ import {
   type VideoJobStatus,
   type VideoTemplate,
 } from '../lib/api';
+import { VideoComposer } from '../components/VideoComposer';
 import { useStore } from '../store/store';
 import './VideoStudio.css';
 
@@ -80,6 +81,7 @@ export function VideoStudioPage() {
   const [detail, setDetail] = useState<VideoJob | null>(null);
   const [busyId, setBusyId] = useState('');
   const [brokenThumbs, setBrokenThumbs] = useState<Record<string, boolean>>({});
+  const [mode, setMode] = useState<'studio' | 'template'>('studio');
 
   const template = useMemo(() => templates.find((item) => item.id === templateId), [templates, templateId]);
 
@@ -245,8 +247,36 @@ export function VideoStudioPage() {
 
       <Card
         title="Buat video baru"
-        sub="Pilih template, isi brief, lalu antrekan. File hasil tidak pernah mampir ke server ini."
+        sub="Tulis prompt, atur gaya dan scene, lihat pratinjaunya, lalu antrekan. Preview dan render memakai spesifikasi yang sama."
+        action={
+          <div className="studio-mode">
+            <button
+              type="button"
+              className={`studio-tab${mode === 'studio' ? ' is-active' : ''}`}
+              onClick={() => setMode('studio')}
+            >
+              Studio
+            </button>
+            <button
+              type="button"
+              className={`studio-tab${mode === 'template' ? ' is-active' : ''}`}
+              onClick={() => setMode('template')}
+            >
+              Template lama
+            </button>
+          </div>
+        }
       >
+        {mode === 'studio' ? (
+          <VideoComposer
+            onCreated={(job) => {
+              setJobs((current) => [job, ...current]);
+              void load(true);
+            }}
+            onToast={(message, tone) => toast(message, tone ?? 'success')}
+          />
+        ) : (
+        <>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
           <Field label="Template">
             <select className="input" value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
@@ -294,6 +324,8 @@ export function VideoStudioPage() {
             <Sparkles size={14} /> {saving ? 'Mengantrekan…' : 'Render & kirim ke Drive'}
           </button>
         </div>
+        </>
+        )}
       </Card>
 
       <Card title="Riwayat render" sub="Status diperbarui otomatis selama ada job berjalan.">
@@ -341,6 +373,10 @@ export function VideoStudioPage() {
                       <a className="detail-link" href={job.driveWebLink} target="_blank" rel="noreferrer">
                         Buka di Drive <ExternalLink size={12} />
                       </a>
+                    ) : job.localPath ? (
+                      <span className="muted-small" title={job.localPath}>
+                        Tersimpan lokal
+                      </span>
                     ) : (
                       <span className="muted-small">—</span>
                     )}
@@ -469,9 +505,59 @@ export function VideoStudioPage() {
                     <dd>{formatBytes(detail.bytes)}</dd>
                   </div>
                 ) : null}
+                <div>
+                  <dt>Penyimpanan</dt>
+                  <dd>{detail.driveWebLink ? 'Google Drive' : detail.localPath ? 'Mesin runner (lokal)' : '—'}</dd>
+                </div>
               </dl>
 
-              <h3 className="brief-title">Brief yang dipakai</h3>
+              <h3 className="brief-title">{detail.spec?.scenes?.length ? 'Spesifikasi video' : 'Brief yang dipakai'}</h3>
+              {detail.spec?.scenes?.length ? (
+                <dl className="brief-list">
+                  <div>
+                    <dt>Scene</dt>
+                    <dd>
+                      {detail.spec.scenes.length} scene · {detail.spec.scenes.reduce((sum, item) => sum + item.durationSec, 0).toFixed(1)} detik
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Gaya</dt>
+                    <dd>
+                      {detail.spec.style.preset} · {detail.spec.style.grade} · {detail.spec.style.pacing}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Render</dt>
+                    <dd>
+                      {detail.spec.render.aspect} · {detail.spec.render.fps} fps · {detail.spec.render.width}×{detail.spec.render.height}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Narasi</dt>
+                    <dd>{detail.spec.audio.voice.enabled ? detail.spec.audio.voice.voiceId : 'tanpa narasi'}</dd>
+                  </div>
+                  <div>
+                    <dt>Subtitle</dt>
+                    <dd>{detail.spec.subtitle.enabled ? `aktif (${detail.spec.subtitle.position})` : 'nonaktif'}</dd>
+                  </div>
+                  <div>
+                    <dt>Unggahan</dt>
+                    <dd>{detail.spec.render.upload ? 'ke Google Drive' : 'disimpan lokal'}</dd>
+                  </div>
+                  {detail.spec.prompt ? (
+                    <div>
+                      <dt>Prompt</dt>
+                      <dd>{detail.spec.prompt}</dd>
+                    </div>
+                  ) : null}
+                  {detail.spec.negativePrompt ? (
+                    <div>
+                      <dt>Negative</dt>
+                      <dd>{detail.spec.negativePrompt}</dd>
+                    </div>
+                  ) : null}
+                </dl>
+              ) : (
               <dl className="brief-list">
                 {Object.entries(detail.props ?? {}).length === 0 ? (
                   <div>
@@ -487,6 +573,7 @@ export function VideoStudioPage() {
                   ))
                 )}
               </dl>
+              )}
 
               {detail.error ? (
                 <>
@@ -500,6 +587,10 @@ export function VideoStudioPage() {
                 <a className="btn btn-ghost btn-sm" href={detail.driveWebLink} target="_blank" rel="noreferrer">
                   Buka file <ExternalLink size={12} />
                 </a>
+              ) : detail.localPath ? (
+                <span className="muted-small" title={detail.localPath}>
+                  File lokal: {detail.localPath.split('/').pop()}
+                </span>
               ) : null}
               {detail.driveFolderId && DRIVE_ID.test(detail.driveFolderId) ? (
                 <a

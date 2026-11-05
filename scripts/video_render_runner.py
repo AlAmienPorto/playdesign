@@ -34,17 +34,23 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import drive_upload  # noqa: E402
+import video_spec  # noqa: E402
 from gmaps_lead_scraper import BASE_URL, _headers  # noqa: E402
 
 WORKSPACE = os.environ.get("VIDEO_WORKSPACE", "playdesign")
 REMOTE = os.environ.get("VIDEO_REMOTE", "gdrive")
 REMOTE_BASE = os.environ.get("VIDEO_REMOTE_BASE", "Playdesign Video")
 REMOTION_DIR = Path(os.environ.get("REMOTION_DIR", str(Path.home() / "work" / "remotion-starter")))
+# edge-tts dipasang di venv terpisah supaya Python sistem tidak tersentuh.
+EDGE_TTS = os.environ.get("EDGE_TTS", str(Path.home() / ".venvs" / "media" / "bin" / "edge-tts"))
+# Kalau unggahan dimatikan, file tinggal di sini (bukan di infrastruktur Cloudflare).
+LOCAL_OUT_DIR = Path(os.environ.get("VIDEO_LOCAL_DIR", str(Path.home() / "work" / "drive-out" / "lokal")))
 RENDER_TIMEOUT = int(os.environ.get("VIDEO_RENDER_TIMEOUT", "1800"))
 
 
@@ -253,18 +259,81 @@ def run() -> int:
         lock.close()
 
 
+def needs_upload(job: dict) -> bool:
+    """Job tanpa spec selalu diunggah; job berspec mengikuti render.upload."""
+    spec = job.get("spec")
+    if isinstance(spec, dict) and isinstance(spec.get("render"), dict):
+        return spec["render"].get("upload") is not False
+    return True
+
+
+def prepare_assets(spec: dict, job_id: str) -> tuple[dict, list[Path]]:
+    """Suara + subtitle dari spec. File ditaruh di public/ agar `staticFile` jalan."""
+    assets: dict = {}
+    cleanup: list[Path] = []
+    audio_dir = REMOTION_DIR / "public" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    text = video_spec.narration(spec)
+    voice = (spec.get("audio") or {}).get("voice") or {}
+    if voice.get("enabled") and text.strip():
+        if not Path(EDGE_TTS).exists():
+            raise RuntimeError(
+                f"TTS tidak tersedia: {EDGE_TTS} tidak ditemukan. "
+                "Pasang dengan: python3 -m venv ~/.venvs/media && ~/.venvs/media/bin/pip install edge-tts"
+            )
+        mp3 = audio_dir / f"{job_id}.mp3"
+        srt = audio_dir / f"{job_id}.srt"
+        txt = audio_dir / f"{job_id}.txt"
+        txt.write_text(text, encoding="utf-8")
+        cmd = [
+            EDGE_TTS,
+            "--voice", str(voice.get("voiceId") or "id-ID-GadisNeural"),
+            "--rate", f"{int(voice.get('rate') or 0):+d}%",
+            "--pitch", f"{int(voice.get('pitch') or 0):+d}Hz",
+            "--file", str(txt),
+            "--write-media", str(mp3),
+            "--write-subtitles", str(srt),
+            "--no-progress",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0 or not mp3.exists() or mp3.stat().st_size == 0:
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+            raise RuntimeError("TTS gagal: " + " | ".join(detail)[:300])
+        assets["voiceover"] = f"audio/{job_id}.mp3"
+        cleanup.extend([mp3, srt, txt])
+        if (spec.get("subtitle") or {}).get("enabled") and srt.exists():
+            assets["captions"] = video_spec.parse_srt(srt.read_text(encoding="utf-8"))
+
+    music = (spec.get("audio") or {}).get("music") or {}
+    if music.get("enabled"):
+        ref = next(
+            (item for item in spec.get("references") or [] if item.get("id") == music.get("refId")),
+            None,
+        )
+        url = (ref or {}).get("url") or ""
+        if url.startswith(("http://", "https://")):
+            assets["music"] = url
+
+    return assets, cleanup
+
+
 def _run_locked() -> int:
-    jobs = api("GET", f"/api/video/jobs?workspace={WORKSPACE}&status=queued&limit=5").get("jobs", [])
-    if not jobs:
+    pending = api("GET", f"/api/video/jobs?workspace={WORKSPACE}&status=queued&limit=5").get("jobs", [])
+    if not pending:
         return 0
 
     mode, reason = uploader_status()
-    if mode is None:
+    # Job yang unggahannya dimatikan tetap boleh jalan tanpa Drive.
+    jobs = [job for job in pending if needs_upload(job) is False or mode is not None]
+    blocked = [job for job in pending if job not in jobs]
+    if blocked:
         # Job sengaja dibiarkan `queued`: brief tidak hilang dan akan diproses
         # otomatis begitu Drive siap. Peringatan dicetak sekali per job.
-        fresh = [job for job in jobs if warn_once(job["id"], reason)]
+        fresh = [job for job in blocked if warn_once(job["id"], reason)]
         if fresh:
-            print(f"{len(jobs)} job video menunggu, tapi {reason}. Job tetap di antrean.")
+            print(f"{len(blocked)} job video menunggu, tapi {reason}. Job tetap di antrean.")
+    if not jobs:
         return 0
 
     templates = {t["id"]: t for t in api("GET", "/api/video/templates").get("templates", [])}
@@ -284,16 +353,42 @@ def _run_locked() -> int:
             failed.append((job_id, "template hilang"))
             continue
 
+        spec = video_spec.normalize(claimed.get("spec"))
+        story_mode = bool(spec and spec.get("scenes"))
+        composition_id = (spec or {}).get("render", {}).get("compositionId") or template["compositionId"]
+
         api("PATCH", f"/api/video/jobs/{job_id}", {"status": "rendering"})
         tmp_dir = Path(tempfile.mkdtemp(prefix="pd-video-"))
         out_file = tmp_dir / "out.mp4"
+        assets: dict = {}
+        asset_files: list[Path] = []
         try:
-            render(template["compositionId"], claimed.get("props") or {}, out_file)
+            props = claimed.get("props") or {}
+            if story_mode:
+                assets, asset_files = prepare_assets(spec, job_id)
+                props = {"spec": spec, "assets": assets}
+            render(composition_id, props, out_file)
             size = out_file.stat().st_size
-            patch_soft(job_id, {"status": "uploading", "bytes": size})
 
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-            dest_name = f"{stamp}-{slugify(claimed.get('title', 'video'))}-{template['id']}-{job_id[-6:]}.mp4"
+            dest_name = f"{stamp}-{slugify(claimed.get('title', 'video'))}-{composition_id.lower()}-{job_id[-6:]}.mp4"
+
+            if story_mode and not spec["render"]["upload"]:
+                # Unggahan dimatikan: file tetap di mesin runner, bukan di Cloudflare.
+                LOCAL_OUT_DIR.mkdir(parents=True, exist_ok=True)
+                local_path = LOCAL_OUT_DIR / dest_name
+                shutil.move(str(out_file), local_path)
+                updated = patch_soft(
+                    job_id,
+                    {"status": "done", "bytes": size, "localPath": str(local_path), "error": None},
+                )
+                if updated is None:
+                    cancelled.append((job_id, dest_name))
+                else:
+                    done.append((job_id, f"{dest_name} (lokal)", size))
+                continue
+
+            patch_soft(job_id, {"status": "uploading", "bytes": size})
             file_id, link, folder = upload_with_retry(out_file, dest_name, job_id=job_id, mode=mode)
             updated = patch_soft(
                 job_id,
@@ -316,6 +411,8 @@ def _run_locked() -> int:
             patch_soft(job_id, {"status": "failed", "error": str(exc)[:500]})
             failed.append((job_id, str(exc)[:120]))
         finally:
+            for asset in asset_files:
+                asset.unlink(missing_ok=True)
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if done or failed or cancelled:

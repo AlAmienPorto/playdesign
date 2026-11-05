@@ -119,3 +119,201 @@
   color: #b42318;
   background: rgba(180, 35, 24, 0.08);
 }
+
+/* ---------- Studio berbasis spec (VideoSpec v1) ---------- */
+
+.studio-mode {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.studio-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.studio-tabs::-webkit-scrollbar { display: none; }
+
+.studio-tab {
+  flex: none;
+  padding: 7px 11px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.studio-tab:hover { color: var(--ink); }
+.studio-tab.is-active { color: var(--ink); background: var(--surface-3); }
+
+.studio-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 20px;
+  align-items: start;
+}
+
+.studio-editor { min-width: 0; }
+
+.studio-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.studio-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.studio-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.studio-chips .chip {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface);
+  transition: border-color 0.14s, color 0.14s, background 0.14s;
+}
+
+.studio-chips .chip:hover { color: var(--ink); border-color: var(--line-strong); }
+.studio-chips .chip.is-active {
+  color: var(--surface);
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+.studio-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.studio-check input { margin-top: 2px; flex: none; }
+.studio-check strong { display: block; font-size: 12.5px; font-weight: 650; }
+.studio-check em {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.4px;
+  font-style: normal;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.studio-hint {
+  font-size: 11.6px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.studio-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.scene-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+
+.scene-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.scene-index {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11.4px;
+  font-weight: 700;
+  color: var(--muted);
+  flex: none;
+}
+
+.scene-duration { width: 72px; flex: none; }
+.scene-row-actions { display: flex; gap: 2px; margin-left: auto; }
+
+.input-sm { height: 30px; padding: 0 8px; font-size: 12px; }
+
+.studio-aside {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.studio-preview {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.studio-player { margin: 0 auto; }
+.studio-render { width: 100%; justify-content: center; }
+
+.story-player-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.story-player-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+@media (max-width: 1100px) {
+  .studio-grid { grid-template-columns: minmax(0, 1fr); }
+  .studio-aside { position: static; }
+  .studio-preview { max-width: 320px; margin: 0 auto; }
+}
+
+@media (max-width: 560px) {
+  .studio-row { grid-template-columns: minmax(0, 1fr); }
+  .scene-row-head { gap: 5px; }
+  .scene-row-actions { margin-left: 0; width: 100%; justify-content: flex-end; }
+}
+
+.studio-player-skeleton {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 9 / 16;
+  width: min(100%, 33.75vh);
+  margin: 0 auto;
+  border-radius: 10px;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 11.6px;
+}

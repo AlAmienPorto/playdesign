@@ -17,5 +17,5 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["worker"]
+  "include": ["worker", "src/lib/video-spec.ts"]
 }

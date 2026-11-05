@@ -11,6 +11,7 @@ import { handleAgentChat, handleClearAgentMessages, handleGetAgentMessages } fro
 import { runQcGate, saveQcNote } from "./qc";
 
 import { insertScrapedLeads } from "./scraper";
+import { normalizeSpec as normalizeSpecShared } from "../src/lib/video-spec";
 
 export interface Env {
   DB: D1Database;
@@ -1889,6 +1890,9 @@ interface VideoJobRow {
   template_id: string;
   title: string;
   props: string;
+  spec: string | null;
+  spec_version: number | null;
+  local_path: string | null;
   status: string;
   engine: string;
   fps: number;
@@ -1916,7 +1920,9 @@ const VIDEO_ASPECTS: Record<string, { width: number; height: number }> = {
 /** Forward-only state machine; anything not listed is rejected. */
 const VIDEO_TRANSITIONS: Record<string, string[]> = {
   queued: ["rendering", "canceled", "failed"],
-  rendering: ["uploading", "failed", "canceled"],
+  // `rendering -> done` sah untuk job yang unggahannya dimatikan: file final
+  // tinggal di mesin runner (local_path), tidak melewati tahap unggah.
+  rendering: ["uploading", "done", "failed", "canceled"],
   uploading: ["done", "failed"],
   done: [],
   failed: ["queued"],
@@ -1957,13 +1963,70 @@ const videoJobView = (row: VideoJobRow) => ({
   startedAt: row.started_at,
   finishedAt: row.finished_at,
   props: parseJsonSafe(row.props, {}),
+  spec: parseJsonSafe(row.spec, null),
+  specVersion: row.spec_version ?? 1,
+  localPath: row.local_path,
 });
+
+/** Suara yang tersedia di runner (edge-tts). Daftar ini yang dipakai UI. */
+const VIDEO_VOICES = [
+  { id: "id-ID-GadisNeural", label: "Gadis (perempuan, Indonesia)", lang: "id-ID", gender: "female" },
+  { id: "id-ID-ArdiNeural", label: "Ardi (laki-laki, Indonesia)", lang: "id-ID", gender: "male" },
+  { id: "en-US-AriaNeural", label: "Aria (perempuan, Inggris)", lang: "en-US", gender: "female" },
+  { id: "en-US-GuyNeural", label: "Guy (laki-laki, Inggris)", lang: "en-US", gender: "male" },
+];
+
+const VIDEO_SPEC_MAX_BYTES = 48 * 1024;
+const VIDEO_SPEC_SCENE_LIMIT = 24;
+
+const clampNumber = (raw: unknown, min: number, max: number, fallback: number) => {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
+};
+
+const clampInt = (raw: unknown, min: number, max: number, fallback: number) =>
+  Math.round(clampNumber(raw, min, max, fallback));
+
+/**
+ * Normalisasi spec di sisi server. Memakai fungsi yang sama dengan Web UI
+ * (src/lib/video-spec.ts) supaya preview, data D1, dan renderer tidak pernah
+ * berbeda tafsir. Runner tetap menormalkan ulang sebelum render (job lama aman).
+ */
+function normalizeVideoSpec(raw: unknown, templateAspect: string) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const aspect = (VIDEO_ASPECTS[templateAspect] ? templateAspect : "9:16") as "9:16" | "16:9" | "1:1";
+  const spec = normalizeSpecShared(raw, aspect);
+  const scenes = spec.scenes.slice(0, VIDEO_SPEC_SCENE_LIMIT);
+  const durationSec = clampNumber(spec.render.durationSec, 3, 120, 15);
+  const fps = clampInt(spec.render.fps, 24, 60, 30);
+  const dims = VIDEO_ASPECTS[spec.render.aspect] ?? VIDEO_ASPECTS["9:16"];
+  const width = clampInt(spec.render.width, 320, 2160, dims.width);
+  const height = clampInt(spec.render.height, 320, 2160, dims.height);
+
+  return {
+    spec: {
+      ...spec,
+      version: 1,
+      scenes,
+      durationSec,
+      render: { ...spec.render, durationSec, fps, width, height, upload: spec.render.upload !== false },
+    },
+    durationSec,
+    fps,
+    width,
+    height,
+  };
+}
 
 function videoConfig(env: Env) {
   return json({
     uploader: "runner",
     driveFolder: env.VIDEO_DRIVE_FOLDER ?? "",
     maxDurationSec: 120,
+    specVersion: 1,
+    voices: VIDEO_VOICES,
+    uploadOptional: true,
     note: "Video files are rendered off-platform and uploaded straight to Google Drive. Nothing is stored on this server.",
   });
 }
@@ -2010,7 +2073,7 @@ async function listVideoJobs(env: Env, req: Request) {
   return json({ jobs: (rows.results ?? []).map(videoJobView) });
 }
 
-async function getVideoJob(env: Env, req: Request, id: string) {
+async function getVideoJob(env: Env, _req: Request, id: string) {
   const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
   if (!row) fail(404, "job_not_found", "Job video tidak ditemukan.");
   return json({ job: videoJobView(row) });
@@ -2028,6 +2091,7 @@ async function createVideoJob(env: Env, req: Request) {
     templateId?: string;
     title?: string;
     props?: Record<string, unknown>;
+    spec?: Record<string, unknown>;
     engine?: string;
     workspace?: string;
   };
@@ -2044,17 +2108,26 @@ async function createVideoJob(env: Env, req: Request) {
     .first<{ id: string; composition_id: string; aspect: string }>();
   if (!template) fail(404, "template_not_found", "Template video tidak dikenal.");
 
+  const specJson = body.spec ? JSON.stringify(body.spec) : "";
+  if (specJson.length > VIDEO_SPEC_MAX_BYTES) {
+    fail(400, "spec_too_large", `Spesifikasi video maksimal ${Math.round(VIDEO_SPEC_MAX_BYTES / 1024)} KB.`);
+  }
+  const normalized = body.spec ? normalizeVideoSpec(body.spec, template.aspect) : null;
+  if (body.spec && !normalized) fail(400, "invalid_spec", "Spesifikasi video harus berupa objek JSON.");
+
   const props = (body.props ?? {}) as Record<string, unknown>;
   const propsJson = JSON.stringify(props);
   if (propsJson.length > 8192) fail(400, "props_too_large", "Props video maksimal 8 KB.");
 
-  const fps = 30;
-  const requestedSec = Number(props.durationSec);
+  const fps = normalized?.fps ?? 30;
+  const requestedSec = normalized?.durationSec ?? Number(props.durationSec);
   const durationSec = Number.isFinite(requestedSec) ? Math.min(Math.max(requestedSec, 3), 120) : 15;
   const durationFrames = Math.round(durationSec * fps);
-  if (durationFrames > 3600) fail(400, "invalid_request", "Durasi maksimal 120 detik.");
+  if (durationFrames > 7200) fail(400, "invalid_request", "Durasi maksimal 120 detik.");
 
-  const aspect = VIDEO_ASPECTS[template.aspect] ?? VIDEO_ASPECTS["9:16"];
+  const aspect = normalized
+    ? { width: normalized.width, height: normalized.height }
+    : VIDEO_ASPECTS[template.aspect] ?? VIDEO_ASPECTS["9:16"];
   const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
   const engine = body.engine === "browser" ? "browser" : "runner";
 
@@ -2084,8 +2157,8 @@ async function createVideoJob(env: Env, req: Request) {
 
   await env.DB.prepare(
     `INSERT INTO video_jobs
-       (id, workspace_id, template_id, title, props, status, engine, fps, duration_frames, width, height, created_by, idempotency_key)
-     VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+       (id, workspace_id, template_id, title, props, spec, spec_version, status, engine, fps, duration_frames, width, height, created_by, idempotency_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -2093,6 +2166,8 @@ async function createVideoJob(env: Env, req: Request) {
       template.id,
       title,
       propsJson,
+      normalized ? JSON.stringify(normalized.spec) : "{}",
+      normalized ? 1 : 0,
       engine,
       fps,
       durationFrames,
@@ -2117,6 +2192,8 @@ async function patchVideoJob(env: Env, req: Request, id: string) {
     driveFileId?: string;
     driveWebLink?: string;
     driveFolderId?: string;
+    localPath?: string | null;
+    spec?: Record<string, unknown>;
     error?: string | null;
   };
 
@@ -2132,8 +2209,29 @@ async function patchVideoJob(env: Env, req: Request, id: string) {
       );
     }
   }
-  if (next === "done" && !(body.driveFileId ?? current.drive_file_id)) {
-    fail(400, "drive_file_required", "Job hanya bisa selesai kalau driveFileId terisi.");
+  const localPathNext = body.localPath === undefined ? current.local_path : body.localPath;
+  if (next === "done" && !(body.driveFileId ?? current.drive_file_id) && !localPathNext) {
+    fail(
+      400,
+      "output_required",
+      "Job hanya bisa selesai kalau driveFileId terisi atau localPath dicatat (unggahan dimatikan).",
+    );
+  }
+
+  // Spec hanya boleh diubah sebelum runner mengambil job; setelah rendering
+  // dimulai, spesifikasi terkunci supaya hasil dan preview tidak berbeda.
+  let specJson: string | null = null;
+  if (body.spec) {
+    if (current.status !== "queued") {
+      fail(409, "spec_locked", "Spesifikasi tidak bisa diubah setelah rendering dimulai.");
+    }
+    const raw = JSON.stringify(body.spec);
+    if (raw.length > VIDEO_SPEC_MAX_BYTES) {
+      fail(400, "spec_too_large", `Spesifikasi video maksimal ${Math.round(VIDEO_SPEC_MAX_BYTES / 1024)} KB.`);
+    }
+    const normalized = normalizeVideoSpec(body.spec, "9:16");
+    if (!normalized) fail(400, "invalid_spec", "Spesifikasi video harus berupa objek JSON.");
+    specJson = JSON.stringify(normalized.spec);
   }
 
   // `queued` = job diulang: bersihkan sisa percobaan sebelumnya supaya UI tidak
@@ -2167,6 +2265,8 @@ async function patchVideoJob(env: Env, req: Request, id: string) {
             drive_file_id = ?,
             drive_web_link = ?,
             drive_folder_id = ?,
+            local_path = ?,
+            spec = COALESCE(?, spec),
             error = ?,
             attempts = ?,
             started_at = CASE
@@ -2182,6 +2282,8 @@ async function patchVideoJob(env: Env, req: Request, id: string) {
       driveFileId,
       driveWebLink,
       isRetry ? null : body.driveFolderId?.trim() || current.drive_folder_id,
+      isRetry ? null : body.localPath === undefined ? current.local_path : body.localPath,
+      specJson,
       error,
       attempts,
       isRetry ? 1 : 0,
