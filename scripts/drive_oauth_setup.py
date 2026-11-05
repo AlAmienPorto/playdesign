@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Sekali jalan: hubungkan Google Drive ke mesin ini lewat OAuth device flow.
+"""Sekali jalan: hubungkan Google Drive ke mesin ini lewat OAuth.
 
-Cocok untuk mesin tanpa browser (sandbox). Alurnya:
+Dua alur, pilih sesuai tipe OAuth client yang Anda buat di Google Cloud Console:
 
-  1. skrip menampilkan URL dan kode 8 huruf
-  2. Anda buka URL itu di browser laptop, login, masukkan kode, setujui
-  3. skrip menerima refresh token dan menulis ~/.config/playdesign/drive.json (chmod 600)
+  --flow device  (default)  client tipe "TVs and Limited Input devices"
+                            skrip menampilkan URL + kode 8 huruf
+
+  --flow manual             client tipe "Desktop app"
+                            skrip menampilkan URL; setelah Anda menyetujui, browser
+                            gagal membuka 127.0.0.1 — salin kode dari address bar
+                            lalu tempel ke terminal
 
 Client id/secret TIDAK ditanyakan lewat obrolan: Anda mengetiknya di terminal ini,
-atau menaruhnya di env. Yang perlu dibuat di Google Cloud Console: OAuth client
-tipe "TVs and Limited Input devices" + Drive API diaktifkan.
+atau menaruhnya di env. Hasilnya ~/.config/playdesign/drive.json (chmod 600).
 
-Contoh:
-  python3 scripts/drive_oauth_setup.py --client-id XXX.apps.googleusercontent.com
-  # client secret akan diminta (input tersembunyi)
-
-Setelah selesai, runner otomatis memakai Drive API (tidak perlu rclone).
+Periksa dulu tanpa menyetujui apa pun:
+  python3 drive_oauth_setup.py --client-id XXX.apps.googleusercontent.com --check
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import stat
 import sys
 import time
@@ -33,6 +34,8 @@ from drive_upload import DEFAULT_CONFIG, _decode_error, _http
 
 DEVICE_URL = os.environ.get("PLAYDESIGN_DEVICE_URL", "https://oauth2.googleapis.com/device/code")
 TOKEN_URL = os.environ.get("PLAYDESIGN_OAUTH_TOKEN_URL", "https://oauth2.googleapis.com/token")
+AUTH_URL = os.environ.get("PLAYDESIGN_AUTH_URL", "https://accounts.google.com/o/oauth2/v2/auth")
+
 # drive.file = hanya file/folder yang dibuat aplikasi ini. Scope ini tidak
 # tergolong sensitif, jadi aplikasi bisa dipakai tanpa verifikasi Google dan
 # refresh token tidak kedaluwarsa 7 hari seperti aplikasi berstatus "Testing".
@@ -42,13 +45,82 @@ SCOPES = {
     "drive.file": "https://www.googleapis.com/auth/drive.file",
     "drive": "https://www.googleapis.com/auth/drive",
 }
+CLIENT_ID_SUFFIX = ".apps.googleusercontent.com"
+# Port loopback apa saja sah untuk client tipe Desktop app; tidak ada yang
+# mendengarkan di sini — itu disengaja, kodenya disalin manual.
+MANUAL_REDIRECT = "http://127.0.0.1:53682"
+
+
+def diagnose_client_id(client_id: str) -> list[str]:
+    """Cari kesalahan yang paling sering terjadi sebelum memanggil Google."""
+    problems: list[str] = []
+    value = client_id.strip()
+    if not value:
+        return ["client id kosong"]
+    if re.fullmatch(r"\d{6,}", value):
+        problems.append("ini nomor project, bukan OAuth client id")
+    if value.startswith("GOCSPX-"):
+        problems.append("ini client SECRET (berawalan GOCSPX-), bukan client id")
+    if value.startswith("AIza"):
+        problems.append("ini API key, bukan OAuth client id")
+    if value.startswith("ya29."):
+        problems.append("ini access token, bukan client id")
+    if any(c.isspace() for c in value):
+        problems.append("ada spasi/baris baru di dalam client id")
+    if value != client_id:
+        problems.append("ada spasi di awal/akhir (sudah dibuang otomatis)")
+    if not value.endswith(CLIENT_ID_SUFFIX):
+        problems.append(f"tidak berakhiran {CLIENT_ID_SUFFIX} — kemungkinan terpotong saat menyalin")
+    elif not re.fullmatch(r"\d+-[a-z0-9]+" + re.escape(CLIENT_ID_SUFFIX), value):
+        problems.append("bentuknya tidak seperti client id Google (harus <angka>-<acak>.apps.googleusercontent.com)")
+    return problems
+
+
+def explain_oauth_error(status: int, body: bytes, flow: str) -> str:
+    """Terjemahkan error OAuth jadi langkah perbaikan, bukan cuma kode."""
+    raw = _decode_error(body)
+    lines = [f"Google menolak ({status}): {raw}"]
+    lowered = raw.lower()
+    if "invalid_client" in lowered or status == 401:
+        lines += [
+            "",
+            "Artinya Google tidak mengenali client id itu. Urutan pemeriksaan:",
+            "  1. Client id harus dari project yang SAMA dengan tempat Drive API diaktifkan.",
+            "  2. Salin ulang dari Credentials → OAuth 2.0 Client IDs; kolomnya panjang,",
+            "     sering terpotong saat menyalin. Pastikan berakhiran .apps.googleusercontent.com",
+            "  3. Tipe client harus cocok dengan alur:",
+            "       TVs and Limited Input devices  ->  --flow device",
+            "       Desktop app                    ->  --flow manual",
+            "     Client tipe \"Web application\" tidak bisa dipakai di sini.",
+            "  4. Kalau client-nya pernah dihapus, buat baru.",
+        ]
+    elif "unauthorized_client" in lowered:
+        lines += [
+            "",
+            "Client id dikenali, tapi tipenya tidak mendukung alur ini.",
+            "  - Buat client tipe \"TVs and Limited Input devices\" lalu pakai --flow device",
+            "  - atau client tipe \"Desktop app\" lalu pakai --flow manual",
+        ]
+    elif "access_denied" in lowered:
+        lines += ["", "Persetujuan dibatalkan di browser. Jalankan ulang dan klik Allow."]
+    elif "invalid_grant" in lowered:
+        lines += ["", "Kode sudah dipakai atau kedaluwarsa. Jalankan ulang skrip ini."]
+    elif "admin_policy" in lowered or "org_internal" in lowered:
+        lines += [
+            "",
+            "Akun Anda dibatasi kebijakan organisasi (Workspace).",
+            "  - Pakai akun Gmail pribadi, atau",
+            "  - minta admin mengizinkan aplikasi ini, atau",
+            "  - pakai mode service_account + Shared Drive.",
+        ]
+    return "\n".join(lines)
 
 
 def request_device_code(client_id: str, scope: str = "drive.file") -> dict:
     form = urllib.parse.urlencode({"client_id": client_id, "scope": SCOPES[scope]}).encode()
     status, _, body = _http("POST", DEVICE_URL, form, {"Content-Type": "application/x-www-form-urlencoded"})
     if status != 200:
-        raise RuntimeError(f"permintaan kode ditolak ({status}): {_decode_error(body)}")
+        raise RuntimeError(explain_oauth_error(status, body, "device"))
     return json.loads(body.decode())
 
 
@@ -82,8 +154,48 @@ def poll_for_token(
         if error == "slow_down":
             interval += 1
             continue
-        raise RuntimeError(f"persetujuan gagal: {error or _decode_error(body)}")
+        raise RuntimeError(explain_oauth_error(status, body, "device"))
     raise RuntimeError("kode kedaluwarsa sebelum disetujui; jalankan ulang skrip ini")
+
+
+def build_auth_url(client_id: str, scope: str = "drive.file") -> str:
+    query = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": MANUAL_REDIRECT,
+            "response_type": "code",
+            "scope": SCOPES[scope],
+            "access_type": "offline",
+            "prompt": "consent",
+        }
+    )
+    return f"{AUTH_URL}?{query}"
+
+
+def extract_code(answer: str) -> str:
+    """Terima kode mentah atau URL lengkap hasil redirect."""
+    text = answer.strip().strip('"').strip("'")
+    if "code=" in text:
+        query = urllib.parse.urlsplit(text).query or text.split("?", 1)[-1]
+        values = urllib.parse.parse_qs(query)
+        return (values.get("code") or [""])[0].strip()
+    return text
+
+
+def exchange_code(client_id: str, client_secret: str, code: str) -> dict:
+    form = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": MANUAL_REDIRECT,
+        }
+    ).encode()
+    status, _, body = _http("POST", TOKEN_URL, form, {"Content-Type": "application/x-www-form-urlencoded"})
+    if status != 200:
+        raise RuntimeError(explain_oauth_error(status, body, "manual"))
+    return json.loads(body.decode())
 
 
 def write_config(
@@ -114,41 +226,90 @@ def write_config(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Hubungkan Google Drive via OAuth device flow.")
+    parser = argparse.ArgumentParser(description="Hubungkan Google Drive via OAuth.")
     parser.add_argument("--client-id", default=os.environ.get("GOOGLE_CLIENT_ID", ""))
     parser.add_argument("--folder", default=os.environ.get("PLAYDESIGN_DRIVE_FOLDER", "Playdesign Video"))
     parser.add_argument("--out", default=str(DEFAULT_CONFIG))
+    parser.add_argument(
+        "--flow",
+        choices=("device", "manual"),
+        default="device",
+        help="device = client TV & Limited Input; manual = client Desktop app",
+    )
     parser.add_argument(
         "--scope",
         choices=sorted(SCOPES),
         default="drive.file",
         help="drive.file (default, tanpa verifikasi) atau drive (akses penuh)",
     )
+    parser.add_argument("--check", action="store_true", help="hanya uji client id, tidak menyetujui apa pun")
     parser.add_argument("--no-verify", action="store_true", help="jangan uji folder setelah token didapat")
     args = parser.parse_args()
 
     client_id = args.client_id.strip()
     if not client_id:
         client_id = input("OAuth client id: ").strip()
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "") or getpass.getpass("OAuth client secret (tidak ditampilkan): ").strip()
-    if not client_id or not client_secret:
-        print("client id dan secret wajib diisi.", file=sys.stderr)
+
+    problems = diagnose_client_id(client_id)
+    if problems:
+        print("Client id bermasalah:", file=sys.stderr)
+        for item in problems:
+            print(f"  - {item}", file=sys.stderr)
+        print("\nPerbaiki dulu, lalu jalankan lagi.", file=sys.stderr)
         return 2
 
-    device = request_device_code(client_id, args.scope)
-    url = device.get("verification_url") or device.get("verification_uri")
-    print("\nBuka URL ini di browser, login, lalu masukkan kode di bawah:\n")
-    print(f"  URL  : {url}")
-    print(f"  Kode : {device.get('user_code')}")
-    print(f"\nMenunggu persetujuan (kedaluwarsa dalam {device.get('expires_in', 1800)} detik)...")
+    if args.check:
+        print(f"Client id berbentuk benar ({len(client_id)} karakter). Menguji ke Google...")
+        try:
+            device = request_device_code(client_id, args.scope)
+        except RuntimeError as exc:
+            print(f"\n{exc}", file=sys.stderr)
+            return 1
+        print(
+            "Diterima Google. Client ini siap dipakai.\n"
+            f"  verification_url: {device.get('verification_url') or device.get('verification_uri')}\n"
+            f"  interval        : {device.get('interval')} detik"
+        )
+        return 0
 
-    token = poll_for_token(
-        client_id,
-        client_secret,
-        device["device_code"],
-        float(device.get("interval") or 5),
-        time.time() + float(device.get("expires_in") or 1800),
-    )
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "") or getpass.getpass(
+        "OAuth client secret (tidak ditampilkan): "
+    ).strip()
+    if not client_secret:
+        print("client secret wajib diisi.", file=sys.stderr)
+        return 2
+
+    try:
+        if args.flow == "device":
+            device = request_device_code(client_id, args.scope)
+            print("\nBuka URL ini di browser, login, lalu masukkan kode di bawah:\n")
+            print(f"  URL  : {device.get('verification_url') or device.get('verification_uri')}")
+            print(f"  Kode : {device.get('user_code')}")
+            print(f"\nMenunggu persetujuan (kedaluwarsa dalam {device.get('expires_in', 1800)} detik)...")
+            token = poll_for_token(
+                client_id,
+                client_secret,
+                device["device_code"],
+                float(device.get("interval") or 5),
+                time.time() + float(device.get("expires_in") or 1800),
+            )
+        else:
+            print("\nBuka URL ini di browser, login, lalu klik Allow:\n")
+            print(build_auth_url(client_id, args.scope))
+            print(
+                "\nBrowser akan gagal membuka 127.0.0.1 — itu wajar."
+                "\nSalin seluruh URL dari address bar (atau hanya nilai code=), tempel di bawah."
+            )
+            answer = input("\nURL/kode: ")
+            code = extract_code(answer)
+            if not code:
+                print("kode kosong.", file=sys.stderr)
+                return 2
+            token = exchange_code(client_id, client_secret, code)
+    except RuntimeError as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        return 1
+
     refresh_token = token.get("refresh_token")
     if not refresh_token:
         print(
