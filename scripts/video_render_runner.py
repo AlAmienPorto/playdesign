@@ -60,7 +60,8 @@ def slugify(text: str, limit: int = 40) -> str:
     slug = "".join(keep)
     while "--" in slug:
         slug = slug.replace("--", "-")
-    return slug.strip("-")[:limit] or "video"
+    # rstrip setelah dipotong: "abc def" limit=4 -> "abc-", bukan "abc"
+    return slug.strip("-")[:limit].rstrip("-") or "video"
 
 
 def rclone_status(remote: str) -> tuple[bool, str]:
