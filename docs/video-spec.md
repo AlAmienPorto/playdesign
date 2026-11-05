@@ -28,6 +28,7 @@ dashboard baru.
                 "durationSec": 4, "title": "…", "body": "…",
                 "items": ["…"], "transitionIn": "fade", "media": {…} } ],
   "references": [ { "role": "style|motion|subject|music|sfx", "url": "…", "strength": 0.6 } ],
+  "generation": { "provider": "none|replicate", "enabled": false, "mode": "text-to-video" },
   "audio": { "script": "…", "voice": { "enabled": true, "voiceId": "id-ID-GadisNeural", "rate": 0, "pitch": 0 },
              "music": { "enabled": false, "volume": 18 } },
   "subtitle": { "enabled": true, "position": "bottom|center|top", "fontSizePct": 4.2, "boxed": true },
@@ -95,11 +96,41 @@ Bukti uji terakhir (2026-11-05): job `vj-mw3k57o5-ca0l6p` → 6,0 s, h264 + aac,
 276 KB, `local_path` terisi, tanpa unggahan; job `vj-mw3jrak4-0kt8h7` (dari UI,
 unggahan aktif) → 643 KB di Drive.
 
+## Revisi satu scene dengan Workers AI
+
+`POST /api/video/scenes/revise` — auth workspace yang sama dengan endpoint video lain.
+
+```jsonc
+// request
+{ "workspace": "playdesign",
+  "instruction": "judul lebih tegas, durasi 3 detik",   // 3–600 karakter
+  "scene": { "id": "sc-…", "kind": "title", "durationSec": 4, "title": "…", "media": { "refId": "ref-…" } },
+  "prompt": "…", "style": { … }, "sceneIndex": 0, "sceneCount": 2 }
+
+// response 200
+{ "scene": { …hanya field yang diizinkan berubah… }, "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast" }
+```
+
+Aturan yang dipaksa server:
+
+- Hanya `kind`, `durationSec`, `title`, `body`, `items`, `transitionIn`, `media.fit`,
+  `media.motion` yang boleh berubah.
+- `id` dan `media.refId` selalu diambil dari scene lama, bukan dari balasan model.
+- Balasan model diparse (`extractSceneRevision`) lalu dinormalkan (`sanitizeSceneRevision`).
+  JSON rusak → `502 invalid_ai_response` dan scene lama tidak berubah.
+- Model 70B dicoba lebih dulu, fallback ke 8B hanya bila inferensi gagal; keduanya gagal →
+  `503 ai_service_unavailable`.
+
+UI: tab **Scene** di `#/marketing/video` punya satu kotak instruksi + tombol **Revisi AI**
+per scene. Hanya scene itu yang diganti (`replaceScene()`), scene lain memakai objek lama.
+
 ## Yang belum ada (jujur)
 
-- Reference Manager (unggah gambar/video/audio) belum punya endpoint unggah; field
-  `references` sudah ada di spec dan dipakai untuk musik bila URL-nya http(s).
 - Provider video generatif (text-to-video / image-to-video) belum tersambung — butuh
-  kunci berbayar. Remotion hanya menyusun footage/teks/audio yang diberikan.
-- Revisi per scene & versioning spec belum ada; mengubah spec hanya bisa saat job
-  masih `queued` (`spec_locked` setelah rendering).
+  kunci berbayar. `generation.enabled=true` dengan `provider:"none"` ditolak runner
+  dengan pesan `Provider footage generatif belum dikonfigurasi.`; tidak ada klip
+  placeholder dan tidak ada tombol generate di UI. Remotion hanya menyusun
+  footage/teks/audio yang diberikan.
+- Versioning spec belum ada; mengubah spec hanya bisa saat job masih `queued`
+  (`spec_locked` setelah rendering). Revisi scene mengubah draft di editor, bukan job
+  yang sudah dirender.

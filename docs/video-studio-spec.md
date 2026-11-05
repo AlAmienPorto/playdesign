@@ -1,6 +1,8 @@
 # Video Studio di kantor.playdesign — spesifikasi fitur
 
-Status: **rancangan**, belum diimplementasi.
+Status: **diimplementasi bertahap** (2026-11-05). Jalur runner lokal, Reference Manager,
+TTS/subtitle, dan revisi scene per-AI sudah berjalan di produksi. Adapter footage
+generatif masih **nonaktif** dan menolak permintaan secara eksplisit.
 Tujuan: user bisa membuat video dari UI CRM, dan **file video final hanya berakhir di Google Drive — tidak pernah disimpan di server** (Cloudflare Worker / D1 / R2).
 
 ---

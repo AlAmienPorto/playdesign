@@ -275,6 +275,24 @@ def needs_upload(job: dict) -> bool:
     return True
 
 
+def assert_generation_supported(spec: dict | None) -> None:
+    """Tolak permintaan footage generatif yang belum punya provider nyata.
+
+    Revisi teks/scene tidak menyentuh jalur ini. Tidak ada klip placeholder:
+    render berhenti dengan pesan jelas lebih baik daripada video yang mengaku
+    hasil AI padahal bukan.
+    """
+    generation = (spec or {}).get("generation") or {}
+    if not generation.get("enabled"):
+        return
+    provider = generation.get("provider") or "none"
+    if provider == "none":
+        raise RuntimeError("Provider footage generatif belum dikonfigurasi.")
+    raise RuntimeError(
+        f"Provider footage generatif '{provider}' belum diimplementasikan di runner ini."
+    )
+
+
 def prepare_assets(spec: dict, job_id: str) -> tuple[dict, list[Path]]:
     """Suara + subtitle dari spec. File ditaruh di public/ agar `staticFile` jalan."""
     assets: dict = {}
@@ -479,6 +497,7 @@ def _run_locked() -> int:
         try:
             props = claimed.get("props") or {}
             if story_mode:
+                assert_generation_supported(spec)
                 spec, ref_assets, ref_files, ref_updates = prepare_references(spec, job_id)
                 assets, asset_files = prepare_assets(spec, job_id)
                 assets.update(ref_assets)
