@@ -2,17 +2,23 @@
 """Video render runner.
 
 Alur: ambil job `queued` dari API -> render dengan Remotion CLI di mesin ini ->
-unggah hasil ke Google Drive lewat rclone -> catat pointer Drive ke D1 lewat API.
+unggah hasil ke Google Drive -> catat pointer Drive ke D1 lewat API.
 File video TIDAK pernah disimpan di server: satu-satunya salinan sementara ada di
 folder temp mesin ini dan dihapus setelah unggahan sukses.
+
+Unggahan punya dua jalur, dipilih otomatis:
+  1. Drive API langsung (scripts/drive_upload.py) kalau ~/.config/playdesign/drive.json ada.
+     Jalur ini yang disarankan: file id dan link datang dari respons Drive.
+  2. rclone, kalau remote `gdrive` sudah dikonfigurasi dan drive.json belum ada.
 
 Sengaja senyap kalau tidak ada job (cron no_agent meneruskan stdout ke notifikasi).
 
 Env yang dibaca:
   VIDEO_REMOTE        nama remote rclone (default: gdrive)
-  VIDEO_REMOTE_BASE   folder tujuan di remote (default: Playdesign Video)
+  VIDEO_REMOTE_BASE   folder tujuan di Drive (default: Playdesign Video)
   REMOTION_DIR        proyek Remotion (default: ~/work/remotion-starter)
   VIDEO_WORKSPACE     workspace CRM (default: playdesign)
+  PLAYDESIGN_DRIVE_CONFIG  path drive.json (default: ~/.config/playdesign/drive.json)
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import drive_upload  # noqa: E402
 from gmaps_lead_scraper import BASE_URL, _headers  # noqa: E402
 
 WORKSPACE = os.environ.get("VIDEO_WORKSPACE", "playdesign")
@@ -56,17 +63,44 @@ def slugify(text: str, limit: int = 40) -> str:
     return slug.strip("-")[:limit] or "video"
 
 
-def remote_ready() -> tuple[bool, str]:
+def rclone_status(remote: str) -> tuple[bool, str]:
+    """Remote terdaftar belum tentu sudah login — cek token-nya ada."""
     if not shutil.which("rclone"):
-        return False, "rclone tidak terpasang di mesin ini"
+        return False, "rclone tidak terpasang"
     try:
-        out = subprocess.run(["rclone", "listremotes"], capture_output=True, text=True, timeout=30)
+        out = subprocess.run(["rclone", "config", "dump"], capture_output=True, text=True, timeout=30)
     except Exception as exc:  # pragma: no cover - environment dependent
         return False, f"rclone gagal dijalankan: {exc}"
-    remotes = {line.strip().rstrip(":") for line in out.stdout.splitlines() if line.strip()}
-    if REMOTE not in remotes:
-        return False, f"remote rclone '{REMOTE}' belum ada (jalankan: rclone config)"
+    if out.returncode != 0:
+        return False, "konfigurasi rclone tidak terbaca"
+    try:
+        remotes = json.loads(out.stdout or "{}")
+    except json.JSONDecodeError:
+        return False, "konfigurasi rclone tidak terbaca"
+    entry = remotes.get(remote)
+    if not entry:
+        return False, f"remote rclone '{remote}' belum ada"
+    if entry.get("type") == "drive" and not entry.get("token"):
+        return False, f"remote rclone '{remote}' ada tapi belum login (token kosong)"
     return True, ""
+
+
+def uploader_status() -> tuple[str | None, str]:
+    """Pilih jalur unggah: 'drive' (Drive API) -> 'rclone' -> None (belum siap)."""
+    ok, drive_reason = drive_upload.available()
+    if ok:
+        return "drive", ""
+
+    rclone_ok, rclone_reason = rclone_status(REMOTE)
+    if rclone_ok:
+        return "rclone", ""
+    return None, f"Drive API belum siap ({drive_reason}); {rclone_reason}"
+
+
+def remote_ready() -> tuple[bool, str]:
+    """Dipertahankan untuk pemanggil lama; True kalau salah satu jalur siap."""
+    mode, reason = uploader_status()
+    return mode is not None, reason
 
 
 def render(composition_id: str, props: dict, out_path: Path) -> None:
@@ -89,7 +123,7 @@ def render(composition_id: str, props: dict, out_path: Path) -> None:
         raise RuntimeError("render gagal: " + " | ".join(detail)[:400])
 
 
-def upload(local: Path, dest_name: str) -> tuple[str, str, str]:
+def upload_rclone(local: Path, dest_name: str) -> tuple[str, str, str]:
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     folder = f"{REMOTE_BASE}/{month}"
     target = f"{REMOTE}:{folder}/{dest_name}"
@@ -121,6 +155,25 @@ def upload(local: Path, dest_name: str) -> tuple[str, str, str]:
     return file_id, link, folder
 
 
+def upload_drive(local: Path, dest_name: str, job_id: str) -> tuple[str, str, str]:
+    """Unggah lewat Drive API: id dan link diambil dari respons, bukan ditebak."""
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    folder = f"{REMOTE_BASE}/{month}"
+    result = drive_upload.upload_video(local, dest_name, folder, job_id=job_id)
+    file_id = str(result.get("id") or "")
+    if not file_id:
+        raise RuntimeError("Drive tidak mengembalikan file id")
+    link = str(result.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view")
+    folder_id = str(result.get("folderId") or folder)
+    return file_id, link, folder_id
+
+
+def upload(local: Path, dest_name: str, job_id: str = "", mode: str = "rclone") -> tuple[str, str, str]:
+    if mode == "drive":
+        return upload_drive(local, dest_name, job_id)
+    return upload_rclone(local, dest_name)
+
+
 def patch_soft(job_id: str, body: dict) -> dict | None:
     """PATCH status; 409 (mis. job dibatalkan di tengah render) bukan error fatal."""
     try:
@@ -131,12 +184,14 @@ def patch_soft(job_id: str, body: dict) -> dict | None:
         raise
 
 
-def upload_with_retry(local: Path, dest_name: str, attempts: int = 3) -> tuple[str, str, str]:
-    """rclone bisa gagal sesaat (jaringan/Drive rate limit) — coba ulang sebelum menyerah."""
+def upload_with_retry(
+    local: Path, dest_name: str, job_id: str = "", mode: str = "rclone", attempts: int = 3
+) -> tuple[str, str, str]:
+    """Jaringan/Drive bisa gagal sesaat — coba ulang sebelum menyerah."""
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            return upload(local, dest_name)
+            return upload(local, dest_name, job_id=job_id, mode=mode)
         except Exception as exc:  # noqa: BLE001
             last = exc
             if attempt < attempts:
@@ -202,10 +257,10 @@ def _run_locked() -> int:
     if not jobs:
         return 0
 
-    ok, reason = remote_ready()
-    if not ok:
+    mode, reason = uploader_status()
+    if mode is None:
         # Job sengaja dibiarkan `queued`: brief tidak hilang dan akan diproses
-        # otomatis begitu remote Drive siap. Peringatan dicetak sekali per job.
+        # otomatis begitu Drive siap. Peringatan dicetak sekali per job.
         fresh = [job for job in jobs if warn_once(job["id"], reason)]
         if fresh:
             print(f"{len(jobs)} job video menunggu, tapi {reason}. Job tetap di antrean.")
@@ -238,7 +293,7 @@ def _run_locked() -> int:
 
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
             dest_name = f"{stamp}-{slugify(claimed.get('title', 'video'))}-{template['id']}-{job_id[-6:]}.mp4"
-            file_id, link, folder = upload_with_retry(out_file, dest_name)
+            file_id, link, folder = upload_with_retry(out_file, dest_name, job_id=job_id, mode=mode)
             updated = patch_soft(
                 job_id,
                 {

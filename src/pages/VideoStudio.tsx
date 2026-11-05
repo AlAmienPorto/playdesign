@@ -499,6 +499,16 @@ export function VideoStudioPage() {
                   Buka file <ExternalLink size={12} />
                 </a>
               ) : null}
+              {detail.driveFolderId && DRIVE_ID.test(detail.driveFolderId) ? (
+                <a
+                  className="btn btn-ghost btn-sm"
+                  href={`https://drive.google.com/drive/folders/${detail.driveFolderId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Buka folder <ExternalLink size={12} />
+                </a>
+              ) : null}
               {(detail.status === 'failed' || detail.status === 'canceled') && (
                 <button
                   type="button"

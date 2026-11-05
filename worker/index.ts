@@ -1949,6 +1949,7 @@ const videoJobView = (row: VideoJobRow) => ({
   bytes: row.bytes,
   driveFileId: row.drive_file_id,
   driveWebLink: row.drive_web_link,
+  driveFolderId: row.drive_folder_id,
   error: row.error,
   attempts: row.attempts ?? 0,
   createdBy: row.created_by,

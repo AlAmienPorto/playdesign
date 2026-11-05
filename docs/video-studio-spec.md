@@ -215,3 +215,56 @@ Runner juga diperkuat:
 - Unggah diulang 3× dengan jeda 5 s dan 10 s sebelum job dinyatakan gagal.
 - Folder temp `pd-video-*` lebih tua dari 24 jam dibersihkan tiap kali runner mulai.
 - `PATCH` yang mengembalikan 409 (job dibatalkan saat render) tidak lagi melempar error: file tetap terunggah, status dibiarkan `canceled`, dan barisnya dicetak sebagai `batal`.
+
+### Unggah lewat Drive API (tanpa rclone)
+
+Runner memilih jalur unggah otomatis lewat `uploader_status()`:
+
+| Kondisi | Jalur |
+| --- | --- |
+| `~/.config/playdesign/drive.json` ada dan lengkap | **Drive API** (`scripts/drive_upload.py`) |
+| `drive.json` tidak ada, remote rclone `gdrive` sudah login | rclone |
+| Dua-duanya belum | job tetap `queued`, peringatan dicetak sekali per job |
+
+Alasan jalur Drive API lebih disukai: `file_id` dan `webViewLink` datang dari respons `files.create`, bukan hasil menebak nama file lewat `rclone lsjson` (kelemahan nyata jalur rclone — dua file bernama sama bisa tertukar).
+
+Yang dipakai dari Drive API:
+
+- **Resumable upload** (`uploadType=resumable` → `PUT` ke sesi) — tidak ada batas 5 MB seperti multipart.
+- **`appProperties.jobId`** — sebelum mengunggah, runner mencari file dengan job id yang sama. Render ulang tidak membuat duplikat.
+- **Folder bertingkat** — `Playdesign Video/YYYY-MM` dibuat/ditemukan per level; id folder disimpan ke `drive_folder_id` dan bisa dibuka dari modal Detail ("Buka folder").
+- **Retry** pada 403/429/5xx dengan backoff; pesan error diambil dari `error.message` Google, bukan kode mentah.
+
+Kredensial hanya di satu file di luar repo, permission `600`, tidak pernah masuk D1, argumen command line, atau log:
+
+```
+~/.config/playdesign/drive.json
+```
+
+Dua mode yang didukung:
+
+| Mode | Isi | Catatan |
+| --- | --- | --- |
+| `oauth` | `client_id`, `client_secret`, `refresh_token`, `folder` | Disarankan. Kuota memakai kuota akun pemilik. |
+| `service_account` | `service_account_file` (JSON kunci), `folder`, `shared_drive_id` | Service account berkuota **0** di My Drive — wajib Shared Drive, kalau tidak akan gagal `storageQuotaExceeded`. |
+
+Menyiapkan mode `oauth` di mesin tanpa browser:
+
+```bash
+python3 scripts/drive_oauth_setup.py --client-id XXX.apps.googleusercontent.com
+# client secret diminta lewat input tersembunyi (tidak masuk riwayat shell)
+```
+
+Skrip memakai **device flow**: menampilkan URL dan kode 8 huruf, Anda menyetujui dari browser laptop, lalu `drive.json` ditulis sendiri dan folder tujuan diverifikasi. Prasyarat di Google Cloud Console: aktifkan Drive API dan buat OAuth client tipe *TVs and Limited Input devices*.
+
+Bukti uji (tanpa akun Google sungguhan, memakai server tiruan):
+
+| Uji | Hasil |
+| --- | --- |
+| `scripts/tests/test_drive_upload.py` | 11/11 lulus — token, folder bertingkat, unggah, 503 diulang, anti-duplikat, service account JWT, PEM rusak ditolak |
+| `scripts/tests/test_drive_oauth_setup.py` | 9/9 lulus — device code, `authorization_pending`, `drive.json` 600, verifikasi folder |
+| Runner end-to-end (`promo-916`, `promo-11`) | job `done`, `driveFileId`/`driveFolderId` terisi dari respons, file 0,4–0,5 MB |
+| Pemilihan jalur | `drive.json` ada → `drive`; hanya rclone login → `rclone`; tidak ada → `None` + job tetap `queued` |
+| Remote `gdrive` tanpa token | terdeteksi "belum login", bukan dianggap siap |
+
+Batas kejujuran: unggahan **belum pernah diuji ke Google sungguhan** — semua di atas memakai server tiruan yang meniru kontrak Drive API. Klaim "sudah bisa unggah ke Drive" baru sah setelah satu file nyata mendarat di Drive Anda.

@@ -289,6 +289,7 @@ export interface VideoJob {
   bytes?: number | null;
   driveFileId?: string | null;
   driveWebLink?: string | null;
+  driveFolderId?: string | null;
   error?: string | null;
   attempts?: number;
   createdAt: string;
