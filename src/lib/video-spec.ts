@@ -303,6 +303,15 @@ export function defaultScene(partial: Partial<VideoScene> = {}): VideoScene {
   return normalizeScene(partial);
 }
 
+/**
+ * Ganti satu scene berdasarkan id. Scene lain memakai referensi objek yang
+ * sama supaya React tidak me-render ulang preview yang tidak berubah.
+ * `id` selalu diambil dari scene lama, bukan dari balasan AI.
+ */
+export function replaceScene(scenes: VideoScene[], id: string, next: VideoScene): VideoScene[] {
+  return scenes.map((scene) => (scene.id === id ? { ...next, id: scene.id } : scene));
+}
+
 export function defaultSpec(partial: Partial<VideoSpec> = {}): VideoSpec {
   const preset = partial.style?.preset ?? 'cinematic';
   const base = STYLE_PRESETS[preset].style;

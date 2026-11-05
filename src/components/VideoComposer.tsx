@@ -3,7 +3,7 @@ import { GripVertical, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { Field } from './ui';
 import { ReferenceManager } from './ReferenceManager';
 
-import { createVideoJob, type VideoJob } from '../lib/api';
+import { createVideoJob, reviseVideoScene, type VideoJob } from '../lib/api';
 import {
   ASPECTS,
   STYLE_PRESETS,
@@ -12,6 +12,7 @@ import {
   defaultSpec,
   narrationText,
   normalizeSpec,
+  replaceScene,
   type SceneKind,
   type StylePreset,
   type TransitionKind,
@@ -54,6 +55,8 @@ export function VideoComposer({
   const [title, setTitle] = useState('');
   const [saving, setSaving] = useState(false);
   const [tab, setTab] = useState<'brief' | 'style' | 'scenes' | 'refs' | 'audio'>('brief');
+  const [instructions, setInstructions] = useState<Record<string, string>>({});
+  const [revisingId, setRevisingId] = useState<string | null>(null);
 
   const patch = (next: Partial<VideoSpec>) => setSpec((current) => normalizeSpec({ ...current, ...next }, current.render.aspect));
   const patchStyle = (next: Partial<VideoSpec['style']>) => patch({ style: { ...spec.style, ...next } });
@@ -80,6 +83,35 @@ export function VideoComposer({
   const addScene = () => patch({ scenes: [...spec.scenes, defaultScene({ kind: 'statement' })] });
   const removeScene = (index: number) =>
     patch({ scenes: spec.scenes.length > 1 ? spec.scenes.filter((_, i) => i !== index) : spec.scenes });
+
+  const reviseScene = async (index: number) => {
+    const scene = spec.scenes[index];
+    if (!scene || revisingId) return;
+    const instruction = (instructions[scene.id] ?? '').trim();
+    if (instruction.length < 3) {
+      onToast('Tulis instruksi revisi dulu (minimal 3 karakter).', 'warning');
+      return;
+    }
+
+    setRevisingId(scene.id);
+    try {
+      const next = await reviseVideoScene({
+        scene,
+        instruction,
+        prompt: spec.prompt,
+        style: spec.style,
+        sceneIndex: index,
+        sceneCount: spec.scenes.length,
+      });
+      patch({ scenes: replaceScene(spec.scenes, scene.id, next) });
+      setInstructions((current) => ({ ...current, [scene.id]: '' }));
+      onToast(`Scene ${index + 1} direvisi. Scene lain tidak berubah.`, 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Gagal merevisi scene.', 'danger');
+    } finally {
+      setRevisingId(null);
+    }
+  };
 
   /** Pecah prompt jadi scene tanpa AI: kalimat panjang jadi scene pernyataan. */
   const scenesFromPrompt = () => {
@@ -244,6 +276,15 @@ export function VideoComposer({
             <div className="studio-hint">
               Durasi total <strong>{totalSeconds.toFixed(1)} detik</strong> ·{' '}
               {Math.round(totalSeconds * spec.render.fps)} frame · {spec.scenes.length} scene
+            </div>
+
+            <div className="studio-note">
+              <strong>Footage generatif belum tersambung</strong>
+              <span>
+                Revisi AI di tab Scene hanya mengubah teks dan struktur scene. Klip video hasil AI
+                butuh provider berbayar; selama belum ada kredensial, tidak ada tombol generate dan
+                tidak ada klip palsu.
+              </span>
             </div>
 
             <div className="studio-actions">
@@ -533,6 +574,27 @@ export function VideoComposer({
                     }
                   />
                 ) : null}
+
+                <div className="scene-revise">
+                  <textarea
+                    className="input scene-revise-input"
+                    rows={2}
+                    maxLength={600}
+                    value={instructions[scene.id] ?? ''}
+                    placeholder="Revisi scene ini, contoh: judul lebih tegas, durasi 3 detik"
+                    onChange={(event) =>
+                      setInstructions((current) => ({ ...current, [scene.id]: event.target.value }))
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => reviseScene(index)}
+                    disabled={revisingId !== null || (instructions[scene.id] ?? '').trim().length < 3}
+                  >
+                    <Sparkles size={14} /> {revisingId === scene.id ? 'Merevisi…' : 'Revisi AI'}
+                  </button>
+                </div>
               </div>
             ))}
 

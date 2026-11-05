@@ -259,6 +259,35 @@
 .scene-duration { width: 72px; flex: none; }
 .scene-row-actions { display: flex; gap: 2px; margin-left: auto; }
 
+.scene-revise {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+.scene-revise-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: vertical;
+}
+
+.scene-revise .btn { flex: none; }
+
+.studio-note {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 11px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.studio-note strong { font-size: 12px; font-weight: 650; }
+.studio-note span { font-size: 11.4px; line-height: 1.45; color: var(--muted); }
+
 .input-sm { height: 30px; padding: 0 8px; font-size: 12px; }
 
 .studio-aside {
@@ -304,6 +333,8 @@
   .studio-row { grid-template-columns: minmax(0, 1fr); }
   .scene-row-head { gap: 5px; }
   .scene-row-actions { margin-left: 0; width: 100%; justify-content: flex-end; }
+  .scene-revise { flex-direction: column; }
+  .scene-revise .btn { width: 100%; justify-content: center; }
 }
 
 .studio-player-skeleton {

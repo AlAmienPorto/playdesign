@@ -259,7 +259,7 @@ export async function probeToken(token: string): Promise<boolean> {
 /* Video Studio — jobs point at Google Drive, never at this server     */
 /* ------------------------------------------------------------------ */
 
-import type { VideoSpec } from './video-spec';
+import type { VideoScene, VideoSpec } from './video-spec';
 
 export type VideoJobStatus = 'queued' | 'rendering' | 'uploading' | 'done' | 'failed' | 'canceled';
 
@@ -393,4 +393,20 @@ export async function createVideoJob(input: {
     body: JSON.stringify({ ...input, workspace: 'playdesign' }),
   });
   return payload.job;
+}
+
+/** Revisi satu scene lewat Workers AI. Server memaksa id dan media.refId tetap. */
+export async function reviseVideoScene(input: {
+  scene: VideoScene;
+  instruction: string;
+  prompt?: string;
+  style?: VideoSpec['style'];
+  sceneIndex?: number;
+  sceneCount?: number;
+}): Promise<VideoScene> {
+  const payload = await request<{ scene: VideoScene; model?: string }>('/api/video/scenes/revise', {
+    method: 'POST',
+    body: JSON.stringify({ ...input, workspace: 'playdesign' }),
+  });
+  return payload.scene;
 }
