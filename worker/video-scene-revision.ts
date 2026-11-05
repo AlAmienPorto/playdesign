@@ -113,3 +113,22 @@ export function sanitizeSceneRevision(current: VideoScene, candidate: unknown): 
 
   return normalizeScene(allowed, current);
 }
+
+/**
+ * True bila hasil revisi berbeda dari scene lama pada field yang boleh diubah.
+ * Dipakai untuk menolak "sukses palsu" ketika model mengembalikan scene yang sama.
+ */
+export function sceneRevisionChanged(before: VideoScene, after: VideoScene): boolean {
+  const fingerprint = (scene: VideoScene) =>
+    JSON.stringify({
+      kind: scene.kind,
+      durationSec: scene.durationSec,
+      title: scene.title,
+      body: scene.body,
+      items: scene.items ?? [],
+      transitionIn: scene.transitionIn,
+      fit: scene.media?.fit ?? 'cover',
+      motion: scene.media?.motion ?? 'none',
+    });
+  return fingerprint(before) !== fingerprint(after);
+}

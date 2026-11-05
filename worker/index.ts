@@ -15,6 +15,7 @@ import { normalizeSpec as normalizeSpecShared } from "../src/lib/video-spec";
 import {
   extractSceneRevision,
   sanitizeSceneRevision,
+  sceneRevisionChanged,
   validateSceneRevisionInput,
 } from "./video-scene-revision";
 
@@ -2070,10 +2071,13 @@ Struktur: {"kind":"title|statement|list|quote|cta|image|video","durationSec":4,"
     context: input.context,
   });
 
-  let responseText = "";
+  let scene: ReturnType<typeof sanitizeSceneRevision> | null = null;
   let model = "";
-  let lastError: unknown;
+  let lastInferenceError: unknown;
+  let lastParseError: unknown;
+
   for (const candidateModel of VIDEO_SCENE_MODELS) {
+    let responseText = "";
     try {
       const result: any = await env.AI.run(candidateModel as any, {
         messages: [
@@ -2084,25 +2088,38 @@ Struktur: {"kind":"title|statement|list|quote|cta|image|video","durationSec":4,"
         temperature: 0.2,
       });
       responseText = result?.response ?? result?.choices?.[0]?.message?.content ?? "";
+    } catch (error) {
+      lastInferenceError = error;
+      console.warn(`Revisi scene dengan ${candidateModel} gagal:`, error);
+      continue;
+    }
+
+    try {
+      scene = sanitizeSceneRevision(input.scene, extractSceneRevision(responseText));
       model = candidateModel;
       break;
     } catch (error) {
-      lastError = error;
-      console.warn(`Revisi scene dengan ${candidateModel} gagal:`, error);
+      lastParseError = error;
+      console.warn(
+        `Respons ${candidateModel} tidak valid, mencoba model berikutnya:`,
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
-  if (!model) {
-    console.error("Semua model revisi scene gagal:", lastError);
+
+  if (!scene) {
+    if (lastParseError) {
+      fail(502, "invalid_ai_response", "AI menghasilkan revisi yang tidak valid. Scene lama tidak diubah.");
+    }
+    console.error("Semua model revisi scene gagal:", lastInferenceError);
     fail(503, "ai_service_unavailable", "Layanan AI sedang sibuk. Coba beberapa saat lagi.");
   }
 
-  try {
-    const scene = sanitizeSceneRevision(input.scene, extractSceneRevision(responseText));
-    return json({ scene, model });
-  } catch (error) {
-    console.warn("Respons AI revisi scene tidak valid:", error instanceof Error ? error.message : String(error));
-    fail(502, "invalid_ai_response", "AI menghasilkan revisi yang tidak valid. Scene lama tidak diubah.");
+  if (!sceneRevisionChanged(input.scene, scene)) {
+    fail(422, "no_change", "AI tidak mengubah scene ini. Tulis instruksi yang lebih spesifik.");
   }
+
+  return json({ scene, model });
 }
 
 async function listVideoTemplates(env: Env) {

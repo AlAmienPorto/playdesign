@@ -5,9 +5,10 @@ import test from 'node:test';
 import {
   extractSceneRevision,
   sanitizeSceneRevision,
+  sceneRevisionChanged,
   validateSceneRevisionInput,
 } from './video-scene-revision';
-import type { VideoScene } from '../src/lib/video-spec';
+import { normalizeScene, type VideoScene } from '../src/lib/video-spec';
 
 const current: VideoScene = {
   id: 'sc-keep',
@@ -116,4 +117,22 @@ test('validateSceneRevisionInput menolak scene tanpa id dan workspace rusak', ()
     () => validateSceneRevisionInput({ workspace: '../lain', instruction: 'Buat lebih tegas', scene: current }),
     /workspace/i,
   );
+});
+
+test('sceneRevisionChanged mendeteksi revisi teks dan durasi', () => {
+  const before = normalizeScene({ id: 'sc-1', kind: 'title', durationSec: 4, title: 'Lama', body: 'Isi' });
+  const after = sanitizeSceneRevision(before, { title: 'Baru' });
+  assert.equal(sceneRevisionChanged(before, after), true);
+});
+
+test('sceneRevisionChanged false ketika AI mengembalikan scene yang sama', () => {
+  const before = normalizeScene({ id: 'sc-1', kind: 'title', durationSec: 4, title: 'Lama', body: 'Isi' });
+  const after = sanitizeSceneRevision(before, {});
+  assert.equal(sceneRevisionChanged(before, after), false);
+});
+
+test('sceneRevisionChanged mendeteksi perubahan items dan media', () => {
+  const before = normalizeScene({ id: 'sc-1', kind: 'list', durationSec: 4, title: 'Lama', items: ['a'] });
+  assert.equal(sceneRevisionChanged(before, sanitizeSceneRevision(before, { items: ['a', 'b'] })), true);
+  assert.equal(sceneRevisionChanged(before, sanitizeSceneRevision(before, { media: { motion: 'parallax' } })), true);
 });
