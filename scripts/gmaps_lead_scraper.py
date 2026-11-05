@@ -72,6 +72,8 @@ def _headers() -> dict:
         "Authorization": f"Bearer {API_TOKEN}",
         "Content-Type": "application/json",
         "x-actor-id": "ja",
+        # Cloudflare menolak User-Agent default Python (error 1010) — pakai UA eksplisit.
+        "User-Agent": "playdesign-runner/1.0",
     }
 
 

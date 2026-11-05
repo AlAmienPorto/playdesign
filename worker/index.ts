@@ -25,6 +25,8 @@ export interface Env {
    * cf-access-authenticated-user-email boleh dipercaya (workers.dev dimatikan).
    */
   ACCESS_ENABLED?: string;
+  /** Folder Google Drive tujuan video final (id folder, bukan rahasia). */
+  VIDEO_DRIVE_FOLDER?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1824,6 +1826,16 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json({ outreach });
   }
 
+  if (path === "/api/video/config" && method === "GET") return videoConfig(env);
+  if (path === "/api/video/templates" && method === "GET") return listVideoTemplates(env);
+  if (path === "/api/video/jobs" && method === "GET") return listVideoJobs(env, req);
+  if (path === "/api/video/jobs" && method === "POST") return createVideoJob(env, req);
+  const videoClaim = /^\/api\/video\/jobs\/([^/]+)\/claim$/.exec(path);
+  if (videoClaim && method === "POST") return claimVideoJob(env, req, decodeURIComponent(videoClaim[1]));
+  const videoJobMatch = /^\/api\/video\/jobs\/([^/]+)$/.exec(path);
+  if (videoJobMatch && method === "GET") return getVideoJob(env, req, decodeURIComponent(videoJobMatch[1]));
+  if (videoJobMatch && method === "PATCH") return patchVideoJob(env, req, decodeURIComponent(videoJobMatch[1]));
+
   if (path === "/api/office" && method === "GET") return office(env, req);
   if (path === "/api/tasks" && method === "GET") {
     const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
@@ -1861,6 +1873,292 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (runMatch && method === "GET") return getRun(env, req, decodeURIComponent(runMatch[1]));
 
   fail(404, "not_found", "Unknown API route.");
+}
+
+/* ------------------------------------------------------------------ */
+/* Video Studio                                                        */
+/*                                                                    */
+/* Render happens off-platform (runner or browser); this API only     */
+/* tracks jobs and stores a Google Drive pointer. No file ever lands  */
+/* in D1 or R2 — see docs/video-studio-spec.md.                       */
+/* ------------------------------------------------------------------ */
+
+interface VideoJobRow {
+  id: string;
+  workspace_id: string;
+  template_id: string;
+  title: string;
+  props: string;
+  status: string;
+  engine: string;
+  fps: number;
+  duration_frames: number;
+  width: number;
+  height: number;
+  bytes: number | null;
+  drive_file_id: string | null;
+  drive_web_link: string | null;
+  drive_folder_id: string | null;
+  error: string | null;
+  created_by: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+const VIDEO_ASPECTS: Record<string, { width: number; height: number }> = {
+  "16:9": { width: 1920, height: 1080 },
+  "9:16": { width: 1080, height: 1920 },
+  "1:1": { width: 1080, height: 1080 },
+};
+
+/** Forward-only state machine; anything not listed is rejected. */
+const VIDEO_TRANSITIONS: Record<string, string[]> = {
+  queued: ["rendering", "canceled", "failed"],
+  rendering: ["uploading", "failed", "canceled"],
+  uploading: ["done", "failed"],
+  done: [],
+  failed: ["queued"],
+  canceled: [],
+};
+
+const parseJsonSafe = (raw: string | null | undefined, fallback: unknown) => {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return fallback;
+  }
+};
+
+const videoJobView = (row: VideoJobRow) => ({
+  id: row.id,
+  templateId: row.template_id,
+  title: row.title,
+  status: row.status,
+  engine: row.engine,
+  fps: row.fps,
+  durationFrames: row.duration_frames,
+  width: row.width,
+  height: row.height,
+  bytes: row.bytes,
+  driveFileId: row.drive_file_id,
+  driveWebLink: row.drive_web_link,
+  error: row.error,
+  createdBy: row.created_by,
+  createdAt: row.created_at,
+  startedAt: row.started_at,
+  finishedAt: row.finished_at,
+  props: parseJsonSafe(row.props, {}),
+});
+
+function videoConfig(env: Env) {
+  return json({
+    uploader: "runner",
+    driveFolder: env.VIDEO_DRIVE_FOLDER ?? "",
+    maxDurationSec: 120,
+    note: "Video files are rendered off-platform and uploaded straight to Google Drive. Nothing is stored on this server.",
+  });
+}
+
+async function listVideoTemplates(env: Env) {
+  const rows = await env.DB.prepare(
+    `SELECT id, name, composition_id, aspect, props_schema
+       FROM video_templates
+      WHERE enabled = 1
+      ORDER BY name`,
+  ).all<{ id: string; name: string; composition_id: string; aspect: string; props_schema: string }>();
+  const list = (rows.results ?? []) as Array<{
+    id: string;
+    name: string;
+    composition_id: string;
+    aspect: string;
+    props_schema: string;
+  }>;
+  return json({
+    templates: list.map((row) => ({
+      id: row.id,
+      name: row.name,
+      compositionId: row.composition_id,
+      aspect: row.aspect,
+      propsSchema: parseJsonSafe(row.props_schema, { fields: [] }),
+    })),
+  });
+}
+
+async function listVideoJobs(env: Env, req: Request) {
+  const url = new URL(req.url);
+  const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace") ?? "playdesign");
+  const status = url.searchParams.get("status");
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 20, 1), 100);
+  const rows = status
+    ? await env.DB.prepare(
+        `SELECT * FROM video_jobs WHERE workspace_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?`,
+      )
+        .bind(workspaceId, status, limit)
+        .all<VideoJobRow>()
+    : await env.DB.prepare(`SELECT * FROM video_jobs WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?`)
+        .bind(workspaceId, limit)
+        .all<VideoJobRow>();
+  return json({ jobs: (rows.results ?? []).map(videoJobView) });
+}
+
+async function getVideoJob(env: Env, req: Request, id: string) {
+  const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  if (!row) fail(404, "job_not_found", "Job video tidak ditemukan.");
+  return json({ job: videoJobView(row) });
+}
+
+async function createVideoJob(env: Env, req: Request) {
+  const key = (req.headers.get("idempotency-key") ?? "").trim();
+  if (!key) {
+    fail(400, "idempotency_key_required", "POST /api/video/jobs requires an Idempotency-Key header.");
+  }
+  const replay = await env.DB.prepare(`SELECT * FROM video_jobs WHERE idempotency_key = ?`).bind(key).first<VideoJobRow>();
+  if (replay) return json({ ok: true, job: videoJobView(replay), replayed: true });
+
+  const body = (await req.json().catch(() => ({}))) as {
+    templateId?: string;
+    title?: string;
+    props?: Record<string, unknown>;
+    engine?: string;
+    workspace?: string;
+  };
+  const templateId = (body.templateId ?? "").trim();
+  const title = (body.title ?? "").trim();
+  if (!templateId) fail(400, "invalid_request", "Template video wajib dipilih.");
+  if (!title) fail(400, "invalid_request", "Judul video wajib diisi.");
+  if (title.length > 120) fail(400, "invalid_request", "Judul maksimal 120 karakter.");
+
+  const template = await env.DB.prepare(
+    `SELECT id, composition_id, aspect FROM video_templates WHERE id = ? AND enabled = 1`,
+  )
+    .bind(templateId)
+    .first<{ id: string; composition_id: string; aspect: string }>();
+  if (!template) fail(404, "template_not_found", "Template video tidak dikenal.");
+
+  const props = (body.props ?? {}) as Record<string, unknown>;
+  const propsJson = JSON.stringify(props);
+  if (propsJson.length > 8192) fail(400, "props_too_large", "Props video maksimal 8 KB.");
+
+  const fps = 30;
+  const requestedSec = Number(props.durationSec);
+  const durationSec = Number.isFinite(requestedSec) ? Math.min(Math.max(requestedSec, 3), 120) : 15;
+  const durationFrames = Math.round(durationSec * fps);
+  if (durationFrames > 3600) fail(400, "invalid_request", "Durasi maksimal 120 detik.");
+
+  const aspect = VIDEO_ASPECTS[template.aspect] ?? VIDEO_ASPECTS["9:16"];
+  const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+  const engine = body.engine === "browser" ? "browser" : "runner";
+  const id = `vj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  await env.DB.prepare(
+    `INSERT INTO video_jobs
+       (id, workspace_id, template_id, title, props, status, engine, fps, duration_frames, width, height, created_by, idempotency_key)
+     VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      workspaceId,
+      template.id,
+      title,
+      propsJson,
+      engine,
+      fps,
+      durationFrames,
+      aspect.width,
+      aspect.height,
+      req.headers.get("x-actor-id") ?? "ja",
+      key,
+    )
+    .run();
+
+  const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  return json({ ok: true, job: row ? videoJobView(row) : { id } }, 201);
+}
+
+async function patchVideoJob(env: Env, req: Request, id: string) {
+  const current = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  if (!current) fail(404, "job_not_found", "Job video tidak ditemukan.");
+
+  const body = (await req.json().catch(() => ({}))) as {
+    status?: string;
+    bytes?: number;
+    driveFileId?: string;
+    driveWebLink?: string;
+    driveFolderId?: string;
+    error?: string | null;
+  };
+
+  const next = body.status?.trim();
+  if (next) {
+    const allowed = VIDEO_TRANSITIONS[current.status] ?? [];
+    if (next !== current.status && !allowed.includes(next)) {
+      fail(
+        409,
+        "invalid_transition",
+        `Status tidak boleh berpindah dari ${current.status} ke ${next}.`,
+        { allowed },
+      );
+    }
+  }
+  if (next === "done" && !(body.driveFileId ?? current.drive_file_id)) {
+    fail(400, "drive_file_required", "Job hanya bisa selesai kalau driveFileId terisi.");
+  }
+
+  const driveFileId = body.driveFileId?.trim() || current.drive_file_id;
+  const driveWebLink =
+    body.driveWebLink?.trim() ||
+    current.drive_web_link ||
+    (driveFileId ? `https://drive.google.com/file/d/${driveFileId}/view` : null);
+  const bytes = Number.isFinite(Number(body.bytes)) && body.bytes !== undefined ? Math.max(0, Number(body.bytes)) : current.bytes;
+  const finalStatus = next ?? current.status;
+  const finishedAt = ["done", "failed", "canceled"].includes(finalStatus) ? nowIso() : current.finished_at;
+
+  await env.DB.prepare(
+    `UPDATE video_jobs
+        SET status = ?,
+            bytes = ?,
+            drive_file_id = ?,
+            drive_web_link = ?,
+            drive_folder_id = ?,
+            error = ?,
+            started_at = CASE WHEN ? = 'rendering' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+            finished_at = ?
+      WHERE id = ?`,
+  )
+    .bind(
+      finalStatus,
+      bytes,
+      driveFileId,
+      driveWebLink,
+      body.driveFolderId?.trim() || current.drive_folder_id,
+      body.error === undefined ? current.error : body.error,
+      finalStatus,
+      finishedAt,
+      id,
+    )
+    .run();
+
+  const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  return json({ ok: true, job: row ? videoJobView(row) : null });
+}
+
+async function claimVideoJob(env: Env, req: Request, id: string) {
+  const body = (await req.json().catch(() => ({}))) as { workspace?: string };
+  const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+  const result = await env.DB.prepare(
+    `UPDATE video_jobs
+        SET status = 'rendering', started_at = datetime('now'), error = NULL
+      WHERE id = ? AND workspace_id = ? AND status = 'queued'`,
+  )
+    .bind(id, workspaceId)
+    .run();
+  const changed = Number((result.meta as { changes?: number } | undefined)?.changes ?? 0);
+  if (!changed) fail(409, "not_claimable", "Job sudah diambil runner lain atau statusnya bukan queued.");
+  const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  if (!row) fail(404, "job_not_found", "Job video tidak ditemukan.");
+  return json({ ok: true, job: videoJobView(row) });
 }
 
 export default {

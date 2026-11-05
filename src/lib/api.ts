@@ -254,3 +254,71 @@ export async function probeToken(token: string): Promise<boolean> {
   });
   return response.ok;
 }
+
+/* ------------------------------------------------------------------ */
+/* Video Studio — jobs point at Google Drive, never at this server     */
+/* ------------------------------------------------------------------ */
+
+export type VideoJobStatus = 'queued' | 'rendering' | 'uploading' | 'done' | 'failed' | 'canceled';
+
+export interface VideoTemplateField {
+  key: string;
+  label: string;
+  type: 'text' | 'color' | 'number';
+  default?: string | number;
+}
+
+export interface VideoTemplate {
+  id: string;
+  name: string;
+  compositionId: string;
+  aspect: string;
+  propsSchema: { fields: VideoTemplateField[] };
+}
+
+export interface VideoJob {
+  id: string;
+  templateId: string;
+  title: string;
+  status: VideoJobStatus;
+  engine: string;
+  fps: number;
+  durationFrames: number;
+  width: number;
+  height: number;
+  bytes?: number | null;
+  driveFileId?: string | null;
+  driveWebLink?: string | null;
+  error?: string | null;
+  createdAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  props: Record<string, unknown>;
+}
+
+export async function fetchVideoTemplates(): Promise<VideoTemplate[]> {
+  const payload = await request<{ templates: VideoTemplate[] }>('/api/video/templates');
+  return payload.templates ?? [];
+}
+
+export async function fetchVideoJobs(limit = 20): Promise<VideoJob[]> {
+  const payload = await request<{ jobs: VideoJob[] }>(`/api/video/jobs?workspace=playdesign&limit=${limit}`);
+  return payload.jobs ?? [];
+}
+
+export async function createVideoJob(input: {
+  templateId: string;
+  title: string;
+  props: Record<string, unknown>;
+}): Promise<VideoJob> {
+  const key =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `k-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const payload = await request<{ job: VideoJob }>('/api/video/jobs', {
+    method: 'POST',
+    headers: { 'idempotency-key': key },
+    body: JSON.stringify({ ...input, workspace: 'playdesign' }),
+  });
+  return payload.job;
+}

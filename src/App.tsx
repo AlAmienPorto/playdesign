@@ -14,6 +14,7 @@ import {
   PipelinePage,
 } from './pages/Crm';
 import { LeadScraperPage } from './pages/LeadScraper';
+import { VideoStudioPage } from './pages/VideoStudio';
 import { LandingCmsPage } from './pages/LandingCms';
 import { CrmTemplates } from './pages/CrmTemplates';
 import {
@@ -138,6 +139,7 @@ export default function App() {
             <Route path="/marketing/pages" element={<PagesPage />} />
             <Route path="/marketing/editor" element={<PostEditorPage />} />
             <Route path="/marketing/media" element={<MediaPage />} />
+            <Route path="/marketing/video" element={<VideoStudioPage />} />
             <Route path="/marketing/social" element={<SocialPlannerPage />} />
             <Route path="/marketing/library" element={<ContentLibraryPage />} />
             <Route path="/marketing/comments" element={<CommentsPage />} />
