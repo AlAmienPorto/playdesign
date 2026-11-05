@@ -409,7 +409,9 @@ def prepare_references(spec: dict, job_id: str) -> tuple[dict, dict, list[Path],
         ref["url"] = f"refs/{job_id}/{dest.name}"
         meta = _probe(dest)
         if kind == "image" and ref.get("role") in ("style", "subject"):
-            meta.update(_palette(dest))
+            palette = _palette(dest)
+            if palette:
+                meta["palette"] = palette
         if meta:
             updates.append((str(ref.get("id") or ""), meta))
 

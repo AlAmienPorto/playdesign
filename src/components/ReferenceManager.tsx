@@ -251,7 +251,9 @@ export function ReferenceManager({
                 <div className="muted-small">
                   {KIND_LABEL[record.kind]} · {ROLE_LABEL[record.role]}
                   {record.width && record.height ? ` · ${record.width}×${record.height}` : ''}
-                  {record.durationMs ? ` · ${(record.durationMs / 1000).toFixed(1)} s` : ''}
+                  {record.kind !== 'image' && record.durationMs
+                    ? ` · ${(record.durationMs / 1000).toFixed(1)} s`
+                    : ''}
                 </div>
 
                 {record.palette?.bg && record.palette?.accent ? (
