@@ -267,4 +267,19 @@ Bukti uji (tanpa akun Google sungguhan, memakai server tiruan):
 | Pemilihan jalur | `drive.json` ada → `drive`; hanya rclone login → `rclone`; tidak ada → `None` + job tetap `queued` |
 | Remote `gdrive` tanpa token | terdeteksi "belum login", bukan dianggap siap |
 
-Batas kejujuran: unggahan **belum pernah diuji ke Google sungguhan** — semua di atas memakai server tiruan yang meniru kontrak Drive API. Klaim "sudah bisa unggah ke Drive" baru sah setelah satu file nyata mendarat di Drive Anda.
+### Bukti di Drive sungguhan
+
+Setelah `drive.json` terpasang (OAuth, scope `drive.file`), satu job nyata dirender dan diunggah:
+
+| Yang diperiksa | Hasil |
+| --- | --- |
+| Job di D1 | `vj-mw3gonsr-jixpl6` `done`, `bytes` 489.382 |
+| `drive_file_id` | `13xsop4KHIjRSIfH4fKmMuZHwUHrjekMv` |
+| Metadata dari `files.get` | nama `20261105-uji-sambungan-drive-asli-promo-916-jixpl6.mp4`, `mimeType` `video/mp4`, `size` 489.382, `createdTime` 2026-11-05T11:28:12Z |
+| Folder induk | `2026-11` (`192T_HTAwvPZvrJS2fdpuQSzRVLAncnsX`) — sama dengan `drive_folder_id` di D1 |
+| `appProperties` | `{jobId: vj-mw3gonsr-jixpl6}` — dasar pencegahan duplikat |
+| Isi byte | diunduh ulang dari Drive: 489.382 byte, `ftyp` di offset 4, `ffprobe` → h264, 1080×1920, 15,000 s |
+| Anti-duplikat di Drive asli | `find_by_job('vj-mw3gonsr-jixpl6')` mengembalikan file yang sama; job id lain → `None` |
+| UI | baris muncul dengan "Buka di Drive"; iframe pratinjau 9:16 terukur 201×358 px |
+
+Thumbnail `drive.google.com/thumbnail` tidak tampil di browser yang tidak login ke akun pemilik (muncul tombol "Putar"), sesuai sifat file yang masih terbatas — di browser pemilik file thumbnail tampil normal.

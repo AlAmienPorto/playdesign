@@ -25,6 +25,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 CLIENT_ID = "123456789012-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"
 BAD_CLIENT_ID = "123456789012-salah.apps.googleusercontent.com"
+# client tipe Desktop app: device/code menolaknya, alur manual justru jalan
+DESKTOP_CLIENT_ID = "999999999999-desktopappclient.apps.googleusercontent.com"
 
 STATE: dict = {"token_polls": 0, "folder_created": 0, "scope": ""}
 
@@ -49,8 +51,12 @@ class Handler(BaseHTTPRequestHandler):
         form = urllib.parse.parse_qs(self.rfile.read(length).decode() if length else "")
 
         if parsed.path == "/device/code":
-            if (form.get("client_id") or [""])[0] == BAD_CLIENT_ID:
+            client = (form.get("client_id") or [""])[0]
+            if client == BAD_CLIENT_ID:
                 return self._json(401, {"error": "invalid_client"})
+            if client == DESKTOP_CLIENT_ID:
+                # client Desktop app tidak mendukung device flow
+                return self._json(400, {"error": "unauthorized_client"})
             STATE["scope"] = (form.get("scope") or [""])[0]
             return self._json(
                 200,
@@ -206,7 +212,7 @@ def main() -> int:
     env_manual = dict(env, PLAYDESIGN_DRIVE_CONFIG=str(cfg_manual))
     man = run_script(
         env_manual,
-        ["--client-id", CLIENT_ID, "--flow", "manual", "--out", str(cfg_manual)],
+        ["--client-id", DESKTOP_CLIENT_ID, "--flow", "manual", "--out", str(cfg_manual)],
         stdin="http://127.0.0.1:53682/?code=4%2F0AX4XfWh&scope=drive.file\n",
     )
     check("manual flow selesai", man.returncode == 0, man.stderr.strip()[-160:])
@@ -215,6 +221,16 @@ def main() -> int:
     check("redirect_uri loopback", STATE.get("redirect") == setup.MANUAL_REDIRECT, str(STATE.get("redirect")))
     mdata = json.loads(cfg_manual.read_text()) if cfg_manual.exists() else {}
     check("refresh token manual tersimpan", mdata.get("refresh_token") == "refresh-manual")
+
+    # --- penjaga: client TV dipakai dengan --flow manual ---
+    guard = run_script(env, ["--client-id", CLIENT_ID, "--flow", "manual", "--no-verify"])
+    check("client TV ditolak untuk alur manual", guard.returncode == 2, str(guard.returncode))
+    check(
+        "pesan penjaga menyebut device flow",
+        "device flow" in guard.stderr and "Jalankan tanpa --flow manual" in guard.stderr,
+        guard.stderr.strip().splitlines()[0][:70] if guard.stderr.strip() else "",
+    )
+    check("penjaga tidak menulis drive.json", not Path(str(workdir / "guard" / "drive.json")).exists())
 
     server.shutdown()
     failed = [label for label, ok in checks if not ok]

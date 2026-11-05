@@ -309,11 +309,32 @@ def main() -> int:
                 time.time() + float(device.get("expires_in") or 1800),
             )
         else:
+            # Client tipe "TVs and Limited Input" hanya bisa device flow. Kalau
+            # device/code menerima client ini, alur manual pasti ditolak Google
+            # dengan halaman "Akses diblokir: Permintaan ... tidak valid".
+            try:
+                request_device_code(client_id, args.scope)
+            except RuntimeError as exc:
+                if "invalid_client" in str(exc).lower():
+                    raise
+                # unauthorized_client / invalid_request -> memang bukan tipe TV,
+                # lanjutkan alur manual.
+            else:
+                print(
+                    "Client ini menerima device flow, artinya tipenya \"TVs and Limited Input devices\".\n"
+                    "Alur manual akan ditolak Google (\"Akses diblokir: Permintaan ... tidak valid\").\n"
+                    "Jalankan tanpa --flow manual.",
+                    file=sys.stderr,
+                )
+                return 2
+
             print("\nBuka URL ini di browser, login, lalu klik Allow:\n")
             print(build_auth_url(client_id, args.scope))
             print(
                 "\nBrowser akan gagal membuka 127.0.0.1 — itu wajar."
                 "\nSalin seluruh URL dari address bar (atau hanya nilai code=), tempel di bawah."
+                "\nKalau yang muncul justru 'Akses diblokir', client Anda bukan tipe Desktop app"
+                "\n— pakai client tipe 'TVs and Limited Input devices' dan jalankan tanpa --flow manual."
             )
             answer = input("\nURL/kode: ")
             code = extract_code(answer)
