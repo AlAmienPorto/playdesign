@@ -144,6 +144,7 @@ def normalize(raw: Any) -> dict[str, Any] | None:
         "version": 1,
         "prompt": _text(raw.get("prompt"))[:2000],
         "negativePrompt": _text(raw.get("negativePrompt"))[:800],
+        "brand": (_text(raw.get("brand"))[:24] or None),
         "style": {
             "preset": preset,
             "bg": _text(style_raw.get("bg"), base["bg"]),
@@ -249,3 +250,47 @@ def parse_srt(raw: str) -> list[dict[str, Any]]:
             continue
         cues.append({"startMs": _srt_ms(start_raw), "endMs": _srt_ms(end_raw), "text": text})
     return cues
+
+
+def split_long_cues(cues: list[dict[str, Any]], max_chars: int = 46) -> list[dict[str, Any]]:
+    """Pecah cue panjang jadi potongan pendek (gaya caption 1 baris).
+
+    edge-tts memecah per kalimat, jadi satu kalimat panjang menjadi caption tiga
+    baris yang menutupi layar. Di sini cue dipecah pada koma/spasi terdekat
+    sebelum `max_chars`, lalu durasinya dibagi proporsional terhadap panjang teks
+    sehingga total waktu tetap sama dan tidak ada cue yang bertumpuk.
+    """
+    result: list[dict[str, Any]] = []
+    for cue in cues:
+        text = str(cue.get("text") or "").strip()
+        start = int(cue.get("startMs") or 0)
+        end = int(cue.get("endMs") or 0)
+        if not text or end <= start or len(text) <= max_chars:
+            result.append({**cue, "text": text, "startMs": start, "endMs": max(start + 1, end)})
+            continue
+
+        chunks: list[str] = []
+        rest = text
+        while len(rest) > max_chars:
+            window = rest[: max_chars + 1]
+            comma = max(window.rfind(", "), window.rfind("; "))
+            # Koma dipakai kalau tidak terlalu dekat awal (caption tidak jadi terlalu pendek).
+            if comma >= max_chars * 0.4:
+                cut = comma + 1
+            else:
+                space = window.rfind(" ")
+                cut = space if space > 0 else max_chars
+            chunks.append(rest[:cut].strip())
+            rest = rest[cut:].strip()
+        if rest:
+            chunks.append(rest)
+
+        total_chars = sum(len(chunk) for chunk in chunks) or 1
+        cursor = start
+        for index, chunk in enumerate(chunks):
+            span = end - start
+            share = span * len(chunk) / total_chars
+            chunk_end = end if index == len(chunks) - 1 else cursor + max(1, round(share))
+            result.append({"startMs": cursor, "endMs": max(cursor + 1, chunk_end), "text": chunk})
+            cursor = chunk_end
+    return result

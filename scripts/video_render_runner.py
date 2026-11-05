@@ -329,7 +329,9 @@ def prepare_assets(spec: dict, job_id: str) -> tuple[dict, list[Path]]:
         assets["voiceover"] = f"audio/{job_id}.mp3"
         cleanup.extend([mp3, srt, txt])
         if (spec.get("subtitle") or {}).get("enabled") and srt.exists():
-            assets["captions"] = video_spec.parse_srt(srt.read_text(encoding="utf-8"))
+            assets["captions"] = video_spec.split_long_cues(
+                video_spec.parse_srt(srt.read_text(encoding="utf-8"))
+            )
 
     return assets, cleanup
 
