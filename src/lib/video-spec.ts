@@ -103,6 +103,13 @@ export interface VideoRender {
   compositionId: string;
 }
 
+export interface VideoGeneration {
+  provider: 'none' | 'replicate';
+  enabled: boolean;
+  mode: 'text-to-video';
+  model?: string;
+}
+
 export interface VideoSpec {
   version: 1;
   prompt: string;
@@ -110,6 +117,7 @@ export interface VideoSpec {
   style: VideoStyle;
   scenes: VideoScene[];
   references: VideoReference[];
+  generation: VideoGeneration;
   audio: VideoAudio;
   subtitle: VideoSubtitle;
   render: VideoRender;
@@ -240,6 +248,9 @@ const pick = <T extends string>(raw: unknown, allowed: readonly T[], fallback: T
 
 const SCENE_KINDS = ['title', 'statement', 'list', 'quote', 'cta', 'image', 'video'] as const;
 const TRANSITIONS = ['cut', 'fade', 'slide', 'wipe'] as const;
+const MEDIA_FITS = ['cover', 'contain'] as const;
+const MEDIA_MOTIONS = ['none', 'kenburns', 'parallax'] as const;
+const GENERATION_PROVIDERS = ['none', 'replicate'] as const;
 const PRESETS = ['cinematic', 'realistic', 'anime', 'documentary', 'commercial', 'custom'] as const;
 const CAMERAS = ['static', 'push-in', 'pull-out', 'pan-left', 'pan-right', 'handheld'] as const;
 const LIGHTING = ['soft', 'hard', 'backlit', 'natural'] as const;
@@ -253,17 +264,43 @@ export function newSceneId(): string {
   return `sc-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function defaultScene(partial: Partial<VideoScene> = {}): VideoScene {
+export function normalizeScene(raw: unknown, fallback: VideoScene = {
+  id: newSceneId(),
+  kind: 'statement',
+  durationSec: 4,
+  title: '',
+  body: '',
+  items: [],
+  transitionIn: 'fade',
+}): VideoScene {
+  const input = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
+  const mediaRaw = input.media && typeof input.media === 'object' && !Array.isArray(input.media)
+    ? input.media as Record<string, unknown>
+    : {};
+  const hasMedia = !!fallback.media || Object.keys(mediaRaw).length > 0;
+
   return {
-    id: partial.id ?? newSceneId(),
-    kind: partial.kind ?? 'statement',
-    durationSec: clamp(num(partial.durationSec, 4), 0.5, 30),
-    title: partial.title ?? '',
-    body: partial.body ?? '',
-    items: partial.items ?? [],
-    media: partial.media,
-    transitionIn: partial.transitionIn ?? 'fade',
+    id: str(input.id, fallback.id).slice(0, 80) || fallback.id,
+    kind: pick(input.kind, SCENE_KINDS, fallback.kind),
+    durationSec: clamp(num(input.durationSec, fallback.durationSec), 0.5, 30),
+    title: str(input.title, fallback.title ?? '').slice(0, 160),
+    body: str(input.body, fallback.body ?? '').slice(0, 600),
+    items: Array.isArray(input.items)
+      ? input.items.map((item) => String(item).slice(0, 180)).slice(0, 8)
+      : [...(fallback.items ?? [])],
+    media: hasMedia ? {
+      refId: str(mediaRaw.refId, fallback.media?.refId ?? '') || undefined,
+      fit: pick(mediaRaw.fit, MEDIA_FITS, fallback.media?.fit ?? 'cover'),
+      motion: pick(mediaRaw.motion, MEDIA_MOTIONS, fallback.media?.motion ?? 'none'),
+    } : undefined,
+    transitionIn: pick(input.transitionIn, TRANSITIONS, fallback.transitionIn ?? 'fade'),
   };
+}
+
+export function defaultScene(partial: Partial<VideoScene> = {}): VideoScene {
+  return normalizeScene(partial);
 }
 
 export function defaultSpec(partial: Partial<VideoSpec> = {}): VideoSpec {
@@ -280,6 +317,12 @@ export function defaultSpec(partial: Partial<VideoSpec> = {}): VideoSpec {
     style: { ...base, ...partial.style, preset },
     scenes: scenes.length ? scenes : [defaultScene({ kind: 'title', durationSec: 4 }), defaultScene({ kind: 'cta', durationSec: 4 })],
     references: partial.references ?? [],
+    generation: {
+      provider: partial.generation?.provider ?? 'none',
+      enabled: partial.generation?.enabled ?? false,
+      mode: 'text-to-video',
+      model: partial.generation?.model?.slice(0, 200),
+    },
     audio: {
       voice: {
         enabled: partial.audio?.voice?.enabled ?? true,
@@ -328,6 +371,7 @@ export function normalizeSpec(raw: unknown, fallbackAspect: VideoRender['aspect'
   const voiceRaw = (audioRaw.voice ?? {}) as Record<string, unknown>;
   const musicRaw = (audioRaw.music ?? {}) as Record<string, unknown>;
   const subtitleRaw = (input.subtitle ?? {}) as Record<string, unknown>;
+  const generationRaw = (input.generation ?? {}) as Record<string, unknown>;
 
   const aspect = pick(renderRaw.aspect ?? fallbackAspect, ['9:16', '16:9', '1:1'] as const, fallbackAspect);
   const dims = ASPECTS[aspect];
@@ -338,15 +382,14 @@ export function normalizeSpec(raw: unknown, fallbackAspect: VideoRender['aspect'
     .filter((scene): scene is Record<string, unknown> => !!scene && typeof scene === 'object' && !Array.isArray(scene))
     .slice(0, SCENE_LIMIT)
     .map((scene) =>
-      defaultScene({
-        id: str(scene.id) || newSceneId(),
-        kind: pick(scene.kind, SCENE_KINDS, 'statement'),
-        durationSec: clamp(num(scene.durationSec, 4), 0.5, 30),
-        title: str(scene.title),
-        body: str(scene.body),
-        items: Array.isArray(scene.items) ? scene.items.map((item) => String(item)).slice(0, 8) : [],
-        media: scene.media && typeof scene.media === 'object' ? (scene.media as VideoScene['media']) : undefined,
-        transitionIn: pick(scene.transitionIn, TRANSITIONS, presetStyle.transition),
+      normalizeScene(scene, {
+        id: newSceneId(),
+        kind: 'statement',
+        durationSec: 4,
+        title: '',
+        body: '',
+        items: [],
+        transitionIn: presetStyle.transition,
       }),
     );
 
@@ -389,6 +432,12 @@ export function normalizeSpec(raw: unknown, fallbackAspect: VideoRender['aspect'
     },
     scenes,
     references,
+    generation: {
+      provider: pick(generationRaw.provider, GENERATION_PROVIDERS, 'none'),
+      enabled: bool(generationRaw.enabled, false),
+      mode: 'text-to-video',
+      model: str(generationRaw.model).slice(0, 200) || undefined,
+    },
     audio: {
       voice: {
         enabled: bool(voiceRaw.enabled, true),

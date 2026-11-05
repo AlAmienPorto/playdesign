@@ -82,6 +82,7 @@ def normalize(raw: Any) -> dict[str, Any] | None:
     voice_raw: dict[str, Any] = _obj(audio_raw, "voice")
     music_raw: dict[str, Any] = _obj(audio_raw, "music")
     sub_raw: dict[str, Any] = _obj(raw, "subtitle")
+    generation_raw: dict[str, Any] = _obj(raw, "generation")
 
     preset = _pick(style_raw.get("preset"), PRESETS, "cinematic")
     base = PRESET_STYLE[preset]
@@ -158,6 +159,12 @@ def normalize(raw: Any) -> dict[str, Any] | None:
         },
         "scenes": scenes,
         "references": references,
+        "generation": {
+            "provider": _pick(generation_raw.get("provider"), {"none", "replicate"}, "none"),
+            "enabled": generation_raw.get("enabled") is True,
+            "mode": "text-to-video",
+            "model": (_text(generation_raw.get("model"))[:200] or None),
+        },
         "audio": {
             "voice": {
                 "enabled": voice_raw.get("enabled") is not False,
