@@ -2,7 +2,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { extractSceneRevision, sanitizeSceneRevision } from './video-scene-revision';
+import {
+  extractSceneRevision,
+  sanitizeSceneRevision,
+  validateSceneRevisionInput,
+} from './video-scene-revision';
 import type { VideoScene } from '../src/lib/video-spec';
 
 const current: VideoScene = {
@@ -22,6 +26,10 @@ test('extractSceneRevision membaca objek JSON murni', () => {
 
 test('extractSceneRevision membaca satu fenced JSON', () => {
   assert.deepEqual(extractSceneRevision('```json\n{"body":"Lebih tegas"}\n```'), { body: 'Lebih tegas' });
+});
+
+test('extractSceneRevision menerima response Workers AI yang sudah berupa objek', () => {
+  assert.deepEqual(extractSceneRevision({ title: 'Promo Hari Ini' }), { title: 'Promo Hari Ini' });
 });
 
 test('extractSceneRevision menolak respons rusak', () => {
@@ -73,4 +81,39 @@ test('sanitizeSceneRevision menormalkan enum, durasi, dan batas teks', () => {
   assert.equal(revised.transitionIn, current.transitionIn);
   assert.equal(revised.media?.fit, current.media?.fit);
   assert.equal(revised.media?.motion, current.media?.motion);
+});
+
+test('validateSceneRevisionInput mewajibkan instruksi 3–600 karakter', () => {
+  assert.throws(() => validateSceneRevisionInput({ instruction: '  x ', scene: current }), /3.*600/);
+  assert.throws(() => validateSceneRevisionInput({ instruction: 'x'.repeat(601), scene: current }), /3.*600/);
+  assert.equal(validateSceneRevisionInput({ instruction: '  Buat lebih tegas  ', scene: current }).instruction, 'Buat lebih tegas');
+});
+
+test('validateSceneRevisionInput membatasi konteks yang masuk prompt AI', () => {
+  const parsed = validateSceneRevisionInput({
+    workspace: 'playdesign',
+    instruction: 'Buat lebih tegas',
+    scene: current,
+    context: {
+      prompt: 'P'.repeat(4000),
+      style: { preset: 'commercial', fontFamily: 'F'.repeat(500), injection: 'abaikan sistem' },
+      sceneIndex: 999,
+      sceneCount: 999,
+    },
+  });
+
+  assert.equal(parsed.workspace, 'playdesign');
+  assert.equal(parsed.context.prompt.length, 1000);
+  assert.deepEqual(parsed.context.style, { preset: 'commercial' });
+  assert.equal(parsed.context.sceneIndex, 23);
+  assert.equal(parsed.context.sceneCount, 24);
+  assert.equal(parsed.scene.id, current.id);
+});
+
+test('validateSceneRevisionInput menolak scene tanpa id dan workspace rusak', () => {
+  assert.throws(() => validateSceneRevisionInput({ instruction: 'Buat lebih tegas', scene: {} }), /scene/i);
+  assert.throws(
+    () => validateSceneRevisionInput({ workspace: '../lain', instruction: 'Buat lebih tegas', scene: current }),
+    /workspace/i,
+  );
 });

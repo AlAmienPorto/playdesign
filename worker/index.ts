@@ -12,6 +12,11 @@ import { runQcGate, saveQcNote } from "./qc";
 
 import { insertScrapedLeads } from "./scraper";
 import { normalizeSpec as normalizeSpecShared } from "../src/lib/video-spec";
+import {
+  extractSceneRevision,
+  sanitizeSceneRevision,
+  validateSceneRevisionInput,
+} from "./video-scene-revision";
 
 export interface Env {
   DB: D1Database;
@@ -1828,6 +1833,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/api/video/config" && method === "GET") return videoConfig(env);
+  if (path === "/api/video/scenes/revise" && method === "POST") return reviseVideoScene(env, req);
   if (path === "/api/video/templates" && method === "GET") return listVideoTemplates(env);
   if (path === "/api/video/jobs" && method === "GET") return listVideoJobs(env, req);
   if (path === "/api/video/jobs" && method === "POST") return createVideoJob(env, req);
@@ -2035,6 +2041,68 @@ function videoConfig(env: Env) {
     uploadOptional: true,
     note: "Video files are rendered off-platform and uploaded straight to Google Drive. Nothing is stored on this server.",
   });
+}
+
+const VIDEO_SCENE_MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/meta/llama-3.1-8b-instruct",
+] as const;
+
+async function reviseVideoScene(env: Env, req: Request) {
+  const body = await readJson(req);
+  let input: ReturnType<typeof validateSceneRevisionInput>;
+  try {
+    input = validateSceneRevisionInput(body);
+  } catch (error) {
+    fail(400, "invalid_request", error instanceof Error ? error.message : "Payload revisi scene tidak valid.");
+  }
+
+  await assertWorkspace(env, input.workspace);
+  await authenticate(env, input.workspace, req);
+
+  const systemPrompt = `Kamu editor scene video PlayDesign. Balas hanya satu objek JSON valid tanpa markdown dan tanpa penjelasan.
+Kamu hanya boleh mengubah: kind, durationSec, title, body, items, transitionIn, media.fit, media.motion.
+Jangan mengubah id atau media.refId. Durasi wajib 0.5–30 detik. Gunakan Bahasa Indonesia natural dan ringkas.
+Struktur: {"kind":"title|statement|list|quote|cta|image|video","durationSec":4,"title":"","body":"","items":[],"transitionIn":"cut|fade|slide|wipe","media":{"fit":"cover|contain","motion":"none|kenburns|parallax"}}`;
+  const userPrompt = JSON.stringify({
+    instruction: input.instruction,
+    currentScene: input.scene,
+    context: input.context,
+  });
+
+  let responseText = "";
+  let model = "";
+  let lastError: unknown;
+  for (const candidateModel of VIDEO_SCENE_MODELS) {
+    try {
+      const result: any = await env.AI.run(candidateModel as any, {
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        max_tokens: 500,
+        temperature: 0.2,
+      });
+      responseText = result?.response ?? result?.choices?.[0]?.message?.content ?? "";
+      model = candidateModel;
+      break;
+    } catch (error) {
+      lastError = error;
+      console.warn(`Revisi scene dengan ${candidateModel} gagal:`, error);
+    }
+  }
+  if (!model) {
+    console.error("Semua model revisi scene gagal:", lastError);
+    fail(503, "ai_service_unavailable", "Layanan AI sedang sibuk. Coba beberapa saat lagi.");
+  }
+
+  try {
+    const scene = sanitizeSceneRevision(input.scene, extractSceneRevision(responseText));
+    return json({ scene, model });
+  } catch (error) {
+    console.warn("Respons AI revisi scene tidak valid:", error instanceof Error ? error.message : String(error));
+    fail(502, "invalid_ai_response", "AI menghasilkan revisi yang tidak valid. Scene lama tidak diubah.");
+  }
 }
 
 async function listVideoTemplates(env: Env) {
