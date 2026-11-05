@@ -71,9 +71,22 @@ def diagnose_client_id(client_id: str) -> list[str]:
         problems.append("ada spasi di awal/akhir (sudah dibuang otomatis)")
     if not value.endswith(CLIENT_ID_SUFFIX):
         problems.append(f"tidak berakhiran {CLIENT_ID_SUFFIX} — kemungkinan terpotong saat menyalin")
-    elif not re.fullmatch(r"\d+-[a-z0-9]+" + re.escape(CLIENT_ID_SUFFIX), value):
-        problems.append("bentuknya tidak seperti client id Google (harus <angka>-<acak>.apps.googleusercontent.com)")
+    elif not value.split("-", 1)[0].isdigit():
+        problems.append("bagian sebelum tanda '-' harus nomor project (angka)")
     return problems
+
+
+def warn_client_id(client_id: str) -> list[str]:
+    """Hal yang mencurigakan tapi TIDAK menghalangi: biar Google yang memutuskan."""
+    value = client_id.strip()
+    warnings: list[str] = []
+    if value.endswith(CLIENT_ID_SUFFIX):
+        random_part = value[: -len(CLIENT_ID_SUFFIX)].split("-", 1)[-1]
+        if len(random_part) < 20:
+            warnings.append(f"bagian acak hanya {len(random_part)} karakter (umumnya ~32) — pastikan tidak terpotong")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", random_part):
+            warnings.append("ada karakter tak biasa di bagian acak — pastikan tidak ada karakter tersembunyi")
+    return warnings
 
 
 def explain_oauth_error(status: int, body: bytes, flow: str) -> str:
@@ -257,6 +270,8 @@ def main() -> int:
             print(f"  - {item}", file=sys.stderr)
         print("\nPerbaiki dulu, lalu jalankan lagi.", file=sys.stderr)
         return 2
+    for item in warn_client_id(client_id):
+        print(f"catatan: {item}", file=sys.stderr)
 
     if args.check:
         print(f"Client id berbentuk benar ({len(client_id)} karakter). Menguji ke Google...")

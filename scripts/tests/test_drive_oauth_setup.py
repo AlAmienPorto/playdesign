@@ -150,8 +150,20 @@ def main() -> int:
         any("nomor project" in p for p in setup.diagnose_client_id("123456789012")),
     )
     check(
-        "client id terpotong terdeteksi",
-        any("terpotong" in p for p in setup.diagnose_client_id("123456789012-abc")),
+        "client id pendek hanya diberi catatan, tidak diblokir",
+        setup.diagnose_client_id("123456789012-abc.apps.googleusercontent.com") == []
+        and any("terpotong" in w for w in setup.warn_client_id("123456789012-abc.apps.googleusercontent.com")),
+    )
+    check(
+        "bagian acak berhuruf besar tetap lolos",
+        setup.diagnose_client_id(
+            "123456789012-AbCdEfGhIjKlMnOpQrStUvWxYz012345.apps.googleusercontent.com"
+        )
+        == [],
+    )
+    check(
+        "akhiran salah tetap diblokir",
+        any("tidak berakhiran" in p for p in setup.diagnose_client_id("123456789012-abc.apps.example.com")),
     )
     check("kode mentah diterima", setup.extract_code(" 4/0AX4XfWh  ") == "4/0AX4XfWh")
     check(
