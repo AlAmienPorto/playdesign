@@ -11,18 +11,29 @@ import { handleAgentChat, handleClearAgentMessages, handleGetAgentMessages } fro
 import { runQcGate, saveQcNote } from "./qc";
 
 import { insertScrapedLeads } from "./scraper";
+import { normalizeSpec as normalizeSpecShared } from "../src/lib/video-spec";
+import {
+  extractSceneRevision,
+  sanitizeSceneRevision,
+  sceneRevisionChanged,
+  validateSceneRevisionInput,
+} from "./video-scene-revision";
 
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   AI: Ai;
   API_TOKEN?: string;
+  /** Password manusia untuk login di UI. Disimpan sebagai Worker secret. */
+  ACCESS_PASSWORD?: string;
   /**
    * Set to "1" hanya setelah Cloudflare Access aktif untuk domain ini.
    * Saat aktif, edge Access sudah memvalidasi identitas, jadi header
    * cf-access-authenticated-user-email boleh dipercaya (workers.dev dimatikan).
    */
   ACCESS_ENABLED?: string;
+  /** Folder Google Drive tujuan video final (id folder, bukan rahasia). */
+  VIDEO_DRIVE_FOLDER?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -153,7 +164,115 @@ const tokenMatches = (provided: string, expected: string) => {
   return diff === 0;
 };
 
-function assertToken(req: Request, env: Env) {
+/* ------------------------------------------------------------------ */
+/* Session tokens (password login)                                     */
+/* ------------------------------------------------------------------ */
+
+const SESSION_PREFIX = "s1";
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const encoder = new TextEncoder();
+
+const b64url = (buffer: ArrayBuffer) =>
+  btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+async function hmac(secret: string, data: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return b64url(await crypto.subtle.sign("HMAC", key, encoder.encode(data)));
+}
+
+/**
+ * Signing key derived from the two secrets. Changing the password therefore
+ * invalidates every existing session, which is the behaviour we want.
+ */
+async function sessionKey(env: Env): Promise<string> {
+  const password = env.ACCESS_PASSWORD?.trim() ?? "";
+  const token = env.API_TOKEN?.trim() ?? "";
+  return b64url(await crypto.subtle.digest("SHA-256", encoder.encode(`pd-session|${password}|${token}`)));
+}
+
+async function issueSession(env: Env): Promise<{ session: string; expiresAt: number }> {
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  const payload = `${SESSION_PREFIX}.${expiresAt}`;
+  const signature = await hmac(await sessionKey(env), payload);
+  return { session: `${payload}.${signature}`, expiresAt };
+}
+
+async function verifySession(env: Env, value: string): Promise<boolean> {
+  const parts = value.split(".");
+  if (parts.length !== 3 || parts[0] !== SESSION_PREFIX) return false;
+  const expiresAt = Number(parts[1]);
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return false;
+  const expected = await hmac(await sessionKey(env), `${SESSION_PREFIX}.${expiresAt}`);
+  return tokenMatches(parts[2], expected);
+}
+
+/**
+ * Brute-force throttle in D1 (shared across isolates): 10 wrong passwords per
+ * IP per 5 minutes. In-memory counters are useless here because Cloudflare
+ * spreads requests over many isolates.
+ */
+async function throttleLogin(env: Env, ip: string) {
+  const now = Date.now();
+  const row = await env.DB.prepare("SELECT count, reset_at FROM login_attempts WHERE ip = ?")
+    .bind(ip)
+    .first<{ count: number; reset_at: string }>();
+
+  if (!row || new Date(row.reset_at).getTime() < now) {
+    await env.DB.prepare(
+      "INSERT INTO login_attempts (ip, count, reset_at) VALUES (?, 1, ?) " +
+        "ON CONFLICT(ip) DO UPDATE SET count = 1, reset_at = excluded.reset_at",
+    )
+      .bind(ip, new Date(now + 5 * 60 * 1000).toISOString())
+      .run();
+    return;
+  }
+
+  if (row.count >= 10) {
+    fail(429, "too_many_attempts", "Terlalu banyak percobaan. Tunggu 5 menit lalu coba lagi.");
+  }
+
+  await env.DB.prepare("UPDATE login_attempts SET count = count + 1 WHERE ip = ?").bind(ip).run();
+}
+
+async function clearLoginAttempts(env: Env, ip: string) {
+  await env.DB.prepare("DELETE FROM login_attempts WHERE ip = ?").bind(ip).run();
+}
+
+async function login(req: Request, env: Env): Promise<Response> {
+  const expected = env.ACCESS_PASSWORD?.trim();
+  if (!expected) {
+    fail(
+      503,
+      "auth_not_configured",
+      "Password belum diset. Jalankan: npx wrangler secret put ACCESS_PASSWORD",
+    );
+  }
+  const ip = req.headers.get("cf-connecting-ip") ?? "unknown";
+  await throttleLogin(env, ip);
+
+  const body = (await req.json().catch(() => null)) as { password?: string } | null;
+  const password = (body?.password ?? "").trim();
+  if (!password) fail(400, "validation_failed", "Password wajib diisi.");
+
+  if (!tokenMatches(password, expected)) {
+    fail(401, "unauthorized", "Password salah.");
+  }
+
+  await clearLoginAttempts(env, ip);
+  const { session, expiresAt } = await issueSession(env);
+  return json({ ok: true, session, expiresAt });
+}
+
+async function assertToken(req: Request, env: Env) {
   // Jalur Cloudflare Access: edge sudah menolak request tanpa sesi valid, dan
   // header ini hanya bisa muncul kalau Access aktif untuk domain ini
   // (workers.dev dimatikan). Digerbangi env flag supaya tidak jadi celah
@@ -167,9 +286,14 @@ function assertToken(req: Request, env: Env) {
   }
   const header = req.headers.get("authorization") ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
-  if (!match || !tokenMatches((match[1] ?? "").trim(), expected)) {
+  const provided = (match?.[1] ?? "").trim();
+  if (!provided) {
     fail(401, "unauthorized", "A valid bearer token is required.");
   }
+  // Mesin/script pakai API_TOKEN, manusia pakai sesi dari login password.
+  if (tokenMatches(provided, expected)) return;
+  if (await verifySession(env, provided)) return;
+  fail(401, "unauthorized", "A valid bearer token is required.");
 }
 
 const actorTypeFor = (role: ActorRole): ActorType => role;
@@ -691,6 +815,9 @@ async function office(env: Env, req: Request) {
       whatsappVerified: row.whatsapp_verified === 1,
       whatsappLink: (row.whatsapp_link as string | null) ?? undefined,
       googleMapsUrl: (row.google_maps_url as string | null) ?? undefined,
+      sourceUrl: (row.source_url as string | null) ?? undefined,
+      sourceType: (row.source_type as string | null) ?? undefined,
+      instagram: (row.instagram as string | null) ?? undefined,
       confidenceScore: (row.confidence_score as number | null) ?? undefined,
     })),
     posts: posts.results.map((row) => ({
@@ -1491,7 +1618,9 @@ async function route(req: Request, env: Env): Promise<Response> {
     return env.ASSETS.fetch(req);
   }
 
-  if (path !== "/api/health") assertToken(req, env);
+  if (path === "/api/auth/login" && method === "POST") return login(req, env);
+
+  if (path !== "/api/health") await assertToken(req, env);
 
   if (path === "/api/health" && method === "GET") return health(env);
 
@@ -1535,6 +1664,192 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json(saved);
   }
 
+  /* ---- On-demand scrape queue ------------------------------------- */
+  if (path === "/api/scrape/requests" && method === "POST") {
+    const body = (await req.json().catch(() => ({}))) as {
+      city?: string;
+      keyword?: string;
+      maxLeads?: number;
+      workspace?: string;
+    };
+    const city = (body.city ?? "").trim();
+    const keyword = (body.keyword ?? "").trim();
+    if (!city || !keyword) {
+      return json(
+        { error: { code: "invalid_request", message: "Kota dan kata kunci wajib diisi." } },
+        400,
+      );
+    }
+    const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+    const maxLeads = Math.min(Math.max(Number(body.maxLeads) || 10, 1), 50);
+    const id = `sr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    await env.DB.prepare(
+      `INSERT INTO scrape_requests
+         (id, workspace_id, city, keyword, max_leads, status, requested_by, requested_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?, datetime('now'), datetime('now'), datetime('now'))`,
+    )
+      .bind(id, workspaceId, city, keyword, maxLeads, req.headers.get("x-actor-id") ?? "ja")
+      .run();
+    return json({ ok: true, request: { id, city, keyword, maxLeads, status: "pending" } }, 201);
+  }
+
+  if (path === "/api/scrape/requests" && method === "GET") {
+    const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
+    const rows = await env.DB.prepare(
+      `SELECT id, city, keyword, max_leads, status, requested_at, started_at, finished_at, inserted, error
+         FROM scrape_requests
+        WHERE workspace_id = ?
+        ORDER BY requested_at DESC
+        LIMIT 10`,
+    )
+      .bind(workspaceId)
+      .all();
+    return json({ requests: rows.results ?? [] });
+  }
+
+  const scrapeRequestMatch = /^\/api\/scrape\/requests\/([^/]+)$/.exec(path);
+  if (scrapeRequestMatch && method === "PATCH") {
+    const id = decodeURIComponent(scrapeRequestMatch[1]);
+    const body = (await req.json().catch(() => ({}))) as {
+      status?: string;
+      inserted?: number;
+      error?: string;
+    };
+    const status = body.status ?? "running";
+    if (!["pending", "running", "done", "failed"].includes(status)) {
+      return json(
+        { error: { code: "invalid_request", message: "Status tidak dikenal." } },
+        400,
+      );
+    }
+    const result = await env.DB.prepare(
+      `UPDATE scrape_requests
+          SET status = ?,
+              inserted = COALESCE(?, inserted),
+              error = ?,
+              started_at = CASE WHEN ? = 'running' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+              finished_at = CASE WHEN ? IN ('done', 'failed') THEN datetime('now') ELSE finished_at END,
+              updated_at = datetime('now')
+        WHERE id = ?`,
+    )
+      .bind(status, body.inserted ?? null, body.error ?? null, status, status, id)
+      .run();
+    if (!result.meta || result.meta.changes === 0) {
+      return json({ error: { code: "not_found", message: "Permintaan tidak ditemukan." } }, 404);
+    }
+    return json({ ok: true, id, status });
+  }
+
+  /* ---- Lead outreach (WhatsApp follow-up tracking) ---------------- */
+  if (path === "/api/outreach" && method === "POST") {
+    const body = (await req.json().catch(() => ({}))) as {
+      leadId?: string;
+      leadName?: string;
+      company?: string;
+      phone?: string;
+      category?: string;
+      city?: string;
+      status?: string;
+      note?: string;
+      workspace?: string;
+    };
+    const leadId = (body.leadId ?? "").trim();
+    if (!leadId) {
+      return json({ error: { code: "invalid_request", message: "leadId wajib diisi." } }, 400);
+    }
+    const allowed = ["contacted", "replied", "interested", "not_interested", "deal"];
+    const status = allowed.includes(body.status ?? "") ? (body.status as string) : "contacted";
+    const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+    const id = `lo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    await env.DB.prepare(
+      `INSERT INTO lead_outreach
+         (id, workspace_id, lead_id, lead_name, company, phone, category, city, status, channel, note,
+          contacted_at, replied_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'whatsapp', ?,
+               datetime('now'),
+               CASE WHEN ? IN ('replied','interested','deal') THEN datetime('now') ELSE NULL END,
+               datetime('now'))
+       ON CONFLICT(workspace_id, lead_id) DO UPDATE SET
+         status = excluded.status,
+         note = COALESCE(excluded.note, lead_outreach.note),
+         category = COALESCE(excluded.category, lead_outreach.category),
+         city = COALESCE(excluded.city, lead_outreach.city),
+         phone = COALESCE(excluded.phone, lead_outreach.phone),
+         replied_at = CASE
+           WHEN excluded.status IN ('replied','interested','deal')
+             THEN COALESCE(lead_outreach.replied_at, datetime('now'))
+           ELSE lead_outreach.replied_at
+         END,
+         updated_at = datetime('now')`,
+    )
+      .bind(
+        id,
+        workspaceId,
+        leadId,
+        body.leadName ?? null,
+        body.company ?? null,
+        body.phone ?? null,
+        body.category ?? null,
+        body.city ?? null,
+        status,
+        body.note ?? null,
+        status,
+      )
+      .run();
+
+    return json({ ok: true, leadId, status });
+  }
+
+  if (path === "/api/outreach" && method === "GET") {
+    const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
+    const rows = await env.DB.prepare(
+      `SELECT id, lead_id, lead_name, company, phone, category, city, status, channel, note,
+              contacted_at, replied_at, updated_at
+         FROM lead_outreach
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 500`,
+    )
+      .bind(workspaceId)
+      .all();
+
+    const outreach = (rows.results ?? []).map((row: Record<string, unknown>) => ({
+      id: row.id,
+      leadId: row.lead_id,
+      leadName: row.lead_name,
+      company: row.company,
+      phone: row.phone,
+      category: row.category,
+      city: row.city,
+      status: row.status,
+      channel: row.channel ?? "whatsapp",
+      note: row.note,
+      contactedAt: row.contacted_at,
+      repliedAt: row.replied_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return json({ outreach });
+  }
+
+  if (path === "/api/video/config" && method === "GET") return videoConfig(env);
+  if (path === "/api/video/scenes/revise" && method === "POST") return reviseVideoScene(env, req);
+  if (path === "/api/video/templates" && method === "GET") return listVideoTemplates(env);
+  if (path === "/api/video/jobs" && method === "GET") return listVideoJobs(env, req);
+  if (path === "/api/video/jobs" && method === "POST") return createVideoJob(env, req);
+  const videoClaim = /^\/api\/video\/jobs\/([^/]+)\/claim$/.exec(path);
+  if (videoClaim && method === "POST") return claimVideoJob(env, req, decodeURIComponent(videoClaim[1]));
+  const videoJobMatch = /^\/api\/video\/jobs\/([^/]+)$/.exec(path);
+  if (videoJobMatch && method === "GET") return getVideoJob(env, req, decodeURIComponent(videoJobMatch[1]));
+  if (videoJobMatch && method === "PATCH") return patchVideoJob(env, req, decodeURIComponent(videoJobMatch[1]));
+
+  if (path === "/api/video/references" && method === "GET") return listVideoReferences(env, req);
+  if (path === "/api/video/references" && method === "POST") return createVideoReference(env, req);
+  const videoRefMatch = /^\/api\/video\/references\/([^/]+)$/.exec(path);
+  if (videoRefMatch && method === "PATCH") return patchVideoReference(env, req, decodeURIComponent(videoRefMatch[1]));
+  if (videoRefMatch && method === "DELETE") return deleteVideoReference(env, req, decodeURIComponent(videoRefMatch[1]));
+
   if (path === "/api/office" && method === "GET") return office(env, req);
   if (path === "/api/tasks" && method === "GET") {
     const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace"));
@@ -1574,13 +1889,728 @@ async function route(req: Request, env: Env): Promise<Response> {
   fail(404, "not_found", "Unknown API route.");
 }
 
+/* ------------------------------------------------------------------ */
+/* Video Studio                                                        */
+/*                                                                    */
+/* Render happens off-platform (runner or browser); this API only     */
+/* tracks jobs and stores a Google Drive pointer. No file ever lands  */
+/* in D1 or R2 — see docs/video-studio-spec.md.                       */
+/* ------------------------------------------------------------------ */
+
+interface VideoJobRow {
+  id: string;
+  workspace_id: string;
+  template_id: string;
+  title: string;
+  props: string;
+  spec: string | null;
+  spec_version: number | null;
+  local_path: string | null;
+  status: string;
+  engine: string;
+  fps: number;
+  duration_frames: number;
+  width: number;
+  height: number;
+  bytes: number | null;
+  drive_file_id: string | null;
+  drive_web_link: string | null;
+  drive_folder_id: string | null;
+  error: string | null;
+  attempts: number | null;
+  created_by: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+const VIDEO_ASPECTS: Record<string, { width: number; height: number }> = {
+  "16:9": { width: 1920, height: 1080 },
+  "9:16": { width: 1080, height: 1920 },
+  "1:1": { width: 1080, height: 1080 },
+};
+
+/** Forward-only state machine; anything not listed is rejected. */
+const VIDEO_TRANSITIONS: Record<string, string[]> = {
+  queued: ["rendering", "canceled", "failed"],
+  // `rendering -> done` sah untuk job yang unggahannya dimatikan: file final
+  // tinggal di mesin runner (local_path), tidak melewati tahap unggah.
+  rendering: ["uploading", "done", "failed", "canceled"],
+  uploading: ["done", "failed"],
+  done: [],
+  failed: ["queued"],
+  canceled: ["queued"],
+};
+
+/** Batas wajar supaya satu orang tidak membanjiri antrean runner. */
+const VIDEO_RATE_LIMIT_PER_HOUR = 10;
+const VIDEO_MAX_ACTIVE = 3;
+
+const parseJsonSafe = (raw: string | null | undefined, fallback: unknown) => {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return fallback;
+  }
+};
+
+const videoJobView = (row: VideoJobRow) => ({
+  id: row.id,
+  templateId: row.template_id,
+  title: row.title,
+  status: row.status,
+  engine: row.engine,
+  fps: row.fps,
+  durationFrames: row.duration_frames,
+  width: row.width,
+  height: row.height,
+  bytes: row.bytes,
+  driveFileId: row.drive_file_id,
+  driveWebLink: row.drive_web_link,
+  driveFolderId: row.drive_folder_id,
+  error: row.error,
+  attempts: row.attempts ?? 0,
+  createdBy: row.created_by,
+  createdAt: row.created_at,
+  startedAt: row.started_at,
+  finishedAt: row.finished_at,
+  props: parseJsonSafe(row.props, {}),
+  spec: parseJsonSafe(row.spec, null),
+  specVersion: row.spec_version ?? 1,
+  localPath: row.local_path,
+});
+
+/** Suara yang tersedia di runner (edge-tts). Daftar ini yang dipakai UI. */
+const VIDEO_VOICES = [
+  { id: "id-ID-GadisNeural", label: "Gadis (perempuan, Indonesia)", lang: "id-ID", gender: "female" },
+  { id: "id-ID-ArdiNeural", label: "Ardi (laki-laki, Indonesia)", lang: "id-ID", gender: "male" },
+  { id: "en-US-AriaNeural", label: "Aria (perempuan, Inggris)", lang: "en-US", gender: "female" },
+  { id: "en-US-GuyNeural", label: "Guy (laki-laki, Inggris)", lang: "en-US", gender: "male" },
+];
+
+const VIDEO_SPEC_MAX_BYTES = 48 * 1024;
+const VIDEO_SPEC_SCENE_LIMIT = 24;
+
+const clampNumber = (raw: unknown, min: number, max: number, fallback: number) => {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
+};
+
+const clampInt = (raw: unknown, min: number, max: number, fallback: number) =>
+  Math.round(clampNumber(raw, min, max, fallback));
+
+/**
+ * Normalisasi spec di sisi server. Memakai fungsi yang sama dengan Web UI
+ * (src/lib/video-spec.ts) supaya preview, data D1, dan renderer tidak pernah
+ * berbeda tafsir. Runner tetap menormalkan ulang sebelum render (job lama aman).
+ */
+function normalizeVideoSpec(raw: unknown, templateAspect: string) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const aspect = (VIDEO_ASPECTS[templateAspect] ? templateAspect : "9:16") as "9:16" | "16:9" | "1:1";
+  const spec = normalizeSpecShared(raw, aspect);
+  const scenes = spec.scenes.slice(0, VIDEO_SPEC_SCENE_LIMIT);
+  const durationSec = clampNumber(spec.render.durationSec, 3, 120, 15);
+  const fps = clampInt(spec.render.fps, 24, 60, 30);
+  const dims = VIDEO_ASPECTS[spec.render.aspect] ?? VIDEO_ASPECTS["9:16"];
+  const width = clampInt(spec.render.width, 320, 2160, dims.width);
+  const height = clampInt(spec.render.height, 320, 2160, dims.height);
+
+  return {
+    spec: {
+      ...spec,
+      version: 1,
+      scenes,
+      durationSec,
+      render: { ...spec.render, durationSec, fps, width, height, upload: spec.render.upload !== false },
+    },
+    durationSec,
+    fps,
+    width,
+    height,
+  };
+}
+
+function videoConfig(env: Env) {
+  return json({
+    uploader: "runner",
+    driveFolder: env.VIDEO_DRIVE_FOLDER ?? "",
+    maxDurationSec: 120,
+    specVersion: 1,
+    voices: VIDEO_VOICES,
+    uploadOptional: true,
+    note: "Video files are rendered off-platform and uploaded straight to Google Drive. Nothing is stored on this server.",
+  });
+}
+
+const VIDEO_SCENE_MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/meta/llama-3.1-8b-instruct",
+] as const;
+
+async function reviseVideoScene(env: Env, req: Request) {
+  const body = await readJson(req);
+  let input: ReturnType<typeof validateSceneRevisionInput>;
+  try {
+    input = validateSceneRevisionInput(body);
+  } catch (error) {
+    fail(400, "validation_failed", error instanceof Error ? error.message : "Payload revisi scene tidak valid.");
+  }
+
+  await assertWorkspace(env, input.workspace);
+  await authenticate(env, input.workspace, req);
+
+  const systemPrompt = `Kamu editor scene video PlayDesign. Balas hanya satu objek JSON valid tanpa markdown dan tanpa penjelasan.
+Kamu hanya boleh mengubah: kind, durationSec, title, body, items, transitionIn, media.fit, media.motion.
+Jangan mengubah id atau media.refId. Durasi wajib 0.5–30 detik. Gunakan Bahasa Indonesia natural dan ringkas.
+Struktur: {"kind":"title|statement|list|quote|cta|image|video","durationSec":4,"title":"","body":"","items":[],"transitionIn":"cut|fade|slide|wipe","media":{"fit":"cover|contain","motion":"none|kenburns|parallax"}}`;
+  const userPrompt = JSON.stringify({
+    instruction: input.instruction,
+    currentScene: input.scene,
+    context: input.context,
+  });
+
+  let scene: ReturnType<typeof sanitizeSceneRevision> | null = null;
+  let model = "";
+  let lastInferenceError: unknown;
+  let lastParseError: unknown;
+
+  for (const candidateModel of VIDEO_SCENE_MODELS) {
+    let responseText = "";
+    try {
+      const result: any = await env.AI.run(candidateModel as any, {
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        max_tokens: 500,
+        temperature: 0.2,
+      });
+      responseText = result?.response ?? result?.choices?.[0]?.message?.content ?? "";
+    } catch (error) {
+      lastInferenceError = error;
+      console.warn(`Revisi scene dengan ${candidateModel} gagal:`, error);
+      continue;
+    }
+
+    try {
+      scene = sanitizeSceneRevision(input.scene, extractSceneRevision(responseText));
+      model = candidateModel;
+      break;
+    } catch (error) {
+      lastParseError = error;
+      console.warn(
+        `Respons ${candidateModel} tidak valid, mencoba model berikutnya:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  if (!scene) {
+    if (lastParseError) {
+      fail(502, "invalid_ai_response", "AI menghasilkan revisi yang tidak valid. Scene lama tidak diubah.");
+    }
+    console.error("Semua model revisi scene gagal:", lastInferenceError);
+    fail(503, "ai_service_unavailable", "Layanan AI sedang sibuk. Coba beberapa saat lagi.");
+  }
+
+  if (!sceneRevisionChanged(input.scene, scene)) {
+    fail(422, "no_change", "AI tidak mengubah scene ini. Tulis instruksi yang lebih spesifik.");
+  }
+
+  return json({ scene, model });
+}
+
+async function listVideoTemplates(env: Env) {
+  const rows = await env.DB.prepare(
+    `SELECT id, name, composition_id, aspect, props_schema
+       FROM video_templates
+      WHERE enabled = 1
+      ORDER BY name`,
+  ).all<{ id: string; name: string; composition_id: string; aspect: string; props_schema: string }>();
+  const list = (rows.results ?? []) as Array<{
+    id: string;
+    name: string;
+    composition_id: string;
+    aspect: string;
+    props_schema: string;
+  }>;
+  return json({
+    templates: list.map((row) => ({
+      id: row.id,
+      name: row.name,
+      compositionId: row.composition_id,
+      aspect: row.aspect,
+      propsSchema: parseJsonSafe(row.props_schema, { fields: [] }),
+    })),
+  });
+}
+
+async function listVideoJobs(env: Env, req: Request) {
+  const url = new URL(req.url);
+  const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace") ?? "playdesign");
+  const status = url.searchParams.get("status");
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 20, 1), 100);
+  const rows = status
+    ? await env.DB.prepare(
+        `SELECT * FROM video_jobs WHERE workspace_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?`,
+      )
+        .bind(workspaceId, status, limit)
+        .all<VideoJobRow>()
+    : await env.DB.prepare(`SELECT * FROM video_jobs WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?`)
+        .bind(workspaceId, limit)
+        .all<VideoJobRow>();
+  return json({ jobs: (rows.results ?? []).map(videoJobView) });
+}
+
+async function getVideoJob(env: Env, _req: Request, id: string) {
+  const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  if (!row) fail(404, "job_not_found", "Job video tidak ditemukan.");
+  return json({ job: videoJobView(row) });
+}
+
+/** Tempelkan metadata referensi dari D1 ke spec job supaya runner tahu gambar/audio mana yang dipakai. */
+async function attachSpecReferences(env: Env, workspaceId: string, spec: Record<string, unknown>) {
+  const scenes = Array.isArray(spec.scenes) ? (spec.scenes as Record<string, unknown>[]) : [];
+  const ids = new Set<string>();
+  for (const scene of scenes) {
+    const media = scene.media as { refId?: string } | undefined;
+    if (media?.refId) ids.add(media.refId);
+  }
+  const audio = (spec.audio ?? {}) as { music?: { refId?: string }; sfx?: { refId?: string }[] };
+  if (audio.music?.refId) ids.add(audio.music.refId);
+  for (const effect of audio.sfx ?? []) if (effect?.refId) ids.add(effect.refId);
+  if (!ids.size) return;
+
+  const list = Array.from(ids);
+  const marks = list.map(() => "?").join(", ");
+  const rows = await env.DB.prepare(
+    `SELECT id, kind, name, role, url, strength, note FROM video_references
+      WHERE workspace_id = ? AND id IN (${marks})`,
+  )
+    .bind(workspaceId, ...list)
+    .all<{
+      id: string;
+      kind: string;
+      name: string;
+      role: string;
+      url: string;
+      strength: number | null;
+      note: string | null;
+    }>();
+
+  const byId = new Map((rows.results ?? []).map((row) => [row.id, row]));
+  const existing = new Map(
+    (Array.isArray(spec.references) ? (spec.references as Record<string, unknown>[]) : []).map((ref) => [
+      String(ref.id ?? ""),
+      ref,
+    ]),
+  );
+  for (const id of list) {
+    const row = byId.get(id);
+    if (!row) continue;
+    existing.set(id, {
+      id: row.id,
+      kind: row.kind,
+      name: row.name,
+      role: row.role,
+      url: row.url,
+      strength: row.strength ?? undefined,
+      note: row.note ?? undefined,
+    });
+  }
+  spec.references = Array.from(existing.values()).filter((ref) => ref.id).slice(0, 12);
+}
+
+async function createVideoJob(env: Env, req: Request) {
+  const key = (req.headers.get("idempotency-key") ?? "").trim();
+  if (!key) {
+    fail(400, "idempotency_key_required", "POST /api/video/jobs requires an Idempotency-Key header.");
+  }
+  const replay = await env.DB.prepare(`SELECT * FROM video_jobs WHERE idempotency_key = ?`).bind(key).first<VideoJobRow>();
+  if (replay) return json({ ok: true, job: videoJobView(replay), replayed: true });
+
+  const body = (await req.json().catch(() => ({}))) as {
+    templateId?: string;
+    title?: string;
+    props?: Record<string, unknown>;
+    spec?: Record<string, unknown>;
+    engine?: string;
+    workspace?: string;
+  };
+  const templateId = (body.templateId ?? "").trim();
+  const title = (body.title ?? "").trim();
+  if (!templateId) fail(400, "invalid_request", "Template video wajib dipilih.");
+  if (!title) fail(400, "invalid_request", "Judul video wajib diisi.");
+  if (title.length > 120) fail(400, "invalid_request", "Judul maksimal 120 karakter.");
+
+  const template = await env.DB.prepare(
+    `SELECT id, composition_id, aspect FROM video_templates WHERE id = ? AND enabled = 1`,
+  )
+    .bind(templateId)
+    .first<{ id: string; composition_id: string; aspect: string }>();
+  if (!template) fail(404, "template_not_found", "Template video tidak dikenal.");
+
+  const specJson = body.spec ? JSON.stringify(body.spec) : "";
+  if (specJson.length > VIDEO_SPEC_MAX_BYTES) {
+    fail(400, "spec_too_large", `Spesifikasi video maksimal ${Math.round(VIDEO_SPEC_MAX_BYTES / 1024)} KB.`);
+  }
+  const normalized = body.spec ? normalizeVideoSpec(body.spec, template.aspect) : null;
+  if (body.spec && !normalized) fail(400, "invalid_spec", "Spesifikasi video harus berupa objek JSON.");
+
+  const props = (body.props ?? {}) as Record<string, unknown>;
+  const propsJson = JSON.stringify(props);
+  if (propsJson.length > 8192) fail(400, "props_too_large", "Props video maksimal 8 KB.");
+
+  const fps = normalized?.fps ?? 30;
+  const requestedSec = normalized?.durationSec ?? Number(props.durationSec);
+  const durationSec = Number.isFinite(requestedSec) ? Math.min(Math.max(requestedSec, 3), 120) : 15;
+  const durationFrames = Math.round(durationSec * fps);
+  if (durationFrames > 7200) fail(400, "invalid_request", "Durasi maksimal 120 detik.");
+
+  const aspect = normalized
+    ? { width: normalized.width, height: normalized.height }
+    : VIDEO_ASPECTS[template.aspect] ?? VIDEO_ASPECTS["9:16"];
+  const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+  const engine = body.engine === "browser" ? "browser" : "runner";
+  if (normalized) await attachSpecReferences(env, workspaceId, normalized.spec as Record<string, unknown>);
+
+  // Dua penjaga: laju per jam (spec) dan jumlah job aktif, supaya antrean
+  // runner tidak menumpuk tanpa batas saat mesin runner sedang mati.
+  const activity = await env.DB.prepare(
+    `SELECT
+        SUM(CASE WHEN created_at > datetime('now', '-1 hour') THEN 1 ELSE 0 END) AS last_hour,
+        SUM(CASE WHEN status IN ('queued', 'rendering', 'uploading') THEN 1 ELSE 0 END) AS active
+       FROM video_jobs
+      WHERE workspace_id = ?`,
+  )
+    .bind(workspaceId)
+    .first<{ last_hour: number | null; active: number | null }>();
+  if (Number(activity?.last_hour ?? 0) >= VIDEO_RATE_LIMIT_PER_HOUR) {
+    fail(429, "rate_limited", `Maksimal ${VIDEO_RATE_LIMIT_PER_HOUR} job video per jam. Coba lagi nanti.`);
+  }
+  if (Number(activity?.active ?? 0) >= VIDEO_MAX_ACTIVE) {
+    fail(
+      409,
+      "too_many_active",
+      `Sudah ada ${VIDEO_MAX_ACTIVE} job berjalan. Tunggu salah satunya selesai atau batalkan.`,
+    );
+  }
+
+  const id = `vj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  await env.DB.prepare(
+    `INSERT INTO video_jobs
+       (id, workspace_id, template_id, title, props, spec, spec_version, status, engine, fps, duration_frames, width, height, created_by, idempotency_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      workspaceId,
+      template.id,
+      title,
+      propsJson,
+      normalized ? JSON.stringify(normalized.spec) : "{}",
+      normalized ? 1 : 0,
+      engine,
+      fps,
+      durationFrames,
+      aspect.width,
+      aspect.height,
+      req.headers.get("x-actor-id") ?? "ja",
+      key,
+    )
+    .run();
+
+  const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  return json({ ok: true, job: row ? videoJobView(row) : { id } }, 201);
+}
+
+async function patchVideoJob(env: Env, req: Request, id: string) {
+  const current = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  if (!current) fail(404, "job_not_found", "Job video tidak ditemukan.");
+
+  const body = (await req.json().catch(() => ({}))) as {
+    status?: string;
+    bytes?: number;
+    driveFileId?: string;
+    driveWebLink?: string;
+    driveFolderId?: string;
+    localPath?: string | null;
+    spec?: Record<string, unknown>;
+    error?: string | null;
+  };
+
+  const next = body.status?.trim();
+  if (next) {
+    const allowed = VIDEO_TRANSITIONS[current.status] ?? [];
+    if (next !== current.status && !allowed.includes(next)) {
+      fail(
+        409,
+        "invalid_transition",
+        `Status tidak boleh berpindah dari ${current.status} ke ${next}.`,
+        { allowed },
+      );
+    }
+  }
+  const localPathNext = body.localPath === undefined ? current.local_path : body.localPath;
+  if (next === "done" && !(body.driveFileId ?? current.drive_file_id) && !localPathNext) {
+    fail(
+      400,
+      "output_required",
+      "Job hanya bisa selesai kalau driveFileId terisi atau localPath dicatat (unggahan dimatikan).",
+    );
+  }
+
+  // Spec hanya boleh diubah sebelum runner mengambil job; setelah rendering
+  // dimulai, spesifikasi terkunci supaya hasil dan preview tidak berbeda.
+  let specJson: string | null = null;
+  if (body.spec) {
+    if (current.status !== "queued") {
+      fail(409, "spec_locked", "Spesifikasi tidak bisa diubah setelah rendering dimulai.");
+    }
+    const raw = JSON.stringify(body.spec);
+    if (raw.length > VIDEO_SPEC_MAX_BYTES) {
+      fail(400, "spec_too_large", `Spesifikasi video maksimal ${Math.round(VIDEO_SPEC_MAX_BYTES / 1024)} KB.`);
+    }
+    const normalized = normalizeVideoSpec(body.spec, "9:16");
+    if (!normalized) fail(400, "invalid_spec", "Spesifikasi video harus berupa objek JSON.");
+    specJson = JSON.stringify(normalized.spec);
+  }
+
+  // `queued` = job diulang: bersihkan sisa percobaan sebelumnya supaya UI tidak
+  // menampilkan error/link/ukuran lama, dan naikkan penghitung percobaan.
+  const isRetry = next === "queued";
+  const driveFileId = isRetry ? null : body.driveFileId?.trim() || current.drive_file_id;
+  const driveWebLink = isRetry
+    ? null
+    : body.driveWebLink?.trim() ||
+      current.drive_web_link ||
+      (driveFileId ? `https://drive.google.com/file/d/${driveFileId}/view` : null);
+  const bytes =
+    !isRetry && Number.isFinite(Number(body.bytes)) && body.bytes !== undefined
+      ? Math.max(0, Number(body.bytes))
+      : isRetry
+        ? null
+        : current.bytes;
+  const finalStatus = next ?? current.status;
+  const finishedAt = isRetry
+    ? null
+    : ["done", "failed", "canceled"].includes(finalStatus)
+      ? nowIso()
+      : current.finished_at;
+  const error = isRetry ? null : body.error === undefined ? current.error : body.error;
+  const attempts = isRetry ? (current.attempts ?? 0) + 1 : current.attempts ?? 0;
+
+  await env.DB.prepare(
+    `UPDATE video_jobs
+        SET status = ?,
+            bytes = ?,
+            drive_file_id = ?,
+            drive_web_link = ?,
+            drive_folder_id = ?,
+            local_path = ?,
+            spec = COALESCE(?, spec),
+            error = ?,
+            attempts = ?,
+            started_at = CASE
+              WHEN ? = 1 THEN NULL
+              WHEN ? = 'rendering' AND started_at IS NULL THEN datetime('now')
+              ELSE started_at END,
+            finished_at = ?
+      WHERE id = ?`,
+  )
+    .bind(
+      finalStatus,
+      bytes,
+      driveFileId,
+      driveWebLink,
+      isRetry ? null : body.driveFolderId?.trim() || current.drive_folder_id,
+      isRetry ? null : body.localPath === undefined ? current.local_path : body.localPath,
+      specJson,
+      error,
+      attempts,
+      isRetry ? 1 : 0,
+      finalStatus,
+      finishedAt,
+      id,
+    )
+    .run();
+
+  const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  return json({ ok: true, job: row ? videoJobView(row) : null });
+}
+
+async function claimVideoJob(env: Env, req: Request, id: string) {
+  const body = (await req.json().catch(() => ({}))) as { workspace?: string };
+  const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+  const result = await env.DB.prepare(
+    `UPDATE video_jobs
+        SET status = 'rendering', started_at = datetime('now'), error = NULL
+      WHERE id = ? AND workspace_id = ? AND status = 'queued'`,
+  )
+    .bind(id, workspaceId)
+    .run();
+  const changed = Number((result.meta as { changes?: number } | undefined)?.changes ?? 0);
+  if (!changed) fail(409, "not_claimable", "Job sudah diambil runner lain atau statusnya bukan queued.");
+  const row = await env.DB.prepare(`SELECT * FROM video_jobs WHERE id = ?`).bind(id).first<VideoJobRow>();
+  if (!row) fail(404, "job_not_found", "Job video tidak ditemukan.");
+  return json({ ok: true, job: videoJobView(row) });
+}
+
+/* ------------------------------------------------------------------ */
+/* Pustaka referensi video (gambar/video/audio)                        */
+/* ------------------------------------------------------------------ */
+
+const REFERENCE_KINDS = ["image", "video", "audio"] as const;
+const REFERENCE_ROLES = ["style", "motion", "subject", "music", "sfx"] as const;
+
+interface VideoReferenceRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  kind: string;
+  role: string;
+  url: string;
+  strength: number;
+  tags: string;
+  note: string | null;
+  palette: string | null;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function videoReferenceView(row: VideoReferenceRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    kind: row.kind,
+    role: row.role,
+    url: row.url,
+    strength: row.strength,
+    tags: row.tags ? row.tags.split(",").filter(Boolean) : [],
+    note: row.note,
+    palette: parseJsonSafe(row.palette, null) as Record<string, string> | null,
+    width: row.width,
+    height: row.height,
+    durationMs: row.duration_ms,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Referensi tidak menyimpan byte: hanya URL https atau path `local:` di mesin
+ * runner. Skema lain ditolak supaya runner tidak bisa disuruh membaca apa pun.
+ */
+function referenceUrl(raw: unknown): string {
+  const value = str(raw, "url", 8, 2000).trim();
+  const ok = /^https?:\/\//i.test(value) || /^local:[\/\\]/.test(value);
+  if (!ok) {
+    fail(400, "invalid_reference_url", "URL referensi harus https://… atau local:/path/di/mesin/runner.");
+  }
+  return value;
+}
+
+async function listVideoReferences(env: Env, req: Request) {
+  const url = new URL(req.url);
+  const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace") ?? "playdesign");
+  await authenticate(env, workspaceId, req);
+  const rows = await env.DB.prepare(
+    `SELECT * FROM video_references WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 200`,
+  )
+    .bind(workspaceId)
+    .all<VideoReferenceRow>();
+  return json({ references: (rows.results ?? []).map(videoReferenceView) });
+}
+
+async function createVideoReference(env: Env, req: Request) {
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const workspaceId = await assertWorkspace(env, (body.workspace as string) ?? "playdesign");
+  const actor = await authenticate(env, workspaceId, req);
+  const name = str(body.name, "name", 2, 120);
+  const kind = oneOf(body.kind, "kind", REFERENCE_KINDS);
+  const role = body.role === undefined ? (kind === "audio" ? "music" : "subject") : oneOf(body.role, "role", REFERENCE_ROLES);
+  const url = referenceUrl(body.url);
+  const strength = Math.min(Math.max(Number(body.strength ?? 0.6) || 0.6, 0), 1);
+  const tags = Array.isArray(body.tags)
+    ? body.tags.map((tag) => str(tag, "tags", 1, 40)).slice(0, 8).join(",")
+    : typeof body.tags === "string"
+      ? body.tags.slice(0, 240)
+      : "";
+  const note = optionalStr(body.note, "note", 400);
+  const id = uid("vr");
+  const at = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO video_references
+       (id, workspace_id, name, kind, role, url, strength, tags, note, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, workspaceId, name, kind, role, url, strength, tags, note ?? null, actor.id, at, at)
+    .run();
+  const row = await env.DB.prepare(`SELECT * FROM video_references WHERE id = ?`).bind(id).first<VideoReferenceRow>();
+  return json({ reference: row ? videoReferenceView(row) : null }, 201);
+}
+
+async function patchVideoReference(env: Env, req: Request, id: string) {
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const current = await env.DB.prepare(`SELECT * FROM video_references WHERE id = ?`).bind(id).first<VideoReferenceRow>();
+  if (!current) fail(404, "reference_not_found", "Referensi tidak ditemukan.");
+  await authenticate(env, current.workspace_id, req);
+
+  const name = body.name === undefined ? current.name : str(body.name, "name", 2, 120);
+  const role = body.role === undefined ? current.role : oneOf(body.role, "role", REFERENCE_ROLES);
+  const url = body.url === undefined ? current.url : referenceUrl(body.url);
+  const strength =
+    body.strength === undefined ? current.strength : Math.min(Math.max(Number(body.strength) || 0, 0), 1);
+  const note = body.note === undefined ? current.note : optionalStr(body.note, "note", 400);
+  const tags = Array.isArray(body.tags)
+    ? body.tags.map((tag) => str(tag, "tags", 1, 40)).slice(0, 8).join(",")
+    : body.tags === undefined
+      ? current.tags
+      : typeof body.tags === "string"
+        ? body.tags.slice(0, 240)
+        : current.tags;
+  // Palette/waktu tempuh diisi runner setelah membaca berkasnya.
+  const palette = body.palette === undefined ? current.palette : JSON.stringify(body.palette).slice(0, 2000);
+  const width = (body.width === undefined ? current.width : optionalInt(body.width, "width", 0, 8000)) ?? null;
+  const height = (body.height === undefined ? current.height : optionalInt(body.height, "height", 0, 8000)) ?? null;
+  const durationMs =
+    (body.durationMs === undefined ? current.duration_ms : optionalInt(body.durationMs, "durationMs", 0, 3600000)) ?? null;
+
+  await env.DB.prepare(
+    `UPDATE video_references
+        SET name = ?, role = ?, url = ?, strength = ?, tags = ?, note = ?, palette = ?,
+            width = ?, height = ?, duration_ms = ?, updated_at = ?
+      WHERE id = ?`,
+  )
+    .bind(name, role, url, strength, tags, note ?? null, palette ?? null, width, height, durationMs, nowIso(), id)
+    .run();
+  const row = await env.DB.prepare(`SELECT * FROM video_references WHERE id = ?`).bind(id).first<VideoReferenceRow>();
+  return json({ reference: row ? videoReferenceView(row) : null });
+}
+
+async function deleteVideoReference(env: Env, req: Request, id: string) {
+  const current = await env.DB.prepare(`SELECT * FROM video_references WHERE id = ?`).bind(id).first<VideoReferenceRow>();
+  if (!current) fail(404, "reference_not_found", "Referensi tidak ditemukan.");
+  await authenticate(env, current.workspace_id, req);
+  await env.DB.prepare(`DELETE FROM video_references WHERE id = ?`).bind(id).run();
+  return json({ ok: true, id });
+}
+
 export default {
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
       if (req.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
-          headers: { allow: "GET, POST, PATCH, OPTIONS" },
+          headers: { allow: "GET, POST, PATCH, DELETE, OPTIONS" },
         });
       }
       return await route(req, env);

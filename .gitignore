@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+_legacy/
+*.tsbuildinfo
 
 # Cloudflare
 .wrangler
@@ -27,3 +29,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python
+__pycache__/
+*.pyc
