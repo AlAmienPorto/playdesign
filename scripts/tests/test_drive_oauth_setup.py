@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-STATE = {"token_polls": 0, "folder_created": 0}
+STATE = {"token_polls": 0, "folder_created": 0, "scope": ""}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -43,7 +43,7 @@ class Handler(BaseHTTPRequestHandler):
         form = urllib.parse.parse_qs(self.rfile.read(length).decode() if length else "")
 
         if parsed.path == "/device/code":
-            assert form["scope"] == ["https://www.googleapis.com/auth/drive"], form
+            STATE["scope"] = (form.get("scope") or [""])[0]
             return self._json(
                 200,
                 {
@@ -133,6 +133,8 @@ def main() -> int:
     check("mode oauth", data.get("mode") == "oauth")
     check("refresh token tersimpan", data.get("refresh_token") == "refresh-device")
     check("folder tersimpan", data.get("folder") == "Playdesign Video")
+    check("scope default drive.file", STATE["scope"] == "https://www.googleapis.com/auth/drive.file", STATE["scope"])
+    check("scope ikut tersimpan", data.get("scope") == "drive.file", str(data.get("scope")))
     if cfg.exists():
         mode = stat.S_IMODE(cfg.stat().st_mode)
         check("permission 600", mode == 0o600, oct(mode))

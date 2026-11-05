@@ -33,11 +33,19 @@ from drive_upload import DEFAULT_CONFIG, _decode_error, _http
 
 DEVICE_URL = os.environ.get("PLAYDESIGN_DEVICE_URL", "https://oauth2.googleapis.com/device/code")
 TOKEN_URL = os.environ.get("PLAYDESIGN_OAUTH_TOKEN_URL", "https://oauth2.googleapis.com/token")
-SCOPE = "https://www.googleapis.com/auth/drive"
+# drive.file = hanya file/folder yang dibuat aplikasi ini. Scope ini tidak
+# tergolong sensitif, jadi aplikasi bisa dipakai tanpa verifikasi Google dan
+# refresh token tidak kedaluwarsa 7 hari seperti aplikasi berstatus "Testing".
+# "drive" (penuh) bisa dipakai lewat --scope drive, tapi konsekuensinya token
+# mati tiap 7 hari selama consent screen masih Testing.
+SCOPES = {
+    "drive.file": "https://www.googleapis.com/auth/drive.file",
+    "drive": "https://www.googleapis.com/auth/drive",
+}
 
 
-def request_device_code(client_id: str) -> dict:
-    form = urllib.parse.urlencode({"client_id": client_id, "scope": SCOPE}).encode()
+def request_device_code(client_id: str, scope: str = "drive.file") -> dict:
+    form = urllib.parse.urlencode({"client_id": client_id, "scope": SCOPES[scope]}).encode()
     status, _, body = _http("POST", DEVICE_URL, form, {"Content-Type": "application/x-www-form-urlencoded"})
     if status != 200:
         raise RuntimeError(f"permintaan kode ditolak ({status}): {_decode_error(body)}")
@@ -78,7 +86,14 @@ def poll_for_token(
     raise RuntimeError("kode kedaluwarsa sebelum disetujui; jalankan ulang skrip ini")
 
 
-def write_config(path, client_id: str, client_secret: str, refresh_token: str, folder: str):
+def write_config(
+    path,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    folder: str,
+    scope: str = "drive.file",
+):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -87,6 +102,7 @@ def write_config(path, client_id: str, client_secret: str, refresh_token: str, f
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "refresh_token": refresh_token,
+                "scope": scope,
                 "folder": folder,
             },
             indent=2,
@@ -102,6 +118,12 @@ def main() -> int:
     parser.add_argument("--client-id", default=os.environ.get("GOOGLE_CLIENT_ID", ""))
     parser.add_argument("--folder", default=os.environ.get("PLAYDESIGN_DRIVE_FOLDER", "Playdesign Video"))
     parser.add_argument("--out", default=str(DEFAULT_CONFIG))
+    parser.add_argument(
+        "--scope",
+        choices=sorted(SCOPES),
+        default="drive.file",
+        help="drive.file (default, tanpa verifikasi) atau drive (akses penuh)",
+    )
     parser.add_argument("--no-verify", action="store_true", help="jangan uji folder setelah token didapat")
     args = parser.parse_args()
 
@@ -113,7 +135,7 @@ def main() -> int:
         print("client id dan secret wajib diisi.", file=sys.stderr)
         return 2
 
-    device = request_device_code(client_id)
+    device = request_device_code(client_id, args.scope)
     url = device.get("verification_url") or device.get("verification_uri")
     print("\nBuka URL ini di browser, login, lalu masukkan kode di bawah:\n")
     print(f"  URL  : {url}")
@@ -138,7 +160,7 @@ def main() -> int:
 
     from pathlib import Path
 
-    path = write_config(Path(args.out), client_id, client_secret, refresh_token, args.folder)
+    path = write_config(Path(args.out), client_id, client_secret, refresh_token, args.folder, args.scope)
     print(f"\nTersimpan: {path} (chmod 600)")
 
     if not args.no_verify:
