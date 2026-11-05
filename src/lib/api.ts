@@ -406,7 +406,17 @@ export async function reviseVideoScene(input: {
 }): Promise<VideoScene> {
   const payload = await request<{ scene: VideoScene; model?: string }>('/api/video/scenes/revise', {
     method: 'POST',
-    body: JSON.stringify({ ...input, workspace: 'playdesign' }),
+    body: JSON.stringify({
+      workspace: 'playdesign',
+      instruction: input.instruction,
+      scene: input.scene,
+      context: {
+        prompt: input.prompt ?? '',
+        style: input.style ?? {},
+        sceneIndex: input.sceneIndex ?? 0,
+        sceneCount: input.sceneCount ?? 1,
+      },
+    }),
   });
   return payload.scene;
 }
