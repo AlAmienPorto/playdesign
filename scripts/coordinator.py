@@ -338,6 +338,18 @@ def analyze(state, now=None, thresholds=None):
     for job in state.get("cron") or []:
         findings.extend(_cron_findings(job, now))
 
+    if (state.get("meta") or {}).get("outdated"):
+        findings.append(
+            Finding(
+                "ops",
+                "coordinator",
+                "coordinator_stale",
+                "warn",
+                "salinan koordinator di ~/.hermes/scripts tertinggal dari repo — jalankan `coordinator.py install`",
+                None,
+            )
+        )
+
     recent = [
         row
         for row in state.get("video") or []
@@ -461,7 +473,13 @@ def fetch_state():
     video = api_get("/api/video/jobs", {"workspace": WORKSPACE, "limit": 100}).get("jobs", [])
     scrape = api_get("/api/scrape/requests", {"workspace": WORKSPACE}).get("requests", [])
     runs = api_get("/api/runs", {"workspace": WORKSPACE}).get("runs", [])
-    return {"video": video, "scrape": scrape, "runs": runs, "cron": read_cron_jobs()}
+    return {
+        "video": video,
+        "scrape": scrape,
+        "runs": runs,
+        "cron": read_cron_jobs(),
+        "meta": {"outdated": installed_stale()},
+    }
 
 
 def read_cron_jobs():
@@ -474,6 +492,36 @@ def read_cron_jobs():
         return []
     jobs = data if isinstance(data, list) else data.get("jobs", [])
     return [job for job in jobs if isinstance(job, dict)]
+
+
+def installed_stale():
+    """True kalau salinan di ~/.hermes/scripts berbeda dari berkas repo.
+
+    Cron Hermes menolak symlink yang menunjuk keluar direktorinya, jadi skrip
+    harus disalin. Pemeriksaan ini yang menjaga salinan tidak tertinggal.
+    """
+    target = os.path.join(HERMES_SCRIPTS, "coordinator.py")
+    here = os.path.abspath(__file__)
+    if os.path.realpath(here) == os.path.realpath(target):
+        return False
+    try:
+        with open(here, "rb") as mine, open(target, "rb") as theirs:
+            return mine.read() != theirs.read()
+    except OSError:
+        return False
+
+
+def install():
+    """Salin skrip koordinator ke direktori skrip cron Hermes."""
+    os.makedirs(HERMES_SCRIPTS, exist_ok=True)
+    for name in ("coordinator.py", "coordinator_digest.py"):
+        source = os.path.join(REPO_ROOT, "scripts", name)
+        target = os.path.join(HERMES_SCRIPTS, name)
+        with open(source, "rb") as src, open(target, "wb") as dst:
+            dst.write(src.read())
+        os.chmod(target, 0o755)
+        print(f"terpasang: {target}")
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -751,6 +799,7 @@ def main(argv=None):
     add_flags(sub.add_parser("sweep", help="deteksi + bertindak + catat (default)"))
     add_flags(sub.add_parser("report", help="ringkasan lengkap"))
     add_flags(sub.add_parser("json", help="keluaran mentah"))
+    add_flags(sub.add_parser("install", help="pasang skrip ke ~/.hermes/scripts"))
 
     args = parser.parse_args(argv)
     # Tanpa argumen = sweep, supaya cron cukup memanggil `coordinator.py`.
@@ -760,6 +809,7 @@ def main(argv=None):
         "sweep": cmd_sweep,
         "report": cmd_report,
         "json": cmd_json,
+        "install": lambda _args: install(),
     }[args.command]
     if not hasattr(args, "dry_run"):
         args.dry_run = False

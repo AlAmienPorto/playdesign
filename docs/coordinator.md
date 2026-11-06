@@ -88,13 +88,16 @@ coordinator_actions  id, at, action, ref, note        (append-only)
 Keduanya `no_agent` — tidak memakai token model. `sweep` senyap kalau semua
 sehat (stdout kosong = tidak ada pesan terkirim), `digest` selalu melapor.
 
-Skrip dipasang sebagai **symlink** ke repo, bukan salinan — supaya cron selalu
-menjalankan versi terbaru dan tidak ada logika usang yang tertinggal:
+Skrip harus ada di `~/.hermes/scripts/` — cron Hermes **menolak symlink** yang
+menunjuk keluar direktorinya, jadi berkasnya disalin:
 
 ```bash
-ln -sf ~/work/playdesign/scripts/coordinator.py        ~/.hermes/scripts/coordinator.py
-ln -sf ~/work/playdesign/scripts/coordinator_digest.py ~/.hermes/scripts/coordinator_digest.py
+python3 scripts/coordinator.py install
 ```
+
+Supaya salinan tidak tertinggal dari repo, `sweep`/`status` membandingkan isi
+berkas dan memunculkan peringatan `coordinator_stale` kalau berbeda. Setiap
+kali `scripts/coordinator.py` diubah, jalankan `install` lagi.
 
 ## Uji
 

@@ -230,6 +230,15 @@ class QuotaRulesTest(unittest.TestCase):
         self.assertEqual(co.analyze(state(video_rows=rows), NOW), [])
 
 
+class OpsRulesTest(unittest.TestCase):
+    def test_outdated_install_is_reported(self):
+        findings = co.analyze({"meta": {"outdated": True}}, NOW)
+        self.assertEqual([(f.pipeline, f.kind) for f in findings], [("ops", "coordinator_stale")])
+
+    def test_fresh_install_is_quiet(self):
+        self.assertEqual(co.analyze({"meta": {"outdated": False}}, NOW), [])
+
+
 class DedupeTest(unittest.TestCase):
     def test_same_job_reported_once(self):
         findings = co.analyze(state(video_rows=[video("queued", 12, id="vj-9")]), NOW)
