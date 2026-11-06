@@ -586,9 +586,6 @@ const MediaPanel: React.FC<{ tokens: Tokens; spec: VideoSpec; scene: VideoScene;
           </div>
         ) : null}
       </div>
-      {scene.body ? (
-        <div style={{ fontSize: base * 0.0175, color: tokens.muted, lineHeight: 1.35 }}>{scene.body}</div>
-      ) : null}
     </GlassCard>
   );
 };
