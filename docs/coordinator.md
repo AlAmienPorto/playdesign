@@ -88,11 +88,12 @@ coordinator_actions  id, at, action, ref, note        (append-only)
 Keduanya `no_agent` — tidak memakai token model. `sweep` senyap kalau semua
 sehat (stdout kosong = tidak ada pesan terkirim), `digest` selalu melapor.
 
-Skrip harus ada di `~/.hermes/scripts/`; setelah mengubah `scripts/coordinator.py`
-salin ulang:
+Skrip dipasang sebagai **symlink** ke repo, bukan salinan — supaya cron selalu
+menjalankan versi terbaru dan tidak ada logika usang yang tertinggal:
 
 ```bash
-cp scripts/coordinator.py scripts/coordinator_digest.py ~/.hermes/scripts/
+ln -sf ~/work/playdesign/scripts/coordinator.py        ~/.hermes/scripts/coordinator.py
+ln -sf ~/work/playdesign/scripts/coordinator_digest.py ~/.hermes/scripts/coordinator_digest.py
 ```
 
 ## Uji
