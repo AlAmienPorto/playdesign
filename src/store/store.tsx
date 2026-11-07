@@ -29,8 +29,10 @@ import type {
   RawLead,
   Outreach,
   LandingPageConfig,
+  CarouselDocument,
 } from '../data/types';
 import { SEED } from '../data/seed';
+import { saveCarouselInDb } from '../lib/carousel-store';
 import { hasPermission } from '../lib/permissions';
 import { dayOffset, uid } from '../lib/utils';
 import { fetchOffice, fetchOutreach, getCredential, saveOutreach, type OutreachStatus } from '../lib/api';
@@ -121,6 +123,7 @@ interface StoreValue {
   addMenuItem: (menuId: string, label: string, href: string) => void;
   removeMenuItem: (menuId: string, itemId: string) => void;
   moveMenuItem: (menuId: string, itemId: string, direction: -1 | 1) => void;
+  saveCarousel: (postId: string, document: CarouselDocument) => boolean;
   schedulePost: (postId: string, date: string) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
   addMemory: (input: { title: string; scope: string; content: string; tags: string[] }) => void;
@@ -1103,6 +1106,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const saveCarousel = (postId: string, document: CarouselDocument) => {
+    if (!can('content.write')) {
+      toast('Peran ini tidak punya izin menyimpan carousel.', 'danger');
+      return false;
+    }
+    if (!db.social.some((post) => post.id === postId)) {
+      toast('Draft carousel tidak ditemukan.', 'danger');
+      return false;
+    }
+
+    setDb((prev) => saveCarouselInDb(prev, postId, document, user.name).db);
+    toast('Draft carousel disimpan.', 'success');
+    return true;
+  };
+
   const schedulePost = (postId: string, date: string) => {
     const post = db.social.find((s) => s.id === postId);
     if (!post) return;
@@ -1200,6 +1218,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       addMenuItem,
       removeMenuItem,
       moveMenuItem,
+      saveCarousel,
       schedulePost,
       updateAgent,
       addMemory,
