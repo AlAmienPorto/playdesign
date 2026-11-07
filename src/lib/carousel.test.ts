@@ -8,6 +8,7 @@ import {
   deleteTextSlide,
   moveTextSlide,
   normalizeCarousel,
+  resolveCarouselSelection,
   splitHeadline,
 } from './carousel';
 
@@ -130,4 +131,15 @@ test('clampSlideIndex menjaga indeks di dalam jumlah slide yang tersedia', () =>
   assert.equal(clampSlideIndex(1, 3), 1);
   assert.equal(clampSlideIndex(9, 3), 2);
   assert.equal(clampSlideIndex(2, 0), 0);
+});
+
+test('resolveCarouselSelection memulihkan record terakhir bila masih ada', () => {
+  const posts = [
+    { ...legacyPost, id: 'satu' },
+    { ...legacyPost, id: 'dua' },
+  ];
+
+  assert.equal(resolveCarouselSelection(posts, 'dua'), 'dua');
+  assert.equal(resolveCarouselSelection(posts, 'hilang'), 'satu');
+  assert.equal(resolveCarouselSelection([], 'dua'), '');
 });

@@ -1,8 +1,6 @@
 import { useMemo, useState } from 'react';
 import {
   ArrowDown,
-  ArrowLeft,
-  ArrowRight,
   ArrowUp,
   CalendarClock,
   Check,
@@ -24,8 +22,11 @@ import {
   deleteTextSlide,
   moveTextSlide,
   normalizeCarousel,
+  resolveCarouselSelection,
 } from '../lib/carousel';
 import { useStore } from '../store/store';
+
+const LAST_CAROUSEL_KEY = 'playdesign.carousel.last';
 
 const toLocalDateTime = (value: string) => {
   const date = new Date(value);
@@ -107,25 +108,45 @@ export function CarouselStudioPage() {
     () => db.social.filter((post) => post.channel === 'Instagram'),
     [db.social],
   );
-  const [selectedId, setSelectedId] = useState(() => instagramPosts[0]?.id ?? '');
+  const initialSelectedId = useMemo(() => {
+    let preferredId: string | null = null;
+    try {
+      preferredId = localStorage.getItem(LAST_CAROUSEL_KEY);
+    } catch {
+      preferredId = null;
+    }
+    return resolveCarouselSelection(instagramPosts, preferredId);
+  }, []);
+  const [selectedId, setSelectedId] = useState(initialSelectedId);
   const selectedPost = instagramPosts.find((post) => post.id === selectedId) ?? null;
-  const [document, setDocument] = useState<CarouselDocument | null>(() =>
-    instagramPosts[0] ? normalizeCarousel(instagramPosts[0]) : null,
-  );
+  const [document, setDocument] = useState<CarouselDocument | null>(() => {
+    const initialPost = instagramPosts.find((post) => post.id === initialSelectedId);
+    return initialPost ? normalizeCarousel(initialPost) : null;
+  });
   const [activeIndex, setActiveIndex] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [savedAt, setSavedAt] = useState('');
   const [imageInvalid, setImageInvalid] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
-  const [scheduleAt, setScheduleAt] = useState(() =>
-    instagramPosts[0] ? toLocalDateTime(instagramPosts[0].date) : '',
-  );
+  const [scheduleAt, setScheduleAt] = useState(() => {
+    const initialPost = instagramPosts.find((post) => post.id === initialSelectedId);
+    return initialPost ? toLocalDateTime(initialPost.date) : '';
+  });
   const [statusMessage, setStatusMessage] = useState('');
+
+  const rememberSelection = (postId: string) => {
+    try {
+      localStorage.setItem(LAST_CAROUSEL_KEY, postId);
+    } catch {
+      // The editor still works when browser storage is unavailable.
+    }
+  };
 
   const selectPost = (postId: string) => {
     const post = instagramPosts.find((row) => row.id === postId);
     if (!post) return;
     setSelectedId(postId);
+    rememberSelection(postId);
     setDocument(normalizeCarousel(post));
     setActiveIndex(0);
     setScheduleAt(toLocalDateTime(post.date));
@@ -164,6 +185,7 @@ export function CarouselStudioPage() {
     if (!id) return;
     const nextDocument = normalizeCarousel(draftPost(id));
     setSelectedId(id);
+    rememberSelection(id);
     setDocument(nextDocument);
     setActiveIndex(0);
     setScheduleAt(toLocalDateTime(new Date().toISOString()));

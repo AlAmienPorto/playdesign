@@ -113,3 +113,8 @@ export function clampSlideIndex(index: number, count: number) {
   if (count <= 0) return 0;
   return Math.max(0, Math.min(Math.trunc(index), count - 1));
 }
+
+export function resolveCarouselSelection(posts: SocialPost[], preferredId: string | null) {
+  if (preferredId && posts.some((post) => post.id === preferredId)) return preferredId;
+  return posts[0]?.id ?? '';
+}
