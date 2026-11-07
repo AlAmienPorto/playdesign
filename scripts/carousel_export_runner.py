@@ -508,11 +508,46 @@ def _publish_batch(publishable: list[dict]) -> tuple[list[tuple[str, str]], list
     return done, failed
 
 
+def _minutes_since(stamp: str | None) -> float:
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0.0
+    return (datetime.now(timezone.utc) - when).total_seconds() / 60
+
+
+def _reap_stale_publish() -> list[str]:
+    """Job yang tertahan di `scheduling` (runner mati setelah Tebar sukses) ditandai gagal.
+
+    Tanpa ini job menggantung selamanya: hanya status `queued` yang diambil ulang.
+    """
+    stale = api("GET", f"/api/carousel/jobs?workspace={WORKSPACE}&publishStatus=scheduling&limit=10").get(
+        "jobs", []
+    )
+    reaped: list[str] = []
+    for job in stale:
+        if _minutes_since(job.get("updatedAt")) < 15:
+            continue
+        job_id = str(job.get("id") or "")
+        patch_soft(
+            job_id,
+            {
+                "publishStatus": "failed",
+                "publishError": "Status tayang tidak terkonfirmasi setelah 15 menit; cek Tebar sebelum menjadwalkan ulang.",
+            },
+        )
+        reaped.append(job_id)
+    return reaped
+
+
 def _run_locked() -> int:
     pending = api("GET", f"/api/carousel/jobs?workspace={WORKSPACE}&status=queued&limit=5").get("jobs", [])
     publishable = api(
         "GET", f"/api/carousel/jobs?workspace={WORKSPACE}&publishStatus=queued&limit=5"
     ).get("jobs", [])
+    reaped = _reap_stale_publish()
+    for job_id in reaped:
+        print(f"warn {job_id} -> status tayang tidak terkonfirmasi, ditandai gagal")
     if not pending and not publishable:
         return 0
 
