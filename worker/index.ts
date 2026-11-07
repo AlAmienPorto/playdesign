@@ -1736,7 +1736,7 @@ function normalizeCarouselDocument(raw: unknown) {
     slides,
     caption: str(doc.caption ?? "", "caption", 0, 2200),
     hashtags: Array.isArray(doc.hashtags)
-      ? doc.hashtags.map((tag) => str(tag, "hashtags", 1, 40)).slice(0, 30)
+      ? doc.hashtags.slice(0, 30).map((tag) => str(tag, "hashtags", 1, 40))
       : [],
     updatedAt: str(doc.updatedAt ?? "", "updatedAt", 0, 40),
   };
@@ -1810,13 +1810,22 @@ async function createCarouselJob(env: Env, req: Request) {
   }
 
   const id = uid("cj");
-  await env.DB.prepare(
-    `INSERT INTO carousel_export_jobs
-       (id, workspace_id, post_id, title, status, document, slide_count, requested_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
-  )
-    .bind(id, workspaceId, postId, title, serialized, slideCount, actor.id, nowIso(), nowIso())
-    .run();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO carousel_export_jobs
+         (id, workspace_id, post_id, title, status, document, slide_count, requested_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+    )
+      .bind(id, workspaceId, postId, title, serialized, slideCount, actor.id, nowIso(), nowIso())
+      .run();
+  } catch (err) {
+    // Index unik parsial menangkap balapan dua permintaan ekspor bersamaan.
+    const message = err instanceof Error ? err.message : String(err);
+    if (/UNIQUE|constraint/i.test(message)) {
+      fail(409, "job_active", "Masih ada job ekspor berjalan untuk carousel ini.");
+    }
+    throw err;
+  }
 
   await env.DB.prepare(
     `INSERT INTO activity_events
@@ -1879,7 +1888,11 @@ async function patchCarouselJob(env: Env, req: Request, id: string) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const current = await env.DB.prepare(`SELECT * FROM carousel_export_jobs WHERE id = ?`).bind(id).first<CarouselJobRow>();
   if (!current) fail(404, "job_not_found", "Job ekspor carousel tidak ditemukan.");
-  const workspaceId = await assertWorkspace(env, (body.workspace as string) ?? current.workspace_id);
+  // Workspace selalu diambil dari baris job, bukan dari body: mencegah tulis lintas workspace.
+  const workspaceId = await assertWorkspace(env, current.workspace_id);
+  if (body.workspace !== undefined && String(body.workspace) !== workspaceId) {
+    fail(400, "workspace_mismatch", "Workspace pada body tidak cocok dengan job.");
+  }
   await authenticate(env, workspaceId, req);
 
   const next = body.status === undefined ? current.status : oneOf(body.status, "status", CAROUSEL_JOB_STATUSES);
@@ -1897,48 +1910,53 @@ async function patchCarouselJob(env: Env, req: Request, id: string) {
     fail(400, "output_required", "Job hanya bisa selesai kalau folder Drive tercatat.");
   }
 
-  const bytes =
-    body.bytes === undefined ? current.bytes : Math.max(0, Math.trunc(Number(body.bytes) || 0));
-  const error = body.error === undefined ? current.error : optionalStr(body.error, "error", 500) ?? null;
-  const manifestFileId =
-    body.manifestFileId === undefined
-      ? current.manifest_file_id
-      : optionalStr(body.manifestFileId, "manifestFileId", 200) ?? null;
-  const publishStatus =
-    body.publishStatus === undefined
-      ? current.publish_status
-      : oneOf(body.publishStatus, "publishStatus", CAROUSEL_PUBLISH_STATUSES);
-  const tebarPostId =
-    body.tebarPostId === undefined
-      ? current.tebar_post_id
-      : optionalStr(body.tebarPostId, "tebarPostId", 120) ?? null;
-  const publishError =
-    body.publishError === undefined
-      ? current.publish_error
-      : optionalStr(body.publishError, "publishError", 500) ?? null;
-  const finishedAt = ["done", "failed", "canceled"].includes(next) ? nowIso() : current.finished_at;
+  // Hanya kolom yang benar-benar dikirim yang ditulis, supaya dua penulis bersamaan
+  // (runner + manusia) tidak saling menimpa kolom yang tidak mereka sentuh.
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  const set = (column: string, value: unknown) => {
+    sets.push(`${column} = ?`);
+    binds.push(value);
+  };
 
-  await env.DB.prepare(
-    `UPDATE carousel_export_jobs
-        SET status = ?, bytes = ?, drive_folder_id = ?, drive_folder_link = ?, manifest_file_id = ?,
-            error = ?, publish_status = ?, tebar_post_id = ?, publish_error = ?,
-            finished_at = ?, updated_at = ?
-      WHERE id = ?`,
-  )
-    .bind(
-      next,
-      bytes,
-      driveFolderId,
-      driveFolderLink,
-      manifestFileId,
-      error,
-      publishStatus,
-      tebarPostId,
-      publishError,
-      finishedAt,
-      nowIso(),
-      id,
-    )
+  if (body.status !== undefined) {
+    set("status", next);
+    if (next === "rendering" && !current.started_at) set("started_at", nowIso());
+    if (next !== current.status && ["done", "failed", "canceled"].includes(next)) set("finished_at", nowIso());
+  }
+  if (body.bytes !== undefined) set("bytes", Math.max(0, Math.trunc(Number(body.bytes) || 0)));
+  if (body.driveFolderId !== undefined) set("drive_folder_id", driveFolderId);
+  if (body.driveFolderLink !== undefined) set("drive_folder_link", driveFolderLink);
+  if (body.manifestFileId !== undefined) {
+    set("manifest_file_id", optionalStr(body.manifestFileId, "manifestFileId", 200) ?? null);
+  }
+  if (body.error !== undefined) set("error", optionalStr(body.error, "error", 500) ?? null);
+  if (body.publishStatus !== undefined) {
+    set("publish_status", oneOf(body.publishStatus, "publishStatus", CAROUSEL_PUBLISH_STATUSES));
+  }
+  if (body.tebarPostId !== undefined) {
+    set("tebar_post_id", optionalStr(body.tebarPostId, "tebarPostId", 120) ?? null);
+  }
+  if (body.publishError !== undefined) {
+    set("publish_error", optionalStr(body.publishError, "publishError", 500) ?? null);
+  }
+  if (body.publishAt !== undefined) set("publish_at", optionalStr(body.publishAt, "publishAt", 40) ?? null);
+  if (body.publishAccounts !== undefined) {
+    if (!Array.isArray(body.publishAccounts)) fail(400, "account_required", "publishAccounts harus array.");
+    const accounts = Array.from(
+      new Set(body.publishAccounts.map((item) => String(item).trim().toLowerCase()).filter(Boolean)),
+    );
+    const unknown = accounts.filter((item) => !CAROUSEL_PUBLISH_PLATFORMS.includes(item));
+    if (unknown.length > 0) fail(400, "account_unknown", `Platform belum didukung: ${unknown.join(", ")}.`);
+    set("publish_accounts", JSON.stringify(accounts));
+  }
+
+  if (sets.length === 0) return json({ ok: true, job: carouselJobView(current) });
+
+  set("updated_at", nowIso());
+  binds.push(id);
+  await env.DB.prepare(`UPDATE carousel_export_jobs SET ${sets.join(", ")} WHERE id = ?`)
+    .bind(...binds)
     .run();
 
   const row = await env.DB.prepare(`SELECT * FROM carousel_export_jobs WHERE id = ?`).bind(id).first<CarouselJobRow>();

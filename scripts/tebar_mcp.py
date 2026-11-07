@@ -197,5 +197,12 @@ class TebarClient:
 
 
 def extract_post_id(text: str) -> str | None:
-    match = re.search(r"\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b", text or "")
-    return match.group(1) if match else None
+    """Ambil id post dari jawaban Tebar, utamakan pola 'Post <uuid>' di awal baris."""
+    pattern = r"(?:^|\n)\s*Post\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b"
+    match = re.search(pattern, text or "")
+    if match:
+        return match.group(1)
+    fallback = re.search(
+        r"\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b", text or ""
+    )
+    return fallback.group(1) if fallback else None

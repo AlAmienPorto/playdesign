@@ -200,6 +200,17 @@ def main() -> int:
     except RuntimeError as exc:
         check("publish menolak akun belum terhubung", "threads" in str(exc), str(exc))
 
+# ---------- template & cover ----------
+    check("cover menolak URL non-http", runner.fetch_cover("file:///etc/passwd", Path("/tmp/x")) is None, "harus None")
+    check("cover menolak URL kosong", runner.fetch_cover("", Path("/tmp/x")) is None, "harus None")
+
+    brand = runner.build_slide_svg(dict(DOCUMENT, template="split-brand"), 0)
+    dark = runner.build_slide_svg(dict(DOCUMENT, template="split-dark"), 0)
+    full = runner.build_slide_svg(dict(DOCUMENT, template="full-image"), 0)
+    check("template split-dark beda palet", "#090b10" in dark and "#090b10" not in brand, "palet")
+    check("template full-image tanpa bar samping", "<rect x=\"0\" y=\"0\" width=\"24\"" not in full, "bar")
+    check("template full-image menurunkan judul", 'y="860"' in full and 'y="420"' in brand, "posisi judul")
+
     failed = [label for label, ok, _ in checks if not ok]
     print(f"\n{len(checks) - len(failed)}/{len(checks)} lulus")
     return 1 if failed else 0

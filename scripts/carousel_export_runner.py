@@ -26,6 +26,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,6 +56,13 @@ BG = "#11131a"
 INK = "#fffaf5"
 MUTED = "#d8d2cf"
 ACCENT = "#ef5a6b"
+
+# Sama dengan preview: template mengubah palet, bukan hanya label.
+TEMPLATE_STYLES: dict[str, dict[str, object]] = {
+    "split-brand": {"bg": "#11131a", "bar": "#bf1d2d", "title_y": 420, "overlay": False},
+    "split-dark": {"bg": "#090b10", "bar": "#ef5a6b", "title_y": 420, "overlay": False},
+    "full-image": {"bg": "#11131a", "bar": None, "title_y": 860, "overlay": True},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -158,14 +166,18 @@ def build_slide_svg(document: dict, index: int) -> str:
     else:
         body = str(slide.get("body") or "") or "Isi slide belum diisi."
 
+    style = TEMPLATE_STYLES.get(str(document.get("template") or "split-brand"), TEMPLATE_STYLES["split-brand"])
+    bg = str(style["bg"])
+    bar = style["bar"]
+    overlay = bool(style["overlay"])
     title_lines = wrap_text(title, 24, 5)
-    body_lines = wrap_text(body, 42, 8)
-    title_y = 420
+    body_lines = wrap_text(body, 42, 5 if overlay else 8)
+    title_y = int(style["title_y"])
     title_spans = "".join(
         f'<tspan x="88" dy="{0 if position == 0 else 80}">{escape_xml(line)}</tspan>'
         for position, line in enumerate(title_lines)
     )
-    body_y = title_y + max(len(title_lines), 1) * 80 + 60
+    body_y = title_y + max(len(title_lines), 1) * 80 + (40 if overlay else 60)
     body_spans = "".join(
         f'<tspan x="88" dy="{0 if position == 0 else 46}">{escape_xml(line)}</tspan>'
         for position, line in enumerate(body_lines)
@@ -173,9 +185,14 @@ def build_slide_svg(document: dict, index: int) -> str:
     kicker = escape_xml(str(document.get("kicker") or "PLAYDESIGN / CAROUSEL"))
     counter = f"{index + 1:02d} / {total:02d}"
 
+    # Template full-image: latar tetap solid; foto ditempel di area atas oleh render_png.
+    backdrop = f'<rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{bg}"/>'
+    bar_rect = (
+        f'<rect x="0" y="0" width="24" height="{SLIDE_HEIGHT}" fill="{bar}"/>' if bar else ""
+    )
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
-  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{BG}"/>
-  <rect x="0" y="0" width="24" height="{SLIDE_HEIGHT}" fill="#bf1d2d"/>
+  {backdrop}
+  {bar_rect}
   <text x="88" y="110" fill="{ACCENT}" font-family="{FONT}" font-size="24" font-weight="700" letter-spacing="4">{kicker}</text>
   <text x="88" y="{title_y}" fill="{INK}" font-family="{FONT}" font-size="68" font-weight="800">{title_spans}</text>
   <text x="88" y="{body_y}" fill="{MUTED}" font-family="{FONT}" font-size="30">{body_spans}</text>
@@ -195,12 +212,47 @@ def render_binary() -> str:
     raise RuntimeError("ImageMagick tidak ditemukan (magick/convert). Render PNG dibatalkan.")
 
 
-def render_png(svg_text: str, out_path: Path) -> None:
-    """Render SVG -> PNG 1080x1350. Gagal keras, tidak pernah menulis placeholder."""
+COVER_MAX_BYTES = 8 * 1024 * 1024
+COVER_BAND_HEIGHT = 640
+
+
+def fetch_cover(url: str, dest: Path, *, opener=None, timeout: int = 20) -> Path | None:
+    """Unduh foto cover untuk template full-image. Gagal -> None (render tetap jalan)."""
+    if not re.match(r"^https?://", url or "", re.I):
+        return None
+    opener = opener or (lambda req: urllib.request.urlopen(req, timeout=timeout))
+    request = urllib.request.Request(url, headers={"User-Agent": "playdesign-carousel-runner/1"})
+    try:
+        with opener(request) as response:
+            payload = response.read(COVER_MAX_BYTES + 1)
+    except Exception:  # noqa: BLE001 - foto eksternal tidak boleh menggagalkan ekspor
+        return None
+    if not payload or len(payload) > COVER_MAX_BYTES:
+        return None
+    if payload.startswith(b"\x89PNG"):
+        suffix = ".png"
+    elif payload[:3] == b"\xff\xd8\xff":
+        suffix = ".jpg"
+    elif payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        suffix = ".webp"
+    else:
+        return None
+    dest = dest.with_suffix(suffix)
+    dest.write_bytes(payload)
+    return dest
+
+
+def render_png(svg_text: str, out_path: Path, *, cover: Path | None = None) -> None:
+    """Render SVG -> PNG 1080x1350. Gagal keras, tidak pernah menulis placeholder.
+
+    `cover` menempelkan foto di pita atas (template full-image); kalau komposit gagal,
+    PNG teks tetap dipakai supaya ekspor tidak hilang.
+    """
     binary = render_binary()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     svg_path = out_path.with_suffix(".svg")
     svg_path.write_text(svg_text, encoding="utf-8")
+
     cmd = [binary]
     if Path(binary).name == "magick":
         cmd.append("svg:" + str(svg_path))
@@ -211,6 +263,36 @@ def render_png(svg_text: str, out_path: Path) -> None:
     if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
         raise RuntimeError("render PNG gagal: " + " | ".join(detail)[:300])
+
+    if cover is None:
+        return
+
+    composite = subprocess.run(
+        [
+            binary,
+            str(out_path),
+            "(",
+            str(cover),
+            "-resize",
+            f"{SLIDE_WIDTH}x{COVER_BAND_HEIGHT}^",
+            "-gravity",
+            "center",
+            "-extent",
+            f"{SLIDE_WIDTH}x{COVER_BAND_HEIGHT}",
+            "+gravity",
+            ")",
+            "-gravity",
+            "northwest",
+            "-composite",
+            str(out_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if composite.returncode != 0 or out_path.stat().st_size == 0:
+        detail = (composite.stderr or composite.stdout or "").strip().splitlines()[-3:]
+        print("peringatan: komposit foto cover dilewati: " + " | ".join(detail)[:200])
 
 
 # ---------------------------------------------------------------------------
@@ -264,10 +346,21 @@ def render_slides(
     tmp_dir = Path(tempfile.mkdtemp(prefix="pd-carousel-"))
     slides = document.get("slides") or []
     rendered: list[dict] = []
+    overlay = str(document.get("template") or "") == "full-image"
+    cover = (
+        fetch_cover(str(document.get("coverImageUrl") or ""), tmp_dir / "cover")
+        if overlay
+        else None
+    )
     for index, slide in enumerate(slides):
         name = slide_filename(index, str(slide.get("kind") or "text"))
         out_path = tmp_dir / name
-        render(build_slide_svg(document, index), out_path)
+        svg_text = build_slide_svg(document, index)
+        if overlay and index == 0 and cover is not None:
+            # Slide cover: teks tetap dari SVG, foto ditempel di pita atas.
+            render_png(svg_text, out_path, cover=cover)
+        else:
+            render(svg_text, out_path)
         if not out_path.exists() or out_path.stat().st_size == 0:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise RuntimeError(f"Slide {index + 1} kosong setelah render.")
@@ -457,7 +550,6 @@ def _export_batch(pending: list[dict]) -> tuple[list[tuple[str, str]], list[tupl
             raise
 
         try:
-            patch_soft(job_id, {"status": "rendering"})
             result = export_job(claimed)
             patch_soft(job_id, {"status": "uploading"})
             updated = patch_soft(
@@ -516,6 +608,28 @@ def _minutes_since(stamp: str | None) -> float:
     return (datetime.now(timezone.utc) - when).total_seconds() / 60
 
 
+def _reap_stale_export() -> list[str]:
+    """Job yang tertahan di rendering/uploading (runner mati di tengah jalan) dibebaskan.
+
+    Tanpa ini job tersebut memblokir ekspor baru untuk carousel yang sama (`409 job_active`).
+    """
+    reaped: list[str] = []
+    for status in ("rendering", "uploading"):
+        rows = api("GET", f"/api/carousel/jobs?workspace={WORKSPACE}&status={status}&limit=10").get(
+            "jobs", []
+        )
+        for job in rows:
+            if _minutes_since(job.get("updatedAt")) < 30:
+                continue
+            job_id = str(job.get("id") or "")
+            patch_soft(
+                job_id,
+                {"status": "failed", "error": "Runner berhenti di tengah jalan; ekspor diulang dari antrean."},
+            )
+            reaped.append(job_id)
+    return reaped
+
+
 def _reap_stale_publish() -> list[str]:
     """Job yang tertahan di `scheduling` (runner mati setelah Tebar sukses) ditandai gagal.
 
@@ -545,8 +659,9 @@ def _run_locked() -> int:
     publishable = api(
         "GET", f"/api/carousel/jobs?workspace={WORKSPACE}&publishStatus=queued&limit=5"
     ).get("jobs", [])
-    reaped = _reap_stale_publish()
-    for job_id in reaped:
+    for job_id in _reap_stale_export():
+        print(f"warn {job_id} -> ekspor menggantung, ditandai gagal")
+    for job_id in _reap_stale_publish():
         print(f"warn {job_id} -> status tayang tidak terkonfirmasi, ditandai gagal")
     if not pending and not publishable:
         return 0
