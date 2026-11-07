@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import { SEED } from '../data/seed';
 import { normalizeCarousel } from './carousel';
-import { saveCarouselInDb } from './carousel-store';
+import { createCarouselDraftInDb, saveCarouselInDb } from './carousel-store';
 
 const cloneSeed = () => structuredClone(SEED);
 
@@ -84,4 +84,17 @@ test('saveCarouselInDb mengembalikan DB yang sama untuk post tidak dikenal', () 
 
   assert.equal(result.ok, false);
   assert.equal(result.db, db);
+});
+
+test('createCarouselDraftInDb membuat record Instagram nyata dengan audit', () => {
+  const db = cloneSeed();
+  const result = createCarouselDraftInDb(db, 'Jawad Al Amien', 'draft-uji');
+  const created = result.db.social.find((post) => post.id === result.postId);
+
+  assert.equal(result.postId, 'draft-uji');
+  assert.equal(created?.channel, 'Instagram');
+  assert.equal(created?.status, 'Approved');
+  assert.equal(created?.carousel?.slides[0].kind, 'cover');
+  assert.equal(db.social.some((post) => post.id === 'draft-uji'), false);
+  assert.equal(result.db.audit[0].action, 'Membuat draft carousel');
 });

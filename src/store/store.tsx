@@ -32,7 +32,7 @@ import type {
   CarouselDocument,
 } from '../data/types';
 import { SEED } from '../data/seed';
-import { saveCarouselInDb } from '../lib/carousel-store';
+import { createCarouselDraftInDb, saveCarouselInDb } from '../lib/carousel-store';
 import { hasPermission } from '../lib/permissions';
 import { dayOffset, uid } from '../lib/utils';
 import { fetchOffice, fetchOutreach, getCredential, saveOutreach, type OutreachStatus } from '../lib/api';
@@ -123,6 +123,7 @@ interface StoreValue {
   addMenuItem: (menuId: string, label: string, href: string) => void;
   removeMenuItem: (menuId: string, itemId: string) => void;
   moveMenuItem: (menuId: string, itemId: string, direction: -1 | 1) => void;
+  createCarouselDraft: () => string | null;
   saveCarousel: (postId: string, document: CarouselDocument) => boolean;
   schedulePost: (postId: string, date: string) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
@@ -1106,6 +1107,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const createCarouselDraft = () => {
+    if (!can('content.write')) {
+      toast('Peran ini tidak punya izin membuat carousel.', 'danger');
+      return null;
+    }
+    const postId = uid('so');
+    setDb((prev) => createCarouselDraftInDb(prev, user.name, postId).db);
+    toast('Draft carousel baru dibuat.', 'success');
+    return postId;
+  };
+
   const saveCarousel = (postId: string, document: CarouselDocument) => {
     if (!can('content.write')) {
       toast('Peran ini tidak punya izin menyimpan carousel.', 'danger');
@@ -1218,6 +1230,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       addMenuItem,
       removeMenuItem,
       moveMenuItem,
+      createCarouselDraft,
       saveCarousel,
       schedulePost,
       updateAgent,

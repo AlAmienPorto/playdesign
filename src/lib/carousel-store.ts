@@ -5,7 +5,65 @@ export interface SaveCarouselResult {
   db: DB;
 }
 
+export interface CreateCarouselDraftResult {
+  db: DB;
+  postId: string;
+}
+
 const auditId = () => `au-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+export function createCarouselDraftInDb(
+  db: DB,
+  actor: string,
+  postId: string,
+): CreateCarouselDraftResult {
+  const now = new Date().toISOString();
+  const headline = 'Judul carousel baru';
+  return {
+    postId,
+    db: {
+      ...db,
+      social: [
+        {
+          id: postId,
+          title: headline,
+          channel: 'Instagram',
+          date: now,
+          status: 'Approved',
+          caption: '',
+          hashtags: [],
+          slides: [],
+          author: actor,
+          carousel: {
+            kicker: 'PLAYDESIGN / CAROUSEL',
+            template: 'split-brand',
+            headline,
+            highlight: '',
+            sourceName: 'Playdesign',
+            sourceUrl: '',
+            coverImageUrl: '',
+            slides: [{ id: `${postId}-slide-1`, kind: 'cover', title: headline, body: '' }],
+            caption: '',
+            hashtags: [],
+            updatedAt: now,
+          },
+        },
+        ...db.social,
+      ],
+      audit: [
+        {
+          id: auditId(),
+          at: now,
+          actor,
+          action: 'Membuat draft carousel',
+          target: headline,
+          module: 'Carousel Studio',
+        },
+        ...db.audit,
+      ],
+    },
+  };
+}
 
 export function saveCarouselInDb(
   db: DB,
