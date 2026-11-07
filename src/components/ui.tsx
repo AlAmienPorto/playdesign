@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
@@ -62,6 +62,9 @@ const badgeMap: Record<string, Tone> = {
   Selesai: 'success',
   Won: 'success',
   approved: 'info',
+  Approved: 'success',
+  Rejected: 'danger',
+  Ditolak: 'danger',
   Completed: 'success',
   Published: 'success',
   Scheduled: 'info',
@@ -478,10 +481,56 @@ export function Modal({
     };
   }, [open, onClose]);
 
+  // Dialog harus bisa dipakai keyboard: fokus masuk, terperangkap, lalu kembali.
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement as HTMLElement | null;
+    restoreFocusRef.current = previous;
+    const node = dialogRef.current;
+    const focusables = () =>
+      Array.from(
+        node?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((element) => element.offsetParent !== null || element === document.activeElement);
+    const first = focusables()[0] ?? node;
+    first?.focus();
+
+    const trap = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || !node) return;
+      const items = focusables();
+      if (items.length === 0) {
+        event.preventDefault();
+        node.focus();
+        return;
+      }
+      const firstItem = items[0];
+      const lastItem = items[items.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === firstItem || !node.contains(active))) {
+        event.preventDefault();
+        lastItem.focus();
+      } else if (!event.shiftKey && active === lastItem) {
+        event.preventDefault();
+        firstItem.focus();
+      }
+    };
+    node?.addEventListener('keydown', trap);
+    return () => {
+      node?.removeEventListener('keydown', trap);
+      previous?.focus?.();
+    };
+  }, [open]);
+
   if (!open) return null;
   return createPortal(
     <div className="overlay overlay-center" onMouseDown={onClose}>
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className={cx('modal', wide && 'modal-wide')}
         role="dialog"
         aria-modal="true"

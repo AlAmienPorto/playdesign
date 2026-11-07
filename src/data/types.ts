@@ -354,12 +354,18 @@ export interface CarouselDocument {
   updatedAt: string;
 }
 
+/**
+ * Lifecycle carousel/post sosial. Konten AI tidak boleh lahir sebagai Approved:
+ * Draft → Review (paket approval manusia) → Approved | Rejected → Scheduled → Published.
+ */
+export type SocialPostStatus = 'Draft' | 'Review' | 'Approved' | 'Rejected' | 'Scheduled' | 'Published';
+
 export interface SocialPost {
   id: string;
   title: string;
   channel: 'Instagram' | 'LinkedIn' | 'X' | 'YouTube' | 'Newsletter';
   date: string;
-  status: 'Approved' | 'Scheduled' | 'Published';
+  status: SocialPostStatus;
   articleId?: string;
   caption?: string;
   hashtags?: string[];
@@ -367,6 +373,11 @@ export interface SocialPost {
   slides?: string[];
   author?: string;
   carousel?: CarouselDocument;
+  submittedAt?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+  approvedAt?: string;
 }
 
 export interface RawLead {

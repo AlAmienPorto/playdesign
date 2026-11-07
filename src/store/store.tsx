@@ -32,7 +32,7 @@ import type {
   CarouselDocument,
 } from '../data/types';
 import { SEED } from '../data/seed';
-import { createCarouselDraftInDb, saveCarouselInDb } from '../lib/carousel-store';
+import { createCarouselDraftInDb, decideCarouselInDb, saveCarouselInDb, submitCarouselForReviewInDb } from '../lib/carousel-store';
 import { hasPermission } from '../lib/permissions';
 import { dayOffset, uid } from '../lib/utils';
 import { fetchOffice, fetchOutreach, getCredential, saveOutreach, type OutreachStatus } from '../lib/api';
@@ -125,6 +125,8 @@ interface StoreValue {
   moveMenuItem: (menuId: string, itemId: string, direction: -1 | 1) => void;
   createCarouselDraft: () => string | null;
   saveCarousel: (postId: string, document: CarouselDocument) => boolean;
+  submitCarouselReview: (postId: string) => boolean;
+  decideCarouselReview: (postId: string, decision: 'approved' | 'rejected' | 'revision', note: string) => boolean;
   schedulePost: (postId: string, date: string) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
   addMemory: (input: { title: string; scope: string; content: string; tags: string[] }) => void;
@@ -824,11 +826,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         };
       }
       if (decision === 'approved' && approval.kind === 'Jadwal sosial') {
-        const targetPostId = approval.socialPostId ?? 'so-5';
+        // Approval membuka izin, bukan langsung menjadwalkan: penjadwalan tetap
+        // tindakan terpisah di Social Planner supaya tanggalnya disengaja.
+        const targetPostId = approval.socialPostId;
         next = {
           ...next,
           social: next.social.map((s) =>
-            s.id === targetPostId ? { ...s, status: 'Scheduled' as const, date: dayOffset(4, 10) } : s,
+            s.id === targetPostId ? { ...s, status: 'Approved' as const, approvedAt: now() } : s,
           ),
         };
       }
@@ -1128,8 +1132,67 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return false;
     }
 
-    setDb((prev) => saveCarouselInDb(prev, postId, document, user.name).db);
-    toast('Draft carousel disimpan.', 'success');
+    const result = saveCarouselInDb(db, postId, document, user.name);
+    if (!result.ok) {
+      toast(
+        result.reason === 'locked'
+          ? 'Konten yang sudah terjadwal atau terbit tidak bisa ditimpa.'
+          : 'Draft carousel tidak ditemukan.',
+        'danger',
+      );
+      return false;
+    }
+
+    const wasApproved = db.social.find((post) => post.id === postId)?.status === 'Approved';
+    setDb(result.db);
+    toast(
+      wasApproved
+        ? 'Perubahan disimpan. Status kembali ke Draft dan perlu review ulang.'
+        : 'Draft carousel disimpan.',
+      wasApproved ? 'warning' : 'success',
+    );
+    return true;
+  };
+
+  const submitCarouselReview = (postId: string) => {
+    if (!can('content.write')) {
+      toast('Peran ini tidak punya izin mengajukan review.', 'danger');
+      return false;
+    }
+    const result = submitCarouselForReviewInDb(db, postId, user.name);
+    if (!result.ok) {
+      toast(
+        result.reason === 'invalid_status'
+          ? 'Hanya draft atau konten yang ditolak yang bisa diajukan, dan tidak boleh ada paket pending.'
+          : 'Draft carousel tidak ditemukan.',
+        'warning',
+      );
+      return false;
+    }
+    setDb(result.db);
+    toast('Carousel diajukan. Menunggu keputusan Owner di halaman Persetujuan.', 'success');
+    return true;
+  };
+
+  const decideCarouselReview = (postId: string, decision: 'approved' | 'rejected' | 'revision', note: string) => {
+    if (role !== 'Owner') {
+      toast('Hanya Owner yang bisa memutuskan carousel.', 'danger');
+      return false;
+    }
+    const result = decideCarouselInDb(db, postId, decision, user.name, note);
+    if (!result.ok) {
+      toast('Carousel ini tidak sedang menunggu review.', 'warning');
+      return false;
+    }
+    setDb(result.db);
+    toast(
+      decision === 'approved'
+        ? 'Carousel disetujui. Ekspor final dan penjadwalan sekarang terbuka.'
+        : decision === 'revision'
+          ? 'Revisi diminta. Carousel kembali ke Draft.'
+          : 'Carousel ditolak.',
+      decision === 'approved' ? 'success' : decision === 'revision' ? 'warning' : 'danger',
+    );
     return true;
   };
 
@@ -1138,6 +1201,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!post) return;
     if (post.status === 'Published') {
       toast('Konten yang sudah terbit tidak bisa dijadwalkan ulang.', 'danger');
+      return;
+    }
+    // Guard keras: hanya konten yang sudah disetujui manusia yang masuk kalender.
+    if (post.status !== 'Approved') {
+      toast('Hanya konten berstatus Approved yang bisa dijadwalkan.', 'danger');
       return;
     }
     setDb((prev) => {
@@ -1232,6 +1300,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       moveMenuItem,
       createCarouselDraft,
       saveCarousel,
+      submitCarouselReview,
+      decideCarouselReview,
       schedulePost,
       updateAgent,
       addMemory,

@@ -9992,3 +9992,210 @@ button.folder-row { cursor: pointer; }
   .carousel-wordmark { left: 22px; }
   .carousel-slide-number { right: 16px; }
 }
+
+/* --- Carousel Studio: human review, export queue, Drive pointer ------- */
+
+.carousel-lock {
+  display: contents;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.carousel-status-track {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 16px 0;
+  list-style: none;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.carousel-status-track li {
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-2);
+}
+
+.carousel-status-track li.is-current {
+  border-color: var(--brand);
+  color: var(--brand);
+  font-weight: 700;
+}
+
+.carousel-status-track li.is-done {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+}
+
+.carousel-review-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.carousel-review-copy strong {
+  display: block;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.carousel-review-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.carousel-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.carousel-review-meta {
+  margin: 0;
+  padding: 0 16px 14px;
+  color: var(--ink-2);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.carousel-export-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.carousel-export-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.carousel-export-head strong {
+  display: block;
+  font-size: 13px;
+}
+
+.carousel-export-hint,
+.carousel-export-meta,
+.carousel-export-error {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.carousel-export-error { color: var(--danger); }
+
+.carousel-export-job {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--surface) 88%, var(--ink) 12%);
+}
+
+.carousel-export-job.tone-done { border-color: color-mix(in srgb, var(--success) 45%, transparent); }
+.carousel-export-job.tone-failed { border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+
+.carousel-export-job-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.carousel-drive-link {
+  align-self: flex-start;
+  gap: 6px;
+  min-height: 36px;
+}
+
+.carousel-publish {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+
+.carousel-publish-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.carousel-publish-head strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.carousel-publish-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.carousel-publish-form .field { flex: 1 1 200px; min-width: 0; }
+
+.carousel-publish-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.carousel-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.carousel-chip input { accent-color: var(--lime); margin: 0; }
+
+.carousel-chip.is-on {
+  border-color: color-mix(in srgb, var(--lime) 55%, transparent);
+  color: var(--ink);
+}
+
+.carousel-chip:focus-within {
+  outline: 2px solid color-mix(in srgb, var(--lime) 70%, transparent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 600px) {
+  .carousel-review-actions .btn { flex: 1 1 100%; min-height: 44px; }
+  .carousel-export-head .btn { width: 100%; min-height: 44px; }
+  .carousel-publish-form .btn { flex: 1 1 100%; min-height: 44px; }
+  .carousel-chip { min-height: 44px; }
+}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -7,14 +7,19 @@ import {
   ChevronLeft,
   ChevronRight,
   Clipboard,
+  CloudUpload,
   Download,
+  ExternalLink,
   Image as ImageIcon,
   Plus,
   Save,
+  Send,
+  ShieldCheck,
   Trash2,
+  X,
 } from 'lucide-react';
 import { CarouselPreview } from '../components/CarouselPreview';
-import { Badge, EmptyState, Field, Modal, PageHead } from '../components/ui';
+import { AutoBadge, Badge, EmptyState, Field, Modal, PageHead } from '../components/ui';
 import type { CarouselDocument, CarouselSlide, SocialPost } from '../data/types';
 import {
   addTextSlide,
@@ -24,9 +29,12 @@ import {
   normalizeCarousel,
   resolveCarouselSelection,
 } from '../lib/carousel';
+import { ApiError, createCarouselExportJob, fetchCarouselExportJobs, scheduleCarouselPublish, type CarouselExportJob, type CarouselPublishPlatform } from '../lib/api';
 import { useStore } from '../store/store';
 
 const LAST_CAROUSEL_KEY = 'playdesign.carousel.last';
+
+const ACTIVE_EXPORT_STATUSES: CarouselExportJob['status'][] = ['queued', 'rendering', 'uploading'];
 
 const toLocalDateTime = (value: string) => {
   const date = new Date(value);
@@ -92,15 +100,34 @@ const draftPost = (id: string): SocialPost => ({
   title: 'Judul carousel baru',
   channel: 'Instagram',
   date: new Date().toISOString(),
-  status: 'Approved',
+  status: 'Draft',
 });
+
+const exportStatusLabel: Record<CarouselExportJob['status'], string> = {
+  queued: 'Menunggu runner',
+  rendering: 'Merender PNG 1080×1350',
+  uploading: 'Mengunggah ke Drive',
+  done: 'Tersimpan di Drive',
+  failed: 'Gagal',
+  canceled: 'Dibatalkan',
+};
+
+const formatBytes = (value?: number | null) => {
+  if (!value || value <= 0) return '';
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+};
 
 export function CarouselStudioPage() {
   const {
     db,
     can,
+    role,
+    user,
     createCarouselDraft,
     saveCarousel,
+    submitCarouselReview,
+    decideCarouselReview,
     schedulePost,
     toast,
   } = useStore();
@@ -125,7 +152,10 @@ export function CarouselStudioPage() {
   });
   const [activeIndex, setActiveIndex] = useState(0);
   const [dirty, setDirty] = useState(false);
-  const [savedAt, setSavedAt] = useState('');
+  const [savedAt, setSavedAt] = useState(() => {
+    const initialPost = instagramPosts.find((post) => post.id === initialSelectedId);
+    return initialPost ? normalizeCarousel(initialPost).updatedAt : '';
+  });
   const [imageInvalid, setImageInvalid] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [scheduleAt, setScheduleAt] = useState(() => {
@@ -133,6 +163,47 @@ export function CarouselStudioPage() {
     return initialPost ? toLocalDateTime(initialPost.date) : '';
   });
   const [statusMessage, setStatusMessage] = useState('');
+  const [reviewNote, setReviewNote] = useState('');
+  const [exportJob, setExportJob] = useState<CarouselExportJob | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const [publishAccounts, setPublishAccounts] = useState<CarouselPublishPlatform[]>(['instagram']);
+  const [publishAt, setPublishAt] = useState('');
+  const [publishBusy, setPublishBusy] = useState(false);
+  const [publishError, setPublishError] = useState('');
+
+  // Status/pointer Drive dibaca dari D1; halaman tidak pernah menyimpan byte gambar.
+  useEffect(() => {
+    if (!selectedId) {
+      setExportJob(null);
+      return;
+    }
+    let cancelled = false;
+    setExportError('');
+    fetchCarouselExportJobs(selectedId)
+      .then((jobs) => {
+        if (!cancelled) setExportJob(jobs[0] ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setExportJob(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!exportJob) return;
+    const publishing = exportJob.publishStatus === 'queued' || exportJob.publishStatus === 'scheduling';
+    if (!ACTIVE_EXPORT_STATUSES.includes(exportJob.status) && !publishing) return;
+    const postId = exportJob.postId;
+    const timer = setInterval(() => {
+      fetchCarouselExportJobs(postId)
+        .then((jobs) => setExportJob(jobs[0] ?? null))
+        .catch(() => undefined);
+    }, 8000);
+    return () => clearInterval(timer);
+  }, [exportJob?.id, exportJob?.status, exportJob?.publishStatus, exportJob?.postId]);
 
   const rememberSelection = (postId: string) => {
     try {
@@ -145,14 +216,17 @@ export function CarouselStudioPage() {
   const selectPost = (postId: string) => {
     const post = instagramPosts.find((row) => row.id === postId);
     if (!post) return;
+    const nextDocument = normalizeCarousel(post);
     setSelectedId(postId);
     rememberSelection(postId);
-    setDocument(normalizeCarousel(post));
+    setDocument(nextDocument);
     setActiveIndex(0);
     setScheduleAt(toLocalDateTime(post.date));
     setDirty(false);
-    setSavedAt('');
+    setSavedAt(nextDocument.updatedAt);
     setImageInvalid(false);
+    setReviewNote('');
+    setStatusMessage('');
   };
 
   const updateDocument = (updater: (current: CarouselDocument) => CarouselDocument) => {
@@ -191,6 +265,8 @@ export function CarouselStudioPage() {
     setScheduleAt(toLocalDateTime(new Date().toISOString()));
     setDirty(false);
     setSavedAt(nextDocument.updatedAt);
+    setReviewNote('');
+    setStatusMessage('Draft carousel baru dibuat dengan status Draft.');
   };
 
   const handleSave = () => {
@@ -201,6 +277,98 @@ export function CarouselStudioPage() {
       setDirty(false);
       setSavedAt(time);
       setStatusMessage('Draft carousel tersimpan.');
+    }
+  };
+
+  const handleSubmitReview = () => {
+    if (!selectedId) return;
+    if (dirty) {
+      toast('Simpan perubahan dulu sebelum mengajukan review.', 'warning');
+      return;
+    }
+    if (submitCarouselReview(selectedId)) {
+      setStatusMessage('Carousel diajukan dan menunggu keputusan Owner.');
+    }
+  };
+
+  const handleDecision = (decision: 'approved' | 'rejected' | 'revision') => {
+    if (!selectedId) return;
+    if (decideCarouselReview(selectedId, decision, reviewNote)) {
+      setReviewNote('');
+      setStatusMessage(
+        decision === 'approved'
+          ? 'Carousel disetujui.'
+          : decision === 'revision'
+            ? 'Revisi diminta; carousel kembali ke Draft.'
+            : 'Carousel ditolak.',
+      );
+    }
+  };
+
+  const handleExport = async () => {
+    if (!document || !selectedId) return;
+    if (dirty) {
+      toast('Simpan perubahan dulu sebelum ekspor final.', 'warning');
+      return;
+    }
+    setExportBusy(true);
+    setExportError('');
+    try {
+      const job = await createCarouselExportJob({
+        postId: selectedId,
+        title: document.headline || 'Carousel',
+        document,
+      });
+      setExportJob(job);
+      setStatusMessage('Ekspor final masuk antrean runner lokal.');
+      toast('Ekspor masuk antrean. Runner lokal akan mengunggah ke Drive.', 'success');
+    } catch (error) {
+      const message = error instanceof ApiError
+        ? error.message
+        : 'Tidak bisa menghubungi API ekspor. Periksa koneksi dan sesi login.';
+      setExportError(message);
+      toast(message, 'danger');
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  const togglePublishAccount = (platform: CarouselPublishPlatform) => {
+    setPublishAccounts((current) =>
+      current.includes(platform) ? current.filter((item) => item !== platform) : [...current, platform],
+    );
+  };
+
+  const handleSchedulePublish = async () => {
+    if (!exportJob) return;
+    if (publishAccounts.length === 0) {
+      toast('Pilih minimal satu akun Tebar.', 'warning');
+      return;
+    }
+    setPublishBusy(true);
+    setPublishError('');
+    try {
+      const scheduledAt = publishAt ? new Date(publishAt).toISOString() : null;
+      const job = await scheduleCarouselPublish({
+        jobId: exportJob.id,
+        accounts: publishAccounts,
+        scheduledAt,
+      });
+      setExportJob(job);
+      setStatusMessage(
+        scheduledAt
+          ? `Carousel dijadwalkan ke Tebar pada ${new Date(scheduledAt).toLocaleString('id-ID')}.`
+          : 'Carousel akan segera diposting ke Tebar.',
+      );
+      toast('Permintaan tayang dikirim ke runner Tebar.', 'success');
+    } catch (error) {
+      const message = error instanceof ApiError
+        ? error.message
+        : 'Gagal menjadwalkan ke Tebar. Periksa koneksi dan sesi login.';
+      setPublishError(message);
+      toast(message, 'danger');
+    } finally {
+      setPublishBusy(false);
     }
   };
 
@@ -258,14 +426,27 @@ export function CarouselStudioPage() {
     if (!document || !deleteId) return;
     const index = document.slides.findIndex((slide) => slide.id === deleteId);
     const next = deleteTextSlide(document, deleteId);
+    // Slide setelah yang dihapus bergeser satu posisi; slide aktif ikut bergeser
+    // supaya yang sedang dilihat tidak melompat ke cover.
+    const nextIndex = index < 0
+      ? activeIndex
+      : index < activeIndex
+        ? activeIndex - 1
+        : index === activeIndex
+          ? Math.min(activeIndex, next.slides.length - 1)
+          : activeIndex;
     setDocument(next);
-    setActiveIndex(clampSlideIndex(Math.min(activeIndex, index - 1), next.slides.length));
+    setActiveIndex(clampSlideIndex(nextIndex, next.slides.length));
     setDeleteId(null);
     setDirty(true);
   };
 
   const handleSchedule = () => {
     if (!selectedPost || selectedPost.status !== 'Approved' || !scheduleAt) return;
+    if (dirty) {
+      toast('Simpan perubahan dulu supaya jadwal memakai versi terbaru.', 'warning');
+      return;
+    }
     schedulePost(selectedPost.id, new Date(scheduleAt).toISOString());
     setStatusMessage('Carousel dijadwalkan melalui Social Planner.');
   };
@@ -281,7 +462,7 @@ export function CarouselStudioPage() {
         <EmptyState
           icon={<ImageIcon size={24} />}
           title="Belum ada carousel Instagram"
-          desc="Buat draft lokal pertama. Draft akan masuk ke data Social Planner dan tidak dipublikasikan otomatis."
+          desc="Buat draft lokal pertama. Draft lahir berstatus Draft dan baru bisa diekspor setelah disetujui Owner."
           action={can('content.write') ? (
             <button type="button" className="btn btn-primary" onClick={createDraft}>
               <Plus size={15} /> Buat draft carousel
@@ -295,21 +476,27 @@ export function CarouselStudioPage() {
   const activeSlide = document.slides[activeIndex] ?? document.slides[0];
   const highlightMatches = !document.highlight.trim()
     || document.headline.toLocaleLowerCase('id').includes(document.highlight.trim().toLocaleLowerCase('id'));
-  const canSchedule = selectedPost?.status === 'Approved' && Boolean(scheduleAt);
+  const status = selectedPost?.status ?? 'Draft';
+  const isOwner = role === 'Owner';
+  const locked = status === 'Scheduled' || status === 'Published';
+  const canSchedule = status === 'Approved' && Boolean(scheduleAt) && !dirty;
+  const canSubmit = (status === 'Draft' || status === 'Rejected') && !dirty && can('content.write');
+  const canExport = status === 'Approved' && !dirty && isOwner && !exportBusy;
+  const exportRunning = Boolean(exportJob && ACTIVE_EXPORT_STATUSES.includes(exportJob.status));
 
   return (
     <>
       <PageHead
         kicker="Marketing & Content · Production"
         title="Carousel Studio"
-        desc="Edit konten sambil menilai hasil 4:5. Draft tersimpan lokal; publikasi tetap melalui approval dan Social Planner."
+        desc="Draft → review Owner → Approved → ekspor Drive atau jadwalkan. Konten AI tidak pernah tayang tanpa keputusan manusia."
         actions={
           <>
             <Badge tone={dirty ? 'warning' : 'success'}>{dirty ? 'Belum disimpan' : 'Tersimpan'}</Badge>
             <button type="button" className="btn btn-ghost" onClick={createDraft} disabled={!can('content.write')}>
               <Plus size={15} /> Draft baru
             </button>
-            <button type="button" className="btn btn-primary" onClick={handleSave} disabled={!dirty || !can('content.write')}>
+            <button type="button" className="btn btn-primary" onClick={handleSave} disabled={!dirty || !can('content.write') || locked}>
               <Save size={15} /> Simpan draft
             </button>
           </>
@@ -391,118 +578,336 @@ export function CarouselStudioPage() {
             <div className="carousel-card-head">
               <div>
                 <span className="carousel-card-kicker">Workflow</span>
-                <h2>Approval & jadwal</h2>
+                <h2>Review, ekspor, jadwal</h2>
               </div>
-              <Badge tone={selectedPost?.status === 'Approved' ? 'success' : 'neutral'}>{selectedPost?.status ?? 'Draft'}</Badge>
+              <AutoBadge value={status} />
             </div>
-            <div className="carousel-workflow-grid">
-              <Field label="Tanggal dan waktu tayang" hint="Penjadwalan tidak mempublikasikan konten langsung.">
-                <input type="datetime-local" className="input" value={scheduleAt} onChange={(event) => setScheduleAt(event.target.value)} />
-              </Field>
-              <button type="button" className="btn btn-outline" onClick={handleSchedule} disabled={!canSchedule}>
-                <CalendarClock size={15} /> Jadwalkan
-              </button>
-            </div>
-            {!canSchedule && (
-              <p className="carousel-inline-warning">Hanya record berstatus Approved dengan waktu valid yang dapat dijadwalkan.</p>
+
+            <ol className="carousel-status-track" aria-label="Tahapan carousel">
+              {(['Draft', 'Review', 'Approved', 'Scheduled'] as const).map((step) => (
+                <li
+                  key={step}
+                  className={
+                    status === step
+                      ? 'is-current'
+                      : (step === 'Scheduled' ? status === 'Published' : false)
+                        ? 'is-done'
+                        : ''
+                  }
+                >
+                  {step}
+                </li>
+              ))}
+            </ol>
+
+            {(status === 'Draft' || status === 'Rejected') && (
+              <div className="carousel-workflow-grid">
+                <div className="carousel-review-copy">
+                  <strong>{status === 'Rejected' ? 'Ditolak Owner' : 'Draft lokal'}</strong>
+                  <span>
+                    {status === 'Rejected'
+                      ? selectedPost?.reviewNote || 'Perbaiki sesuai catatan, lalu ajukan ulang.'
+                      : 'Ajukan ke Owner untuk dinilai sebelum diekspor atau dijadwalkan.'}
+                  </span>
+                </div>
+                <button type="button" className="btn btn-outline" onClick={handleSubmitReview} disabled={!canSubmit}>
+                  <Send size={15} /> Ajukan review
+                </button>
+              </div>
+            )}
+
+            {status === 'Review' && (
+              <div className="carousel-review-box">
+                <p className="carousel-review-copy">
+                  <ShieldCheck size={15} />
+                  <span>
+                    Menunggu keputusan Owner{selectedPost?.submittedAt ? ` · diajukan ${new Date(selectedPost.submittedAt).toLocaleString('id-ID')}` : ''}.
+                    {' '}QC PASS bukan pengganti approval.
+                  </span>
+                </p>
+                <Field label="Catatan keputusan" hint="Wajib untuk penolakan atau permintaan revisi.">
+                  <textarea
+                    className="input"
+                    rows={3}
+                    value={reviewNote}
+                    onChange={(event) => setReviewNote(event.target.value)}
+                    maxLength={400}
+                    disabled={!isOwner}
+                    placeholder="Alasan penolakan atau instruksi revisi…"
+                  />
+                </Field>
+                <div className="carousel-review-actions">
+                  <button type="button" className="btn btn-primary" onClick={() => handleDecision('approved')} disabled={!isOwner}>
+                    <Check size={15} /> Setujui
+                  </button>
+                  <button type="button" className="btn btn-outline" onClick={() => handleDecision('revision')} disabled={!isOwner || !reviewNote.trim()}>
+                    Minta revisi
+                  </button>
+                  <button type="button" className="btn btn-danger-text" onClick={() => handleDecision('rejected')} disabled={!isOwner || !reviewNote.trim()}>
+                    <X size={15} /> Tolak
+                  </button>
+                </div>
+                {!isOwner && (
+                  <p className="carousel-inline-warning">Hanya Owner yang bisa memutuskan. Anda masuk sebagai {role}.</p>
+                )}
+              </div>
+            )}
+
+            {status === 'Approved' && (
+              <>
+                <div className="carousel-workflow-grid">
+                  <Field label="Tanggal dan waktu tayang" hint="Penjadwalan tidak mempublikasikan konten langsung.">
+                    <input
+                      type="datetime-local"
+                      className="input"
+                      value={scheduleAt}
+                      onChange={(event) => setScheduleAt(event.target.value)}
+                    />
+                  </Field>
+                  <button type="button" className="btn btn-outline" onClick={handleSchedule} disabled={!canSchedule}>
+                    <CalendarClock size={15} /> Jadwalkan
+                  </button>
+                </div>
+                {dirty && (
+                  <p className="carousel-inline-warning">Simpan perubahan dulu; jadwal dan ekspor memakai versi tersimpan.</p>
+                )}
+                {selectedPost?.reviewedBy && (
+                  <p className="carousel-review-meta">
+                    Disetujui {selectedPost.reviewedBy}
+                    {selectedPost.approvedAt ? ` · ${new Date(selectedPost.approvedAt).toLocaleString('id-ID')}` : ''}
+                    {selectedPost.reviewNote ? ` · "${selectedPost.reviewNote}"` : ''}
+                  </p>
+                )}
+
+                <div className="carousel-export-panel">
+                  <div className="carousel-export-head">
+                    <div>
+                      <span className="carousel-card-kicker">Artefak final</span>
+                      <strong>Ekspor carousel ke Google Drive</strong>
+                    </div>
+                    <button type="button" className="btn btn-primary" onClick={handleExport} disabled={!canExport}>
+                      <CloudUpload size={15} /> {exportRunning ? 'Ekspor berjalan…' : 'Ekspor final'}
+                    </button>
+                  </div>
+                  <p className="carousel-export-hint">
+                    Runner lokal merender setiap slide menjadi PNG 1080×1350, menulis caption + manifest,
+                    lalu mengunggah satu folder ke Drive. Server hanya menyimpan status dan pointer.
+                  </p>
+                  {!isOwner && (
+                    <p className="carousel-inline-warning">Ekspor final hanya untuk Owner.</p>
+                  )}
+                  {exportError && <p className="carousel-inline-warning">{exportError}</p>}
+                  {exportJob ? (
+                    <div className={`carousel-export-job tone-${exportJob.status}`}>
+                      <div className="carousel-export-job-head">
+                        <Badge tone={exportJob.status === 'done' ? 'success' : exportJob.status === 'failed' ? 'danger' : 'info'}>
+                          {exportStatusLabel[exportJob.status]}
+                        </Badge>
+                        <span className="carousel-export-meta">
+                          {exportJob.slideCount} slide
+                          {formatBytes(exportJob.bytes) ? ` · ${formatBytes(exportJob.bytes)}` : ''}
+                          {exportJob.attempts ? ` · percobaan ${exportJob.attempts + 1}` : ''}
+                        </span>
+                      </div>
+                      {exportJob.status === 'done' && exportJob.driveFolderLink && (
+                        <a className="btn btn-ghost carousel-drive-link" href={exportJob.driveFolderLink} target="_blank" rel="noreferrer">
+                          <ExternalLink size={15} /> Buka folder Drive
+                        </a>
+                      )}
+                      {exportJob.status === 'done' && status === 'Approved' && (
+                        <div className="carousel-publish">
+                          <div className="carousel-publish-head">
+                            <span className="carousel-card-kicker">Distribusi</span>
+                            <strong><Send size={14} /> Jadwalkan ke Tebar</strong>
+                          </div>
+                          {exportJob.publishStatus === 'scheduled' && (
+                            <p className="carousel-export-meta">
+                              Terjadwal di Tebar
+                              {exportJob.publishAt
+                                ? ` · ${new Date(exportJob.publishAt).toLocaleString('id-ID')}`
+                                : ' · segera tayang'}
+                              {exportJob.tebarPostId ? ` · post ${exportJob.tebarPostId.slice(0, 8)}` : ''}
+                            </p>
+                          )}
+                          {(exportJob.publishStatus === 'queued' || exportJob.publishStatus === 'scheduling') && (
+                            <p className="carousel-export-meta">Runner sedang mengunggah media ke Tebar…</p>
+                          )}
+                          {exportJob.publishStatus === 'failed' && exportJob.publishError && (
+                            <p className="carousel-export-error">{exportJob.publishError}</p>
+                          )}
+                          {exportJob.publishStatus !== 'scheduled' && (
+                            <div className="carousel-publish-form">
+                              <Field label="Waktu tayang" hint="Kosongkan untuk tayang sekarang.">
+                                <input
+                                  type="datetime-local"
+                                  className="input"
+                                  value={publishAt}
+                                  onChange={(event) => setPublishAt(event.target.value)}
+                                />
+                              </Field>
+                              <div className="carousel-publish-targets" role="group" aria-label="Akun Tebar tujuan">
+                                {(['instagram', 'threads'] as CarouselPublishPlatform[]).map((platform) => (
+                                  <label
+                                    key={platform}
+                                    className={`carousel-chip${publishAccounts.includes(platform) ? ' is-on' : ''}`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={publishAccounts.includes(platform)}
+                                      onChange={() => togglePublishAccount(platform)}
+                                    />
+                                    {platform === 'instagram' ? 'Instagram' : 'Threads'}
+                                  </label>
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                onClick={handleSchedulePublish}
+                                disabled={publishBusy || !isOwner}
+                              >
+                                <Send size={15} /> {publishBusy ? 'Mengirim…' : 'Jadwalkan ke Tebar'}
+                              </button>
+                            </div>
+                          )}
+                          {!isOwner && (
+                            <p className="carousel-inline-warning">Penjadwalan Tebar hanya untuk Owner.</p>
+                          )}
+                          {publishError && <p className="carousel-inline-warning">{publishError}</p>}
+                        </div>
+                      )}
+                      {exportJob.status === 'failed' && exportJob.error && (
+                        <p className="carousel-export-error">{exportJob.error}</p>
+                      )}
+                      {ACTIVE_EXPORT_STATUSES.includes(exportJob.status) && (
+                        <p className="carousel-export-meta">
+                          Menunggu runner lokal. Status diperbarui otomatis tiap 8 detik.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="carousel-export-meta">Belum ada ekspor untuk carousel ini.</p>
+                  )}
+                </div>
+              </>
+            )}
+
+            {locked && (
+              <div className="carousel-review-box">
+                <p className="carousel-review-copy">
+                  <ShieldCheck size={15} />
+                  <span>
+                    {status === 'Scheduled'
+                      ? 'Konten sudah dijadwalkan. Edit dikunci agar kalender dan artefak Drive tetap sinkron.'
+                      : 'Konten sudah terbit. Riwayat tidak bisa ditimpa dari Carousel Studio.'}
+                  </span>
+                </p>
+                {exportJob?.status === 'done' && exportJob.driveFolderLink && (
+                  <a className="btn btn-ghost carousel-drive-link" href={exportJob.driveFolderLink} target="_blank" rel="noreferrer">
+                    <ExternalLink size={15} /> Buka folder Drive
+                  </a>
+                )}
+              </div>
             )}
           </section>
 
-          <section className="carousel-editor-card">
-            <div className="carousel-card-head">
-              <div>
-                <span className="carousel-card-kicker">Slide 01</span>
-                <h2>Cover</h2>
-              </div>
-              <Badge tone="brand">4:5</Badge>
-            </div>
-            <div className="carousel-form-grid">
-              <Field label="Label atas">
-                <input className="input" value={document.kicker} onChange={(event) => patchDocument({ kicker: event.target.value })} maxLength={48} />
-              </Field>
-              <Field label="Template cover">
-                <select className="input" value={document.template} onChange={(event) => patchDocument({ template: event.target.value as CarouselDocument['template'] })}>
-                  <option value="split-brand">Split brand</option>
-                  <option value="split-dark">Split dark</option>
-                  <option value="full-image">Full image</option>
-                </select>
-              </Field>
-              <Field className="span-2" label="Judul" hint={`${document.headline.length}/120 karakter`}>
-                <textarea className="input" value={document.headline} onChange={(event) => patchDocument({ headline: event.target.value })} maxLength={120} rows={3} />
-              </Field>
-              <Field label="Kata sorotan" hint={highlightMatches ? 'Frasa ditemukan di judul.' : 'Frasa belum ditemukan; judul tetap tampil utuh.'}>
-                <input className={`input${highlightMatches ? '' : ' is-invalid'}`} value={document.highlight} onChange={(event) => patchDocument({ highlight: event.target.value })} maxLength={40} />
-              </Field>
-              <Field label="Nama sumber">
-                <input className="input" value={document.sourceName} onChange={(event) => patchDocument({ sourceName: event.target.value })} maxLength={60} />
-              </Field>
-              <Field className="span-2" label="URL sumber">
-                <input type="url" className="input" value={document.sourceUrl} onChange={(event) => patchDocument({ sourceUrl: event.target.value })} placeholder="https://…" />
-              </Field>
-              <Field className="span-2" label="URL foto cover" hint={imageInvalid ? 'Foto tidak dapat dimuat. Preview memakai placeholder.' : 'Kosongkan jika foto belum siap.'}>
-                <input type="url" className={`input${imageInvalid ? ' is-invalid' : ''}`} value={document.coverImageUrl} onChange={(event) => patchDocument({ coverImageUrl: event.target.value })} placeholder="https://…" />
-              </Field>
-            </div>
-          </section>
-
-          {document.slides.slice(1).map((slide, textIndex) => {
-            const index = textIndex + 1;
-            return (
-              <section className={`carousel-editor-card${activeIndex === index ? ' is-active' : ''}`} key={slide.id}>
-                <div className="carousel-card-head">
-                  <div>
-                    <span className="carousel-card-kicker">Slide {String(index + 1).padStart(2, '0')}</span>
-                    <h2>{slide.title || 'Slide tanpa judul'}</h2>
-                  </div>
-                  <div className="carousel-card-controls">
-                    <button type="button" className="icon-btn" onClick={() => moveSlide(slide.id, -1)} disabled={index === 1} aria-label={`Pindahkan slide ${index + 1} ke atas`}><ArrowUp size={15} /></button>
-                    <button type="button" className="icon-btn" onClick={() => moveSlide(slide.id, 1)} disabled={index === document.slides.length - 1} aria-label={`Pindahkan slide ${index + 1} ke bawah`}><ArrowDown size={15} /></button>
-                    <button type="button" className="icon-btn is-danger" onClick={() => setDeleteId(slide.id)} aria-label={`Hapus slide ${index + 1}`}><Trash2 size={15} /></button>
-                  </div>
+          <fieldset className="carousel-lock" disabled={locked}>
+            <section className="carousel-editor-card">
+              <div className="carousel-card-head">
+                <div>
+                  <span className="carousel-card-kicker">Slide 01</span>
+                  <h2>Cover</h2>
                 </div>
-                <div className="carousel-form-grid">
-                  <Field className="span-2" label="Judul slide" hint={`${slide.title.length}/90 karakter`}>
-                    <input className="input" value={slide.title} onFocus={() => setActiveIndex(index)} onChange={(event) => patchSlide(slide.id, { title: event.target.value })} maxLength={90} />
-                  </Field>
-                  <Field className="span-2" label="Isi" hint={`${slide.body.length}/260 karakter`}>
-                    <textarea className="input" value={slide.body} onFocus={() => setActiveIndex(index)} onChange={(event) => patchSlide(slide.id, { body: event.target.value })} maxLength={260} rows={4} />
-                  </Field>
-                </div>
-              </section>
-            );
-          })}
-
-          <button type="button" className="carousel-add-slide" onClick={addSlide}>
-            <Plus size={17} /> Tambah slide teks
-          </button>
-
-          <section className="carousel-editor-card">
-            <div className="carousel-card-head">
-              <div>
-                <span className="carousel-card-kicker">Distribusi</span>
-                <h2>Caption & hashtag</h2>
+                <Badge tone="brand">4:5</Badge>
               </div>
-            </div>
-            <div className="carousel-form-grid">
-              <Field className="span-2" label="Caption" hint={`${document.caption.length}/2.200 karakter`}>
-                <textarea className="input carousel-caption-input" value={document.caption} onChange={(event) => patchDocument({ caption: event.target.value })} maxLength={2200} rows={6} />
-              </Field>
-              <Field className="span-2" label="Hashtag" hint="Pisahkan dengan spasi atau koma; tanda # ditambahkan saat disalin.">
-                <input
-                  className="input"
-                  value={document.hashtags.join(' ')}
-                  onChange={(event) => patchDocument({
-                    hashtags: event.target.value.split(/[\s,]+/).map((tag) => tag.replace(/^#+/, '').trim()).filter(Boolean),
-                  })}
-                  placeholder="branding designstudio playdesign"
-                />
-              </Field>
-            </div>
-          </section>
+              <div className="carousel-form-grid">
+                <Field label="Label atas">
+                  <input className="input" value={document.kicker} onChange={(event) => patchDocument({ kicker: event.target.value })} maxLength={48} />
+                </Field>
+                <Field label="Template cover">
+                  <select className="input" value={document.template} onChange={(event) => patchDocument({ template: event.target.value as CarouselDocument['template'] })}>
+                    <option value="split-brand">Split brand</option>
+                    <option value="split-dark">Split dark</option>
+                    <option value="full-image">Full image</option>
+                  </select>
+                </Field>
+                <Field className="span-2" label="Judul" hint={`${document.headline.length}/120 karakter`}>
+                  <textarea className="input" value={document.headline} onChange={(event) => patchDocument({ headline: event.target.value })} maxLength={120} rows={3} />
+                </Field>
+                <Field label="Kata sorotan" hint={highlightMatches ? 'Frasa ditemukan di judul.' : 'Frasa belum ditemukan; judul tetap tampil utuh.'}>
+                  <input className={`input${highlightMatches ? '' : ' is-invalid'}`} value={document.highlight} onChange={(event) => patchDocument({ highlight: event.target.value })} maxLength={40} />
+                </Field>
+                <Field label="Nama sumber">
+                  <input className="input" value={document.sourceName} onChange={(event) => patchDocument({ sourceName: event.target.value })} maxLength={60} />
+                </Field>
+                <Field className="span-2" label="URL sumber">
+                  <input type="url" className="input" value={document.sourceUrl} onChange={(event) => patchDocument({ sourceUrl: event.target.value })} placeholder="https://…" />
+                </Field>
+                <Field className="span-2" label="URL foto cover" hint={imageInvalid ? 'Foto tidak dapat dimuat. Preview memakai placeholder.' : 'Kosongkan jika foto belum siap.'}>
+                  <input type="url" className={`input${imageInvalid ? ' is-invalid' : ''}`} value={document.coverImageUrl} onChange={(event) => patchDocument({ coverImageUrl: event.target.value })} placeholder="https://…" />
+                </Field>
+              </div>
+            </section>
+
+            {document.slides.slice(1).map((slide, textIndex) => {
+              const index = textIndex + 1;
+              return (
+                <section className={`carousel-editor-card${activeIndex === index ? ' is-active' : ''}`} key={slide.id}>
+                  <div className="carousel-card-head">
+                    <div>
+                      <span className="carousel-card-kicker">Slide {String(index + 1).padStart(2, '0')}</span>
+                      <h2>{slide.title || 'Slide tanpa judul'}</h2>
+                    </div>
+                    <div className="carousel-card-controls">
+                      <button type="button" className="icon-btn" onClick={() => moveSlide(slide.id, -1)} disabled={index === 1} aria-label={`Pindahkan slide ${index + 1} ke atas`}><ArrowUp size={15} /></button>
+                      <button type="button" className="icon-btn" onClick={() => moveSlide(slide.id, 1)} disabled={index === document.slides.length - 1} aria-label={`Pindahkan slide ${index + 1} ke bawah`}><ArrowDown size={15} /></button>
+                      <button type="button" className="icon-btn is-danger" onClick={() => setDeleteId(slide.id)} aria-label={`Hapus slide ${index + 1}`}><Trash2 size={15} /></button>
+                    </div>
+                  </div>
+                  <div className="carousel-form-grid">
+                    <Field className="span-2" label="Judul slide" hint={`${slide.title.length}/90 karakter`}>
+                      <input className="input" value={slide.title} onFocus={() => setActiveIndex(index)} onChange={(event) => patchSlide(slide.id, { title: event.target.value })} maxLength={90} />
+                    </Field>
+                    <Field className="span-2" label="Isi" hint={`${slide.body.length}/260 karakter`}>
+                      <textarea className="input" value={slide.body} onFocus={() => setActiveIndex(index)} onChange={(event) => patchSlide(slide.id, { body: event.target.value })} maxLength={260} rows={4} />
+                    </Field>
+                  </div>
+                </section>
+              );
+            })}
+
+            <button type="button" className="carousel-add-slide" onClick={addSlide}>
+              <Plus size={17} /> Tambah slide teks
+            </button>
+
+            <section className="carousel-editor-card">
+              <div className="carousel-card-head">
+                <div>
+                  <span className="carousel-card-kicker">Distribusi</span>
+                  <h2>Caption & hashtag</h2>
+                </div>
+              </div>
+              <div className="carousel-form-grid">
+                <Field className="span-2" label="Caption" hint={`${document.caption.length}/2.200 karakter`}>
+                  <textarea className="input carousel-caption-input" value={document.caption} onChange={(event) => patchDocument({ caption: event.target.value })} maxLength={2200} rows={6} />
+                </Field>
+                <Field className="span-2" label="Hashtag" hint="Pisahkan dengan spasi atau koma; tanda # ditambahkan saat disalin.">
+                  <input
+                    className="input"
+                    value={document.hashtags.join(' ')}
+                    onChange={(event) => patchDocument({
+                      hashtags: event.target.value.split(/[\s,]+/).map((tag) => tag.replace(/^#+/, '').trim()).filter(Boolean),
+                    })}
+                    placeholder="branding designstudio playdesign"
+                  />
+                </Field>
+              </div>
+            </section>
+          </fieldset>
 
           <div className="carousel-bottom-actions">
-            <span><Check size={14} /> {dirty ? 'Ada perubahan yang belum disimpan' : 'Draft lokal sinkron'}</span>
-            <button type="button" className="btn btn-primary" onClick={handleSave} disabled={!dirty || !can('content.write')}>
+            <span><Check size={14} /> {locked ? 'Konten terkunci' : dirty ? 'Ada perubahan yang belum disimpan' : 'Draft lokal sinkron'}</span>
+            <button type="button" className="btn btn-primary" onClick={handleSave} disabled={!dirty || !can('content.write') || locked}>
               <Save size={15} /> Simpan draft
             </button>
           </div>

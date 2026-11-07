@@ -1606,6 +1606,410 @@ async function stopRun(env: Env, req: Request, runId: string) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Carousel export queue                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Job ekspor carousel. D1 hanya menyimpan spesifikasi dokumen (teks), status,
+ * dan pointer Drive. PNG 1080x1350 dirender runner lokal lalu diunggah langsung
+ * ke Drive — byte gambar tidak pernah melewati Cloudflare.
+ */
+
+const CAROUSEL_JOB_STATUSES = ["queued", "rendering", "uploading", "done", "failed", "canceled"] as const;
+const CAROUSEL_PUBLISH_STATUSES = ["idle", "queued", "scheduling", "scheduled", "failed"] as const;
+const CAROUSEL_PUBLISH_PLATFORMS = ["instagram", "threads", "tiktok", "facebook", "youtube", "x", "linkedin"];
+const CAROUSEL_DOCUMENT_MAX_BYTES = 64 * 1024;
+const CAROUSEL_SLIDE_MAX = 12;
+
+interface CarouselJobRow {
+  id: string;
+  workspace_id: string;
+  post_id: string;
+  title: string;
+  status: string;
+  document: string;
+  slide_count: number;
+  bytes: number | null;
+  drive_folder_id: string | null;
+  drive_folder_link: string | null;
+  manifest_file_id: string | null;
+  error: string | null;
+  attempts: number;
+  requested_by: string | null;
+  publish_status: string;
+  publish_at: string | null;
+  publish_accounts: string;
+  tebar_post_id: string | null;
+  publish_error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+}
+
+function parseAccounts(raw: string | null): string[] {
+  try {
+    const parsed = JSON.parse(raw || "[]");
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function carouselJobView(row: CarouselJobRow) {
+  return {
+    id: row.id,
+    postId: row.post_id,
+    title: row.title,
+    status: row.status,
+    slideCount: row.slide_count,
+    bytes: row.bytes,
+    driveFolderId: row.drive_folder_id,
+    driveFolderLink: row.drive_folder_link,
+    manifestFileId: row.manifest_file_id,
+    error: row.error,
+    attempts: row.attempts,
+    requestedBy: row.requested_by,
+    publishStatus: row.publish_status ?? "idle",
+    publishAt: row.publish_at,
+    publishAccounts: parseAccounts(row.publish_accounts),
+    tebarPostId: row.tebar_post_id,
+    publishError: row.publish_error,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Detail dipakai runner: sertakan dokumen (teks) supaya bisa dirender ulang. */
+function carouselJobDetail(row: CarouselJobRow) {
+  let document: unknown = {};
+  try {
+    document = JSON.parse(row.document || "{}");
+  } catch {
+    document = {};
+  }
+  return { ...carouselJobView(row), document };
+}
+
+/** Validasi dokumen carousel: hanya teks yang boleh masuk D1. */
+function normalizeCarouselDocument(raw: unknown) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    fail(400, "invalid_document", "Dokumen carousel harus berupa objek JSON.");
+  }
+  const doc = raw as Record<string, unknown>;
+  const rawSlides = Array.isArray(doc.slides) ? doc.slides : [];
+  if (rawSlides.length === 0) fail(400, "invalid_document", "Carousel butuh minimal satu slide.");
+  if (rawSlides.length > CAROUSEL_SLIDE_MAX) {
+    fail(400, "invalid_document", `Carousel maksimal ${CAROUSEL_SLIDE_MAX} slide.`);
+  }
+
+  const slides = rawSlides.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      fail(400, "invalid_document", `Slide ${index + 1} tidak valid.`);
+    }
+    const slide = item as Record<string, unknown>;
+    return {
+      id: str(slide.id, "slides[].id", 1, 80),
+      kind: slide.kind === "cover" ? "cover" : "text",
+      title: str(slide.title ?? "", "slides[].title", 0, 140),
+      body: str(slide.body ?? "", "slides[].body", 0, 400),
+    };
+  });
+  if (slides[0].kind !== "cover") {
+    fail(400, "invalid_document", "Slide pertama harus berupa cover.");
+  }
+
+  const template = ["split-brand", "split-dark", "full-image"].includes(String(doc.template))
+    ? String(doc.template)
+    : "split-brand";
+
+  const document = {
+    kicker: str(doc.kicker ?? "", "kicker", 0, 60),
+    template,
+    headline: str(doc.headline ?? "", "headline", 1, 140),
+    highlight: str(doc.highlight ?? "", "highlight", 0, 60),
+    sourceName: str(doc.sourceName ?? "", "sourceName", 0, 80),
+    sourceUrl: str(doc.sourceUrl ?? "", "sourceUrl", 0, 500),
+    coverImageUrl: str(doc.coverImageUrl ?? "", "coverImageUrl", 0, 500),
+    slides,
+    caption: str(doc.caption ?? "", "caption", 0, 2200),
+    hashtags: Array.isArray(doc.hashtags)
+      ? doc.hashtags.map((tag) => str(tag, "hashtags", 1, 40)).slice(0, 30)
+      : [],
+    updatedAt: str(doc.updatedAt ?? "", "updatedAt", 0, 40),
+  };
+
+  const serialized = JSON.stringify(document);
+  if (serialized.length > CAROUSEL_DOCUMENT_MAX_BYTES) {
+    fail(400, "document_too_large", "Dokumen carousel melebihi batas 64 KB.");
+  }
+  return { document, serialized, slideCount: slides.length };
+}
+
+async function listCarouselJobs(env: Env, req: Request) {
+  const url = new URL(req.url);
+  const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace") ?? "playdesign");
+  await authenticate(env, workspaceId, req);
+  const postId = (url.searchParams.get("postId") ?? "").trim();
+  const status = (url.searchParams.get("status") ?? "").trim();
+  const publishStatus = (url.searchParams.get("publishStatus") ?? "").trim();
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 10, 1), 50);
+
+  const clauses = ["workspace_id = ?"];
+  const binds: unknown[] = [workspaceId];
+  if (postId) {
+    clauses.push("post_id = ?");
+    binds.push(postId);
+  }
+  if (status) {
+    if (!(CAROUSEL_JOB_STATUSES as readonly string[]).includes(status)) {
+      fail(400, "invalid_status", `Status job tidak dikenal: ${status}.`);
+    }
+    clauses.push("status = ?");
+    binds.push(status);
+  }
+  if (publishStatus) {
+    if (!(CAROUSEL_PUBLISH_STATUSES as readonly string[]).includes(publishStatus)) {
+      fail(400, "invalid_publish_status", `Status publikasi tidak dikenal: ${publishStatus}.`);
+    }
+    clauses.push("publish_status = ?");
+    binds.push(publishStatus);
+  }
+  binds.push(limit);
+
+  const rows = await env.DB.prepare(
+    `SELECT * FROM carousel_export_jobs WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT ?`,
+  )
+    .bind(...binds)
+    .all<CarouselJobRow>();
+  return json({ jobs: (rows.results ?? []).map(carouselJobView) });
+}
+
+async function createCarouselJob(env: Env, req: Request) {
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+  const actor = await authenticate(env, workspaceId, req);
+  // Ekspor final hanya untuk Owner: ini yang mengubah konten menjadi artefak siap tayang.
+  requireOwner(actor);
+
+  const postId = str(body.postId, "postId", 1, 80);
+  const title = str(body.title ?? "Carousel", "title", 1, 160);
+  const { serialized, slideCount } = normalizeCarouselDocument(body.document);
+
+  const active = await env.DB.prepare(
+    `SELECT id, status FROM carousel_export_jobs
+      WHERE workspace_id = ? AND post_id = ? AND status IN ('queued', 'rendering', 'uploading')
+      LIMIT 1`,
+  )
+    .bind(workspaceId, postId)
+    .first<{ id: string; status: string }>();
+  if (active) {
+    fail(409, "job_active", `Masih ada job ekspor berjalan (${active.status}) untuk carousel ini.`);
+  }
+
+  const id = uid("cj");
+  await env.DB.prepare(
+    `INSERT INTO carousel_export_jobs
+       (id, workspace_id, post_id, title, status, document, slide_count, requested_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, workspaceId, postId, title, serialized, slideCount, actor.id, nowIso(), nowIso())
+    .run();
+
+  await env.DB.prepare(
+    `INSERT INTO activity_events
+       (id, workspace_id, entity_type, entity_id, actor_type, actor_id, action, result, meta, created_at)
+     VALUES (?, ?, 'post', ?, ?, ?, 'carousel_export_queued', 'pending', ?, ?)`,
+  )
+    .bind(
+      uid("ae"),
+      workspaceId,
+      postId,
+      actorTypeFor(actor.role),
+      actor.id,
+      JSON.stringify({ jobId: id, slideCount }),
+      nowIso(),
+    )
+    .run();
+
+  const row = await env.DB.prepare(`SELECT * FROM carousel_export_jobs WHERE id = ?`).bind(id).first<CarouselJobRow>();
+  return json({ ok: true, job: row ? carouselJobView(row) : null }, 201);
+}
+
+async function getCarouselJob(env: Env, req: Request, id: string) {
+  const url = new URL(req.url);
+  const workspaceId = await assertWorkspace(env, url.searchParams.get("workspace") ?? "playdesign");
+  await authenticate(env, workspaceId, req);
+  const row = await env.DB.prepare(`SELECT * FROM carousel_export_jobs WHERE id = ? AND workspace_id = ?`)
+    .bind(id, workspaceId)
+    .first<CarouselJobRow>();
+  if (!row) fail(404, "job_not_found", "Job ekspor carousel tidak ditemukan.");
+  return json({ job: carouselJobDetail(row) });
+}
+
+async function claimCarouselJob(env: Env, req: Request, id: string) {
+  const body = (await req.json().catch(() => ({}))) as { workspace?: string };
+  const workspaceId = await assertWorkspace(env, body.workspace ?? "playdesign");
+  const result = await env.DB.prepare(
+    `UPDATE carousel_export_jobs
+        SET status = 'rendering', started_at = COALESCE(started_at, ?), error = NULL, updated_at = ?
+      WHERE id = ? AND workspace_id = ? AND status = 'queued'`,
+  )
+    .bind(nowIso(), nowIso(), id, workspaceId)
+    .run();
+  const changed = Number((result.meta as { changes?: number } | undefined)?.changes ?? 0);
+  if (!changed) fail(409, "not_claimable", "Job sudah diambil runner lain atau statusnya bukan queued.");
+  const row = await env.DB.prepare(`SELECT * FROM carousel_export_jobs WHERE id = ?`).bind(id).first<CarouselJobRow>();
+  if (!row) fail(404, "job_not_found", "Job ekspor carousel tidak ditemukan.");
+  return json({ ok: true, job: carouselJobDetail(row) });
+}
+
+const CAROUSEL_TRANSITIONS: Record<string, string[]> = {
+  queued: ["rendering", "canceled"],
+  rendering: ["rendering", "uploading", "done", "failed", "canceled"],
+  uploading: ["uploading", "done", "failed", "canceled"],
+  done: [],
+  failed: [],
+  canceled: [],
+};
+
+async function patchCarouselJob(env: Env, req: Request, id: string) {
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const current = await env.DB.prepare(`SELECT * FROM carousel_export_jobs WHERE id = ?`).bind(id).first<CarouselJobRow>();
+  if (!current) fail(404, "job_not_found", "Job ekspor carousel tidak ditemukan.");
+  const workspaceId = await assertWorkspace(env, (body.workspace as string) ?? current.workspace_id);
+  await authenticate(env, workspaceId, req);
+
+  const next = body.status === undefined ? current.status : oneOf(body.status, "status", CAROUSEL_JOB_STATUSES);
+  if (next !== current.status && !(CAROUSEL_TRANSITIONS[current.status] ?? []).includes(next)) {
+    fail(409, "invalid_transition", `Status tidak boleh berpindah dari ${current.status} ke ${next}.`);
+  }
+
+  const driveFolderId =
+    body.driveFolderId === undefined ? current.drive_folder_id : optionalStr(body.driveFolderId, "driveFolderId", 200) ?? null;
+  const driveFolderLink =
+    body.driveFolderLink === undefined
+      ? current.drive_folder_link
+      : optionalStr(body.driveFolderLink, "driveFolderLink", 500) ?? null;
+  if (next === "done" && !driveFolderId && !driveFolderLink) {
+    fail(400, "output_required", "Job hanya bisa selesai kalau folder Drive tercatat.");
+  }
+
+  const bytes =
+    body.bytes === undefined ? current.bytes : Math.max(0, Math.trunc(Number(body.bytes) || 0));
+  const error = body.error === undefined ? current.error : optionalStr(body.error, "error", 500) ?? null;
+  const manifestFileId =
+    body.manifestFileId === undefined
+      ? current.manifest_file_id
+      : optionalStr(body.manifestFileId, "manifestFileId", 200) ?? null;
+  const publishStatus =
+    body.publishStatus === undefined
+      ? current.publish_status
+      : oneOf(body.publishStatus, "publishStatus", CAROUSEL_PUBLISH_STATUSES);
+  const tebarPostId =
+    body.tebarPostId === undefined
+      ? current.tebar_post_id
+      : optionalStr(body.tebarPostId, "tebarPostId", 120) ?? null;
+  const publishError =
+    body.publishError === undefined
+      ? current.publish_error
+      : optionalStr(body.publishError, "publishError", 500) ?? null;
+  const finishedAt = ["done", "failed", "canceled"].includes(next) ? nowIso() : current.finished_at;
+
+  await env.DB.prepare(
+    `UPDATE carousel_export_jobs
+        SET status = ?, bytes = ?, drive_folder_id = ?, drive_folder_link = ?, manifest_file_id = ?,
+            error = ?, publish_status = ?, tebar_post_id = ?, publish_error = ?,
+            finished_at = ?, updated_at = ?
+      WHERE id = ?`,
+  )
+    .bind(
+      next,
+      bytes,
+      driveFolderId,
+      driveFolderLink,
+      manifestFileId,
+      error,
+      publishStatus,
+      tebarPostId,
+      publishError,
+      finishedAt,
+      nowIso(),
+      id,
+    )
+    .run();
+
+  const row = await env.DB.prepare(`SELECT * FROM carousel_export_jobs WHERE id = ?`).bind(id).first<CarouselJobRow>();
+  return json({ ok: true, job: row ? carouselJobView(row) : null });
+}
+
+async function scheduleCarouselPublish(env: Env, req: Request, id: string) {
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const workspaceId = await assertWorkspace(env, (body.workspace as string) ?? "playdesign");
+  const actor = await authenticate(env, workspaceId, req);
+  // Menjadwalkan tayang = keputusan manusia: hanya Owner.
+  requireOwner(actor);
+
+  const current = await env.DB.prepare(
+    `SELECT * FROM carousel_export_jobs WHERE id = ? AND workspace_id = ?`,
+  )
+    .bind(id, workspaceId)
+    .first<CarouselJobRow>();
+  if (!current) fail(404, "job_not_found", "Job ekspor carousel tidak ditemukan.");
+  if (current.status !== "done") {
+    fail(409, "export_incomplete", "Ekspor ke Drive belum selesai; jadwalkan setelah folder Drive siap.");
+  }
+  if (current.publish_status === "scheduled" && current.tebar_post_id) {
+    fail(409, "already_scheduled", "Carousel ini sudah dijadwalkan di Tebar.");
+  }
+
+  const rawAccounts = Array.isArray(body.accounts) ? body.accounts : ["instagram"];
+  const accounts = Array.from(
+    new Set(rawAccounts.map((item) => String(item).trim().toLowerCase()).filter(Boolean)),
+  );
+  if (accounts.length === 0) fail(400, "account_required", "Pilih minimal satu akun tujuan.");
+  const unknown = accounts.filter((item) => !CAROUSEL_PUBLISH_PLATFORMS.includes(item));
+  if (unknown.length > 0) {
+    fail(400, "account_unknown", `Platform belum didukung: ${unknown.join(", ")}.`);
+  }
+
+  const scheduledAt = optionalStr(body.scheduledAt, "scheduledAt", 40) ?? null;
+  if (scheduledAt && Number.isNaN(Date.parse(scheduledAt))) {
+    fail(400, "invalid_schedule", "Waktu jadwal tidak valid (pakai ISO 8601).");
+  }
+
+  await env.DB.prepare(
+    `UPDATE carousel_export_jobs
+        SET publish_status = 'queued', publish_at = ?, publish_accounts = ?,
+            tebar_post_id = NULL, publish_error = NULL, updated_at = ?
+      WHERE id = ?`,
+  )
+    .bind(scheduledAt, JSON.stringify(accounts), nowIso(), id)
+    .run();
+
+  await env.DB.prepare(
+    `INSERT INTO activity_events
+       (id, workspace_id, entity_type, entity_id, actor_type, actor_id, action, result, meta, created_at)
+     VALUES (?, ?, 'post', ?, ?, ?, 'carousel_publish_queued', 'pending', ?, ?)`,
+  )
+    .bind(
+      uid("ae"),
+      workspaceId,
+      current.post_id,
+      actorTypeFor(actor.role),
+      actor.id,
+      JSON.stringify({ jobId: id, accounts, scheduledAt }),
+      nowIso(),
+    )
+    .run();
+
+  const row = await env.DB.prepare(`SELECT * FROM carousel_export_jobs WHERE id = ?`).bind(id).first<CarouselJobRow>();
+  return json({ ok: true, job: row ? carouselJobView(row) : null }, 202);
+}
+
+/* ------------------------------------------------------------------ */
 /* Router                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -1849,6 +2253,17 @@ async function route(req: Request, env: Env): Promise<Response> {
   const videoRefMatch = /^\/api\/video\/references\/([^/]+)$/.exec(path);
   if (videoRefMatch && method === "PATCH") return patchVideoReference(env, req, decodeURIComponent(videoRefMatch[1]));
   if (videoRefMatch && method === "DELETE") return deleteVideoReference(env, req, decodeURIComponent(videoRefMatch[1]));
+
+  /* ---- Carousel export queue (status + pointer only) ---------------- */
+  if (path === "/api/carousel/jobs" && method === "GET") return listCarouselJobs(env, req);
+  if (path === "/api/carousel/jobs" && method === "POST") return createCarouselJob(env, req);
+  const carouselClaim = /^\/api\/carousel\/jobs\/([^/]+)\/claim$/.exec(path);
+  if (carouselClaim && method === "POST") return claimCarouselJob(env, req, decodeURIComponent(carouselClaim[1]));
+  const carouselPublish = /^\/api\/carousel\/jobs\/([^/]+)\/publish$/.exec(path);
+  if (carouselPublish && method === "POST") return scheduleCarouselPublish(env, req, decodeURIComponent(carouselPublish[1]));
+  const carouselJobMatch = /^\/api\/carousel\/jobs\/([^/]+)$/.exec(path);
+  if (carouselJobMatch && method === "GET") return getCarouselJob(env, req, decodeURIComponent(carouselJobMatch[1]));
+  if (carouselJobMatch && method === "PATCH") return patchCarouselJob(env, req, decodeURIComponent(carouselJobMatch[1]));
 
   if (path === "/api/office" && method === "GET") return office(env, req);
   if (path === "/api/tasks" && method === "GET") {

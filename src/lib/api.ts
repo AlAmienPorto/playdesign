@@ -420,3 +420,74 @@ export async function reviseVideoScene(input: {
   });
   return payload.scene;
 }
+
+/* ------------------------------------------------------------------ */
+/* Carousel export — job menyimpan pointer Drive, bukan byte gambar    */
+/* ------------------------------------------------------------------ */
+
+import type { CarouselDocument } from '../data/types';
+
+export type CarouselJobStatus = 'queued' | 'rendering' | 'uploading' | 'done' | 'failed' | 'canceled';
+export type CarouselPublishStatus = 'idle' | 'queued' | 'scheduling' | 'scheduled' | 'failed';
+export type CarouselPublishPlatform = 'instagram' | 'threads' | 'tiktok' | 'facebook' | 'youtube' | 'x' | 'linkedin';
+
+export interface CarouselExportJob {
+  id: string;
+  postId: string;
+  title: string;
+  status: CarouselJobStatus;
+  slideCount: number;
+  bytes?: number | null;
+  driveFolderId?: string | null;
+  driveFolderLink?: string | null;
+  manifestFileId?: string | null;
+  error?: string | null;
+  attempts?: number;
+  publishStatus?: CarouselPublishStatus;
+  publishAt?: string | null;
+  publishAccounts?: CarouselPublishPlatform[];
+  tebarPostId?: string | null;
+  publishError?: string | null;
+  createdAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  updatedAt: string;
+}
+
+export async function createCarouselExportJob(input: {
+  postId: string;
+  title: string;
+  document: CarouselDocument;
+}): Promise<CarouselExportJob> {
+  const payload = await request<{ ok: boolean; job: CarouselExportJob }>('/api/carousel/jobs', {
+    method: 'POST',
+    body: JSON.stringify({ ...input, workspace: 'playdesign' }),
+  });
+  return payload.job;
+}
+
+export async function fetchCarouselExportJobs(postId: string, limit = 5): Promise<CarouselExportJob[]> {
+  const payload = await request<{ jobs: CarouselExportJob[] }>(
+    `/api/carousel/jobs?workspace=playdesign&postId=${encodeURIComponent(postId)}&limit=${limit}`,
+  );
+  return payload.jobs ?? [];
+}
+
+export async function scheduleCarouselPublish(input: {
+  jobId: string;
+  accounts: CarouselPublishPlatform[];
+  scheduledAt: string | null;
+}): Promise<CarouselExportJob> {
+  const payload = await request<{ ok: boolean; job: CarouselExportJob }>(
+    `/api/carousel/jobs/${encodeURIComponent(input.jobId)}/publish`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        workspace: 'playdesign',
+        accounts: input.accounts,
+        scheduledAt: input.scheduledAt,
+      }),
+    },
+  );
+  return payload.job;
+}
