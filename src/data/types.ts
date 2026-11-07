@@ -333,6 +333,27 @@ export interface ChatMessage {
   mine?: boolean;
 }
 
+export interface CarouselSlide {
+  id: string;
+  kind: 'cover' | 'text';
+  title: string;
+  body: string;
+}
+
+export interface CarouselDocument {
+  kicker: string;
+  template: 'split-brand' | 'split-dark' | 'full-image';
+  headline: string;
+  highlight: string;
+  sourceName: string;
+  sourceUrl: string;
+  coverImageUrl: string;
+  slides: CarouselSlide[];
+  caption: string;
+  hashtags: string[];
+  updatedAt: string;
+}
+
 export interface SocialPost {
   id: string;
   title: string;
@@ -345,6 +366,7 @@ export interface SocialPost {
   mediaUrl?: string;
   slides?: string[];
   author?: string;
+  carousel?: CarouselDocument;
 }
 
 export interface RawLead {
