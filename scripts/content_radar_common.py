@@ -160,6 +160,7 @@ class ApiClient:
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self._token}",
+                "User-Agent": "Mozilla/5.0 (compatible; PlaydesignRadar/1.0; +https://kantor.playdesign.my.id)",
                 **({"Content-Type": "application/json"} if data is not None else {}),
             },
         )

@@ -101,7 +101,8 @@ const scoreTone = (score: number) => {
 
 export function ContentRadarPage() {
   const { db, toast } = useStore();
-  const workspaceId = db.workspaces.find((workspace) => workspace.active)?.id ?? db.workspaces[0]?.id ?? '';
+  const rawWorkspace = db.workspaces.find((workspace) => workspace.active)?.id ?? db.workspaces[0]?.id ?? 'playdesign';
+  const workspaceId = rawWorkspace === 'ws-1' ? 'playdesign' : (rawWorkspace || 'playdesign');
   const [view, setView] = useState<RadarView>('candidates');
   const [filters, setFilters] = useState<Filters>(INITIAL_FILTERS);
   const [debouncedQuery, setDebouncedQuery] = useState(filters.query);

@@ -178,7 +178,8 @@ export function CarouselStudioPage() {
   // Import draft Content Radar yang belum di-import secara otomatis saat Carousel Studio dibuka.
   useEffect(() => {
     let cancelled = false;
-    const workspaceId = db.workspaces?.find((w) => w.active)?.id ?? db.workspaces?.[0]?.id ?? 'playdesign';
+    const rawWorkspace = db.workspaces?.find((w) => w.active)?.id ?? db.workspaces?.[0]?.id ?? 'playdesign';
+    const workspaceId = rawWorkspace === 'ws-1' ? 'playdesign' : rawWorkspace;
 
     const runImport = async () => {
       let actorId = user.id || 'ja';
