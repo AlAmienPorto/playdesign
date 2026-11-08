@@ -1125,13 +1125,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   };
 
   const importRadarDraftsAction = (drafts: RadarDraft[]) => {
-    let importedIds: string[] = [];
-    setDb((prev) => {
-      const result = importRadarDraftsInDb(prev, drafts, user.name);
-      importedIds = result.imported;
-      return result.db;
-    });
-    return importedIds;
+    const result = importRadarDraftsInDb(db, drafts, user.name);
+    setDb(result.db);
+    return result.imported;
   };
 
   const saveCarousel = (postId: string, document: CarouselDocument) => {

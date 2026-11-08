@@ -643,31 +643,67 @@ test('importRadarDrafts: draft yang sama pada reload tidak diduplikasi', () => {
   assert.equal(second.db.audit.length, auditCountAfterFirst, 'Reload tidak boleh menambah audit duplikat');
 });
 
+test('importRadarDrafts: draft existing tanpa edit diperbarui sambil mempertahankan identitas lokal', () => {
+  const db = structuredClone(SEED);
+  const originalDraft = draftFixture();
+  const firstImport = importRadarDraftsInDb(db, [originalDraft], 'radar-agent');
+  const existing = firstImport.db.social.find((item: SocialPost) => item.id === originalDraft.postId);
+  assert.ok(existing);
+  if (!existing) return;
+  existing.author = 'Owner';
+
+  const refreshedDraft = structuredClone(originalDraft);
+  refreshedDraft.title = 'Judul terbaru dari Content Radar';
+  refreshedDraft.document.headline = refreshedDraft.title;
+  refreshedDraft.document.caption = 'Caption terbaru dari Content Radar.';
+  refreshedDraft.document.slides[1].body = 'Isi terbaru dari sumber terverifikasi.';
+  refreshedDraft.document.updatedAt = '2026-11-08T09:05:00.000Z';
+
+  const result = importRadarDraftsInDb(firstImport.db, [refreshedDraft], 'radar-agent');
+
+  assert.deepEqual(result.imported, [refreshedDraft.id]);
+  const post = result.db.social.find((item: SocialPost) => item.id === refreshedDraft.postId);
+  assert.ok(post);
+  if (!post) return;
+  assert.equal(post.id, existing.id);
+  assert.equal(post.status, 'Draft');
+  assert.equal(post.author, 'Owner');
+  assert.equal(post.title, refreshedDraft.title);
+  assert.equal(post.caption, refreshedDraft.document.caption);
+  assert.equal(post.carousel?.slides[1]?.body, refreshedDraft.document.slides[1]?.body);
+  assert.deepEqual(post.carousel, radarDraftToSocialPost(refreshedDraft).carousel);
+});
+
 test('importRadarDrafts: draft existing dengan edit manusia tidak ditimpa', () => {
   const db = structuredClone(SEED);
-  const draft = draftFixture();
+  const originalDraft = draftFixture();
+  const firstImport = importRadarDraftsInDb(db, [originalDraft], 'radar-agent');
+  const humanEditedPost = firstImport.db.social.find(
+    (item: SocialPost) => item.id === originalDraft.postId,
+  );
+  assert.ok(humanEditedPost);
+  if (!humanEditedPost) return;
 
-  // Simulasikan post yang sudah ada di database dan telah diedit oleh manusia
-  const humanEditedPost = {
-    ...radarDraftToSocialPost(draft),
-    title: 'Judul yang sudah disunting manusia',
+  humanEditedPost.title = 'Judul yang sudah disunting manusia';
+  humanEditedPost.caption = 'Caption baru dari copywriter.';
+  humanEditedPost.status = 'Review';
+  humanEditedPost.carousel = {
+    ...originalDraft.document,
+    headline: 'Judul yang sudah disunting manusia',
     caption: 'Caption baru dari copywriter.',
-    status: 'Review' as const,
-    carousel: {
-      ...draft.document,
-      headline: 'Judul yang sudah disunting manusia',
-      caption: 'Caption baru dari copywriter.',
-      slides: draft.document.slides.map((s, idx) =>
-        idx === 1 ? { ...s, body: 'Poin kedua dirombak total oleh tim' } : s,
-      ),
-    },
+    slides: originalDraft.document.slides.map((slide, index) =>
+      index === 1 ? { ...slide, body: 'Poin kedua dirombak total oleh tim' } : slide,
+    ),
   };
-  db.social.unshift(humanEditedPost);
 
-  const result = importRadarDraftsInDb(db, [draft], 'radar-agent');
+  const refreshedDraft = structuredClone(originalDraft);
+  refreshedDraft.title = 'Judul terbaru dari Content Radar';
+  refreshedDraft.document.headline = refreshedDraft.title;
+  refreshedDraft.document.updatedAt = '2026-11-08T09:05:00.000Z';
+  const result = importRadarDraftsInDb(firstImport.db, [refreshedDraft], 'radar-agent');
 
-  assert.deepEqual(result.imported, [draft.id]);
-  const post = result.db.social.find((item: SocialPost) => item.id === draft.postId);
+  assert.deepEqual(result.imported, [refreshedDraft.id]);
+  const post = result.db.social.find((item: SocialPost) => item.id === refreshedDraft.postId);
   assert.ok(post);
   if (!post) return;
   assert.equal(post.title, 'Judul yang sudah disunting manusia');

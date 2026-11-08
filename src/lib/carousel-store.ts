@@ -287,6 +287,21 @@ export function decideCarouselInDb(
   };
 }
 
+function postImportContent(post: SocialPost) {
+  return {
+    title: post.title,
+    caption: post.caption ?? '',
+    mediaUrl: post.mediaUrl,
+    hashtags: post.hashtags ?? [],
+    slides: post.slides ?? [],
+    carousel: post.carousel,
+  };
+}
+
+function postImportSnapshot(post: SocialPost): string {
+  return JSON.stringify(postImportContent(post));
+}
+
 function isPostHumanEdited(existing: SocialPost, original: SocialPost): boolean {
   if (existing.status !== 'Draft') return true;
   if (
@@ -298,29 +313,10 @@ function isPostHumanEdited(existing: SocialPost, original: SocialPost): boolean 
   ) {
     return true;
   }
-  if (existing.title !== original.title) return true;
-  if ((existing.caption ?? '') !== (original.caption ?? '')) return true;
-  if (existing.mediaUrl !== original.mediaUrl) return true;
-  if (JSON.stringify(existing.hashtags ?? []) !== JSON.stringify(original.hashtags ?? [])) return true;
-  if (JSON.stringify(existing.slides ?? []) !== JSON.stringify(original.slides ?? [])) return true;
-  if (existing.carousel && original.carousel) {
-    const c1 = existing.carousel;
-    const c2 = original.carousel;
-    if (c1.headline !== c2.headline) return true;
-    if (c1.kicker !== c2.kicker) return true;
-    if (c1.highlight !== c2.highlight) return true;
-    if (c1.template !== c2.template) return true;
-    if (c1.sourceName !== c2.sourceName) return true;
-    if (c1.sourceUrl !== c2.sourceUrl) return true;
-    if (c1.coverImageUrl !== c2.coverImageUrl) return true;
-    if (c1.slides.length !== c2.slides.length) return true;
-    for (let i = 0; i < c1.slides.length; i++) {
-      const s1 = c1.slides[i];
-      const s2 = c2.slides[i];
-      if (s1.title !== s2?.title || s1.body !== s2?.body) return true;
-    }
-  }
-  return false;
+  const baseline = existing.radarImportSnapshot;
+  return baseline
+    ? postImportSnapshot(existing) !== baseline
+    : postImportSnapshot(existing) !== postImportSnapshot(original);
 }
 
 export function importRadarDraftsInDb(
@@ -351,6 +347,7 @@ export function importRadarDraftsInDb(
       nextSocial.unshift({
         ...post,
         status: 'Draft',
+        radarImportSnapshot: postImportSnapshot(post),
       });
       newAuditEntries.push({
         id: newId('au'),
@@ -363,12 +360,16 @@ export function importRadarDraftsInDb(
       imported.push(draft.id);
     } else {
       const existing = nextSocial[existingIndex];
-      const edited = isPostHumanEdited(existing, post);
-      if (edited) {
-        imported.push(draft.id);
-      } else {
-        imported.push(draft.id);
+      if (!isPostHumanEdited(existing, post)) {
+        nextSocial[existingIndex] = {
+          ...post,
+          id: existing.id,
+          status: 'Draft',
+          author: existing.author,
+          radarImportSnapshot: postImportSnapshot(post),
+        };
       }
+      imported.push(draft.id);
     }
   }
 

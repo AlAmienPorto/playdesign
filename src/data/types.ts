@@ -380,6 +380,7 @@ export interface SocialPost {
   approvedAt?: string;
   radarDraftId?: string;
   radarCandidateId?: string;
+  radarImportSnapshot?: string;
 }
 
 export interface RawLead {
