@@ -67,6 +67,7 @@ const env = () => ({
   API_TOKEN,
   ACCESS_PASSWORD,
   RADAR_API_TOKEN: RADAR_TOKEN,
+  RADAR_WORKSPACE_ID: "ws-a",
 });
 
 async function call(target, method, path, options = {}) {
@@ -114,6 +115,30 @@ const source = (target, workspaceId, id, domain, tier, kind = "media") =>
      VALUES (?, ?, ?, ?, ?, ?, '["ai"]', 1, ?, ?, ?)`,
   )
     .bind(workspaceId, id, domain, domain, tier, kind, tier === "D" ? 1 : 0, new Date().toISOString(), new Date().toISOString())
+    .run();
+
+/**
+ * Registers a trusted source the way the Owner would (`PATCH /sources/:id`).
+ * Ingest never grants trust, so every fixture that expects a scored candidate
+ * to be credible has to put the domain in the registry first.
+ */
+const ensureSource = (target, workspaceId, domain, tier = "A", kind = "media") =>
+  target.DB.prepare(
+    `INSERT OR IGNORE INTO content_radar_sources
+       (workspace_id, id, domain, name, tier, kind, niches, enabled, requires_crosscheck, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, '["ai"]', 1, ?, ?, ?)`,
+  )
+    .bind(
+      workspaceId,
+      `srct-${domain.replace(/[^a-z0-9]+/g, "-")}`,
+      domain,
+      domain,
+      tier,
+      kind,
+      tier === "D" ? 1 : 0,
+      new Date().toISOString(),
+      new Date().toISOString(),
+    )
     .run();
 
 async function session(target) {
@@ -201,6 +226,10 @@ async function score(target, workspaceId, candidateId, overrides = {}) {
 }
 
 async function scoredCandidate(target, workspaceId, overrides = {}) {
+  const declared = overrides.candidate?.sourceDomain ?? overrides.source?.domain;
+  const canonicalUrl = overrides.candidate?.canonicalUrl ?? "https://example.com/ai/launch?utm_source=feed";
+  const domain = declared ?? new URL(canonicalUrl).hostname.toLowerCase();
+  await ensureSource(target, workspaceId, domain, "A");
   const ingested = await ingest(target, workspaceId, overrides);
   assert.ok([200, 201].includes(ingested.status), ingested.text);
   const candidateId = ingested.body.candidateId;
@@ -237,7 +266,9 @@ async function fillAutomaticDrafts(target, workspaceId, count) {
 test("read workspace sendiri berhasil dan hanya memuat kandidat workspace itu", async () => {
   const { env: target, token } = await setup();
   await scoredCandidate(target, "ws-a");
-  await scoredCandidate(target, "ws-b", {
+  // A second collector identity bound to ws-b seeds the other workspace; the
+  // ws-a machine token can no longer reach it.
+  await scoredCandidate({ ...target, RADAR_WORKSPACE_ID: "ws-b" }, "ws-b", {
     candidate: { canonicalUrl: "https://example.com/ai/other", clusterKey: "cluster-other" },
     provenance: [{ url: "https://example.com/ai/other", relation: "primary" }],
   });
@@ -265,7 +296,7 @@ test("workspace lain ditolak untuk sesi manusia", async () => {
 
 test("IDOR: kandidat workspace lain tidak dapat dibaca lewat id", async () => {
   const { env: target, token } = await setup();
-  const foreign = await scoredCandidate(target, "ws-b", {
+  const foreign = await scoredCandidate({ ...target, RADAR_WORKSPACE_ID: "ws-b" }, "ws-b", {
     candidate: { canonicalUrl: "https://example.com/ai/foreign", clusterKey: "cluster-foreign" },
     provenance: [{ url: "https://example.com/ai/foreign", relation: "primary" }],
   });
@@ -481,14 +512,72 @@ test("ingest menautkan cross-check ke klaster yang sama tanpa duplikat kandidat"
   assert.equal(sources.total, 2);
 });
 
-test("ingest menolak source discovered bertier selain unverified", async () => {
+test("ingest tidak dapat memilih tier: domain baru selalu unverified dan discovered", async () => {
   const { env: target } = await setup();
   const response = await ingest(target, "ws-a", {
-    source: { domain: "baru.example", kind: "discovered", tier: "B" },
-    candidate: { sourceDomain: "baru.example", canonicalUrl: "https://baru.example/ai/berita" },
+    source: { domain: "promoted.example", kind: "media", tier: "A" },
+    candidate: {
+      sourceDomain: "promoted.example",
+      canonicalUrl: "https://promoted.example/ai/klaim",
+      clusterKey: "cluster-promoted",
+    },
   });
-  assert.equal(response.status, 400);
-  assert.equal(response.body.error.code, "discovered_source_requires_unverified");
+  assert.equal(response.status, 201, response.text);
+  assert.equal(response.body.source.tier, "unverified");
+
+  const row = await target.DB.prepare(
+    "SELECT tier, kind, verified_at, verified_by FROM content_radar_sources WHERE workspace_id = ? AND domain = ?",
+  )
+    .bind("ws-a", "promoted.example")
+    .first();
+  assert.equal(row.tier, "unverified");
+  assert.equal(row.kind, "discovered");
+  assert.equal(row.verified_at, null);
+  assert.equal(row.verified_by, null);
+
+  const scored = await score(target, "ws-a", response.body.candidateId);
+  assert.equal(scored.status, 200, scored.text);
+  assert.equal(scored.body.score.components.credibility, 5);
+  assert.equal(scored.body.score.components.evidence, 2);
+});
+
+test("re-ingest tidak dapat menaikkan tier atau memindahkan domain kandidat", async () => {
+  const { env: target } = await setup();
+  await ensureSource(target, "ws-a", "trusted.example", "A");
+  const first = await ingest(target, "ws-a", {
+    source: { domain: "low.example", kind: "media", tier: "D" },
+    candidate: {
+      sourceDomain: "low.example",
+      canonicalUrl: "https://low.example/ai/low",
+      clusterKey: "cluster-low",
+    },
+    provenance: [{ url: "https://low.example/ai/low", relation: "primary" }],
+  });
+  assert.equal(first.status, 201, first.text);
+
+  const second = await ingest(target, "ws-a", {
+    source: { domain: "trusted.example", kind: "media", tier: "A" },
+    candidate: {
+      sourceDomain: "trusted.example",
+      canonicalUrl: "https://low.example/ai/low",
+      clusterKey: "cluster-low",
+    },
+    provenance: [{ url: "https://low.example/ai/low", relation: "primary" }],
+  });
+  assert.equal(second.status, 200, second.text);
+  assert.equal(second.body.candidateId, first.body.candidateId);
+
+  const row = await target.DB.prepare(
+    "SELECT source_domain, source_tier FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", first.body.candidateId)
+    .first();
+  assert.equal(row.source_domain, "low.example");
+  assert.equal(row.source_tier, "unverified");
+
+  const scored = await score(target, "ws-a", first.body.candidateId);
+  assert.equal(scored.status, 200, scored.text);
+  assert.equal(scored.body.score.components.credibility, 5);
 });
 
 test("ingest menolak canonical URL non-HTTP", async () => {
@@ -519,6 +608,7 @@ test("ingest memakai tier registry, bukan tier kiriman klien", async () => {
 
 test("score menghitung ulang komponen faktual dan hanya menerima nilai diskret", async () => {
   const { env: target } = await setup();
+  await ensureSource(target, "ws-a", "example.com", "A");
   const ingested = await ingest(target, "ws-a");
   const candidateId = ingested.body.candidateId;
 
@@ -544,6 +634,7 @@ test("score menghitung ulang komponen faktual dan hanya menerima nilai diskret",
 
 test("score memakai cross-check dan flag risiko dari server", async () => {
   const { env: target } = await setup();
+  await ensureSource(target, "ws-a", "example.com", "A");
   await source(target, "ws-a", "src-other-org", "other.example.org", "B");
   const ingested = await ingest(target, "ws-a", {
     provenance: [
@@ -564,6 +655,7 @@ test("score memakai cross-check dan flag risiko dari server", async () => {
 
 test("score menolak timestamp publikasi di masa depan tanpa komponen freshness", async () => {
   const { env: target } = await setup();
+  await ensureSource(target, "ws-a", "example.com", "A");
   const ingested = await ingest(target, "ws-a", {
     candidate: { publishedAt: iso(6 * 3_600_000) },
   });
@@ -700,6 +792,7 @@ test("draft otomatis menolak dokumen di luar 4 sampai 8 slide", async () => {
 
 test("draft manual Owner tidak mengurangi kuota otomatis", async () => {
   const { env: target, token } = await setup();
+  await ensureSource(target, "ws-a", "example.com", "A");
   for (let index = 0; index < 3; index += 1) {
     const ingested = await ingest(target, "ws-a", {
       candidate: {
@@ -1047,6 +1140,346 @@ test("run workspace lain tidak dapat diperbarui", async () => {
     token: RADAR_TOKEN,
     body: { workspaceId: "ws-b", status: "running" },
   });
-  assert.equal(response.status, 404);
-  assert.equal(response.body.error.code, "run_not_found");
+  assert.equal(response.status, 403);
+  assert.equal(response.body.error.code, "forbidden_workspace");
+
+  const ownWorkspace = await call(target, "POST", `/api/content-radar/runs/${created.body.run.id}`, {
+    token: RADAR_TOKEN,
+    body: { workspaceId: "ws-a", status: "running" },
+  });
+  assert.equal(ownWorkspace.status, 200, ownWorkspace.text);
+});
+
+test("asOf kiriman klien tidak mengubah skor maupun kelayakan draft", async () => {
+  const { env: target } = await setup();
+  await ensureSource(target, "ws-a", "example.com", "A");
+  const publishedAt = iso(-120 * 3_600_000);
+  const ingested = await ingest(target, "ws-a", {
+    candidate: { publishedAt },
+    provenance: [{ url: "https://example.com/ai/launch", relation: "primary" }],
+  });
+
+  const honest = await score(target, "ws-a", ingested.body.candidateId);
+  assert.equal(honest.status, 200, honest.text);
+  assert.equal(honest.body.score.components.freshness, 0);
+  assert.equal(honest.body.score.total, 81);
+  assert.ok(honest.body.score.inputSnapshot.ageHours > 100);
+
+  const forgedAsOf = new Date(Date.parse(publishedAt) + 3_600_000).toISOString();
+  const forged = await score(target, "ws-a", ingested.body.candidateId, { asOf: forgedAsOf });
+  assert.equal(forged.status, 200, forged.text);
+  assert.equal(forged.body.score.total, honest.body.score.total);
+  assert.equal(forged.body.score.components.freshness, 0);
+  assert.ok(
+    Math.abs(forged.body.score.inputSnapshot.ageHours - honest.body.score.inputSnapshot.ageHours) < 0.01,
+  );
+  assert.ok(Date.parse(forged.body.score.inputSnapshot.asOf) > Date.now() - 60_000);
+  assert.ok(forged.body.score.inputSnapshot.asOf !== forgedAsOf);
+
+  const draft = await automaticDraft(target, "ws-a", ingested.body.candidateId);
+  assert.equal(draft.status, 409);
+  assert.equal(draft.body.error.code, "draft_not_eligible");
+  assert.ok(draft.body.error.details.reasons.includes("outside_24h_window"));
+});
+
+test("draft otomatis mengevaluasi ulang jendela 24 jam dengan jam server", async () => {
+  const { env: target } = await setup();
+  await ensureSource(target, "ws-a", "example.com", "A");
+  const publishedAt = iso(-30 * 3_600_000);
+  const ingested = await ingest(target, "ws-a", {
+    candidate: { publishedAt },
+    provenance: [{ url: "https://example.com/ai/launch", relation: "primary" }],
+  });
+  const scored = await score(target, "ws-a", ingested.body.candidateId);
+  assert.equal(scored.status, 200, scored.text);
+
+  // Snapshot frozen when the article was one hour old: internally consistent
+  // (ageHours 1, freshness 15) but 29 hours stale by draft time.
+  const frozen = {
+    ...scored.body.score.inputSnapshot,
+    asOf: new Date(Date.parse(publishedAt) + 3_600_000).toISOString(),
+  };
+  await target.DB.prepare(
+    "UPDATE content_radar_candidates SET score_input_snapshot = ?, score_total = 96 WHERE workspace_id = ? AND id = ?",
+  )
+    .bind(JSON.stringify(frozen), "ws-a", ingested.body.candidateId)
+    .run();
+
+  const response = await automaticDraft(target, "ws-a", ingested.body.candidateId);
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error.code, "draft_not_eligible");
+  assert.ok(response.body.error.details.reasons.includes("outside_24h_window"));
+
+  const drafts = await target.DB.prepare(
+    "SELECT COUNT(*) AS total FROM content_radar_drafts WHERE workspace_id = ?",
+  )
+    .bind("ws-a")
+    .first();
+  assert.equal(drafts.total, 0);
+});
+
+test("sumber unverified tidak dapat memenuhi syarat draft lewat primary self-declared", async () => {
+  const { env: target } = await setup();
+  const ingested = await ingest(target, "ws-a", {
+    source: { domain: "shady.example", kind: "media", tier: "A" },
+    candidate: {
+      sourceDomain: "shady.example",
+      canonicalUrl: "https://shady.example/ai/klaim",
+      clusterKey: "cluster-shady",
+    },
+    provenance: [
+      { url: "https://shady.example/ai/klaim", relation: "primary" },
+      { url: "https://junk.example/ai/klaim", relation: "crosscheck" },
+    ],
+  });
+  assert.equal(ingested.status, 201, ingested.text);
+
+  const scored = await score(target, "ws-a", ingested.body.candidateId);
+  assert.equal(scored.status, 200, scored.text);
+  assert.equal(scored.body.score.components.credibility, 5);
+  assert.equal(scored.body.score.components.evidence, 2);
+  assert.equal(scored.body.score.total, 62);
+
+  const draft = await automaticDraft(target, "ws-a", ingested.body.candidateId);
+  assert.equal(draft.status, 409);
+  assert.equal(draft.body.error.code, "draft_not_eligible");
+  assert.ok(draft.body.error.details.reasons.includes("insufficient_crosscheck"));
+  assert.ok(draft.body.error.details.reasons.includes("score_below_75"));
+});
+
+test("niche terkunci setelah draft sehingga draft crypto kedua tetap ditolak", async () => {
+  const { env: target } = await setup();
+  const first = await scoredCandidate(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/crypto/one",
+      niche: "crypto",
+      clusterKey: "cluster-crypto-1",
+    },
+    provenance: [{ url: "https://example.com/crypto/one", relation: "primary" }],
+  });
+  assert.equal((await automaticDraft(target, "ws-a", first)).status, 201);
+
+  const flipped = await ingest(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/crypto/one",
+      niche: "ai",
+      clusterKey: "cluster-crypto-1",
+    },
+    provenance: [{ url: "https://example.com/crypto/one", relation: "primary" }],
+  });
+  assert.equal(flipped.status, 409);
+  assert.equal(flipped.body.error.code, "niche_locked");
+
+  const row = await target.DB.prepare(
+    "SELECT niche FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", first)
+    .first();
+  assert.equal(row.niche, "crypto");
+
+  const second = await scoredCandidate(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/crypto/two",
+      niche: "crypto",
+      clusterKey: "cluster-crypto-2",
+    },
+    provenance: [{ url: "https://example.com/crypto/two", relation: "primary" }],
+  });
+  const blocked = await automaticDraft(target, "ws-a", second);
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.body.error.code, "crypto_draft_cap_reached");
+
+  const automatic = await target.DB.prepare(
+    "SELECT COUNT(*) AS total FROM content_radar_drafts WHERE workspace_id = ? AND creation_kind = 'automatic'",
+  )
+    .bind("ws-a")
+    .first();
+  assert.equal(automatic.total, 1);
+});
+
+test("dua domain dengan slug sama dapat diingest bersamaan", async () => {
+  const { env: target } = await setup();
+  const first = await ingest(target, "ws-a", {
+    source: { domain: "foo.bar.com", kind: "media" },
+    candidate: {
+      sourceDomain: "foo.bar.com",
+      canonicalUrl: "https://foo.bar.com/ai/satu",
+      clusterKey: "cluster-foo-dot",
+    },
+  });
+  const second = await ingest(target, "ws-a", {
+    source: { domain: "foo-bar.com", kind: "media" },
+    candidate: {
+      sourceDomain: "foo-bar.com",
+      canonicalUrl: "https://foo-bar.com/ai/dua",
+      clusterKey: "cluster-foo-dash",
+    },
+  });
+  assert.equal(first.status, 201, first.text);
+  assert.equal(second.status, 201, second.text);
+  assert.match(first.body.source.id, /^src-foo-bar-com-[0-9a-f]{8}$/);
+  assert.match(second.body.source.id, /^src-foo-bar-com-[0-9a-f]{8}$/);
+  assert.notEqual(first.body.source.id, second.body.source.id);
+
+  const rows = await target.DB.prepare(
+    "SELECT id, domain FROM content_radar_sources WHERE workspace_id = ? AND domain IN ('foo.bar.com', 'foo-bar.com') ORDER BY domain ASC",
+  )
+    .bind("ws-a")
+    .all();
+  assert.equal(rows.results.length, 2);
+  assert.notEqual(rows.results[0].id, rows.results[1].id);
+});
+
+test("workspace tidak dapat dienumerasi sebelum autentikasi", async () => {
+  const { env: target } = await setup();
+  await source(target, "ws-a", "src-example-com", "example.com", "B");
+
+  const readExisting = await call(target, "GET", "/api/content-radar/candidates?workspace=ws-a");
+  const readMissing = await call(target, "GET", "/api/content-radar/candidates?workspace=tidak-ada");
+  assert.equal(readExisting.status, 401);
+  assert.equal(readMissing.status, 401);
+  assert.equal(readMissing.body.error.code, "unauthorized");
+
+  const patchExisting = await call(target, "PATCH", "/api/content-radar/sources/src-example-com", {
+    body: { workspaceId: "ws-a", tier: "C" },
+  });
+  const patchMissing = await call(target, "PATCH", "/api/content-radar/sources/src-example-com", {
+    body: { workspaceId: "tidak-ada", tier: "C" },
+  });
+  assert.equal(patchExisting.status, 401);
+  assert.equal(patchMissing.status, 401);
+
+  const rejectExisting = await call(target, "POST", "/api/content-radar/candidates/radcand-x/reject", {
+    body: { workspaceId: "ws-a", reason: "x" },
+  });
+  const rejectMissing = await call(target, "POST", "/api/content-radar/candidates/radcand-x/reject", {
+    body: { workspaceId: "tidak-ada", reason: "x" },
+  });
+  assert.equal(rejectExisting.status, 401);
+  assert.equal(rejectMissing.status, 401);
+
+  const ackExisting = await call(target, "POST", "/api/content-radar/drafts/radardraft-x/imported", {
+    body: { workspaceId: "ws-a" },
+  });
+  const ackMissing = await call(target, "POST", "/api/content-radar/drafts/radardraft-x/imported", {
+    body: { workspaceId: "tidak-ada" },
+  });
+  assert.equal(ackExisting.status, 401);
+  assert.equal(ackMissing.status, 401);
+});
+
+test("rute mesin gagal tertutup saat RADAR_WORKSPACE_ID tidak diset", async () => {
+  const { env: target } = await setup();
+  const unbound = { ...target, RADAR_WORKSPACE_ID: undefined };
+
+  const ingestResponse = await call(unbound, "POST", "/api/content-radar/candidates:ingest", {
+    token: RADAR_TOKEN,
+    body: {
+      workspaceId: "ws-a",
+      candidate: { canonicalUrl: "https://example.com/ai/unbound", title: "Unbound", niche: "ai" },
+    },
+  });
+  assert.equal(ingestResponse.status, 503);
+  assert.equal(ingestResponse.body.error.code, "machine_not_configured");
+
+  const readResponse = await call(unbound, "GET", "/api/content-radar/candidates?workspace=ws-a", {
+    token: RADAR_TOKEN,
+  });
+  assert.equal(readResponse.status, 503);
+  assert.equal(readResponse.body.error.code, "machine_not_configured");
+
+  const humanRead = await call(unbound, "GET", "/api/content-radar/candidates?workspace=ws-a", {
+    token: API_TOKEN,
+    actorId: "ja",
+  });
+  assert.equal(humanRead.status, 200, humanRead.text);
+});
+
+test("mesin tidak dapat menyentuh workspace lain", async () => {
+  const { env: target } = await setup();
+  const write = await ingest(target, "ws-b", {
+    candidate: { canonicalUrl: "https://example.com/ai/wsb", clusterKey: "cluster-wsb" },
+  });
+  assert.equal(write.status, 403);
+  assert.equal(write.body.error.code, "forbidden_workspace");
+
+  const read = await call(target, "GET", "/api/content-radar/candidates?workspace=ws-b", {
+    token: RADAR_TOKEN,
+  });
+  assert.equal(read.status, 403);
+  assert.equal(read.body.error.code, "forbidden_workspace");
+
+  const own = await call(target, "GET", "/api/content-radar/candidates?workspace=ws-a", {
+    token: RADAR_TOKEN,
+  });
+  assert.equal(own.status, 200, own.text);
+});
+
+test("rute Owner membutuhkan x-actor-id eksplisit", async () => {
+  const { env: target, token } = await setup();
+  await source(target, "ws-a", "src-example-com", "example.com", "B");
+  const candidateId = await scoredCandidate(target, "ws-a");
+
+  const reject = await call(target, "POST", `/api/content-radar/candidates/${candidateId}/reject`, {
+    token,
+    body: { workspaceId: "ws-a", reason: "x" },
+  });
+  assert.equal(reject.status, 400);
+  assert.equal(reject.body.error.code, "actor_required");
+
+  const patch = await call(target, "PATCH", "/api/content-radar/sources/src-example-com", {
+    token,
+    body: { workspaceId: "ws-a", tier: "C" },
+  });
+  assert.equal(patch.status, 400);
+  assert.equal(patch.body.error.code, "actor_required");
+
+  const manual = await call(target, "POST", `/api/content-radar/candidates/${candidateId}/draft`, {
+    token,
+    body: { workspaceId: "ws-a" },
+  });
+  assert.equal(manual.status, 400);
+  assert.equal(manual.body.error.code, "actor_required");
+
+  const candidate = await target.DB.prepare(
+    "SELECT status, draft_id FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", candidateId)
+    .first();
+  assert.equal(candidate.status, "qualified");
+  assert.equal(candidate.draft_id, null);
+
+  const sourceRow = await target.DB.prepare(
+    "SELECT tier FROM content_radar_sources WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", "src-example-com")
+    .first();
+  assert.equal(sourceRow.tier, "B");
+});
+
+test("acknowledgement imported menolak identitas mesin", async () => {
+  const { env: target } = await setup();
+  const candidateId = await scoredCandidate(target, "ws-a");
+  const drafted = await automaticDraft(target, "ws-a", candidateId);
+  const draftId = drafted.body.draft.id;
+
+  const response = await call(target, "POST", `/api/content-radar/drafts/${draftId}/imported`, {
+    token: RADAR_TOKEN,
+    body: { workspaceId: "ws-a" },
+  });
+  assert.equal(response.status, 403);
+  assert.equal(response.body.error.code, "forbidden_human_only");
+
+  const row = await target.DB.prepare(
+    "SELECT imported_at FROM content_radar_drafts WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", draftId)
+    .first();
+  assert.equal(row.imported_at, null);
+
+  const queue = await call(target, "GET", "/api/content-radar/drafts?workspace=ws-a&unimported=true", {
+    token: API_TOKEN,
+    actorId: "ja",
+  });
+  assert.equal(queue.body.drafts.length, 1);
 });

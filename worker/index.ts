@@ -40,6 +40,12 @@ export interface Env {
    * `radar-agent` (ingest/score/draft saja), terpisah dari API_TOKEN manusia.
    */
   RADAR_API_TOKEN?: string;
+  /**
+   * Workspace yang diikat ke identitas mesin. Wajib: tanpa binding ini rute
+   * mesin gagal tertutup (503 `machine_not_configured`) supaya satu token
+   * collector tidak bisa menyentuh workspace lain.
+   */
+  RADAR_WORKSPACE_ID?: string;
 }
 
 /* ------------------------------------------------------------------ */

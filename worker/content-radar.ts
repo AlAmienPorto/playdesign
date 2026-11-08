@@ -61,8 +61,6 @@ export interface RadarContext {
   nowIso: () => string;
 }
 
-type Caller = { kind: "agent"; id: string } | { kind: "actor"; actor: RadarActor };
-
 const NICHES = ["ai", "technology", "design", "security", "internet", "crypto"] as const;
 const SOURCE_TIERS = ["A", "B", "C", "D", "unverified"] as const;
 const SOURCE_KINDS = [
@@ -134,6 +132,13 @@ interface CandidateRow {
   draft_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface CandidateRef {
+  id: string;
+  cluster_key: string;
+  niche: string;
+  draft_id: string | null;
 }
 
 interface SourceRow {
@@ -231,8 +236,20 @@ const readArrayColumn = <T>(raw: string | null | undefined): T[] => {
 
 const wibDate = (iso: string) => new Date(Date.parse(iso) + WIB_OFFSET_MS).toISOString().slice(0, 10);
 
-const sourceIdForDomain = (domain: string) =>
-  `src-${domain.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
+/**
+ * Deterministic, collision-resistant source id: `src-<slug>-<8 hex of SHA-256(domain)>`.
+ * The slug alone is ambiguous (`foo.bar.com` and `foo-bar.com` both slug to
+ * `foo-bar-com`), and the id is half of the sources primary key, so a bare slug
+ * could make two real domains impossible to register in one workspace.
+ */
+const sourceIdForDomain = async (domain: string): Promise<string> => {
+  const slug = domain.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "domain";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(domain));
+  const suffix = [...new Uint8Array(digest).slice(0, 4)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `src-${slug}-${suffix}`;
+};
 
 const hostOf = (url: string) => new URL(url).hostname.toLowerCase();
 
@@ -477,16 +494,83 @@ const draftView = (row: DraftRow) => ({
   updatedAt: row.updated_at,
 });
 
-async function resolveCaller(
+type Credential = { kind: "agent"; id: string } | { kind: "human" };
+
+/**
+ * Step 1 of every radar request: prove the caller is allowed to talk to the
+ * API at all. Nothing workspace-shaped happens before this, so an
+ * unauthenticated caller cannot tell an existing workspace id from a missing
+ * one.
+ */
+async function verifyCredential(req: Request, env: Env, ctx: RadarContext): Promise<Credential> {
+  const agent = ctx.machineActor(req);
+  if (agent) return { kind: "agent", id: agent };
+  await ctx.assertToken(req, env);
+  return { kind: "human" };
+}
+
+/**
+ * Step 2: resolve the workspace. The machine identity is bound to
+ * `RADAR_WORKSPACE_ID` and fails closed when that binding is missing, so one
+ * leaked collector secret cannot read or write another workspace's Radar data.
+ */
+async function resolveWorkspace(
+  env: Env,
+  ctx: RadarContext,
+  credential: Credential,
+  raw: unknown,
+): Promise<string> {
+  if (credential.kind === "human") return ctx.assertWorkspace(env, raw);
+  const bound = env.RADAR_WORKSPACE_ID?.trim();
+  if (!bound) {
+    return ctx.fail(
+      503,
+      "machine_not_configured",
+      "RADAR_WORKSPACE_ID is not configured. Bind the machine identity to one workspace before serving ingest.",
+    );
+  }
+  const requested = typeof raw === "string" && raw.trim() !== "" ? raw : bound;
+  const workspaceId = await ctx.assertWorkspace(env, requested);
+  if (workspaceId !== bound) {
+    return ctx.fail(403, "forbidden_workspace", "The radar-agent identity is bound to another workspace.");
+  }
+  return workspaceId;
+}
+
+/** Step 3 (human callers only): resolve the workspace actor. */
+async function resolveActor(
   env: Env,
   workspaceId: string,
   req: Request,
   ctx: RadarContext,
-): Promise<Caller> {
-  const agent = ctx.machineActor(req);
-  if (agent) return { kind: "agent", id: agent };
-  await ctx.assertToken(req, env);
-  return { kind: "actor", actor: await ctx.authenticate(env, workspaceId, req) };
+): Promise<RadarActor> {
+  return ctx.authenticate(env, workspaceId, req);
+}
+
+/** Shared read-path gate: credential, then workspace, then actor. */
+async function authorizeRead(
+  req: Request,
+  env: Env,
+  ctx: RadarContext,
+  rawWorkspace: unknown,
+): Promise<string> {
+  const credential = await verifyCredential(req, env, ctx);
+  const workspaceId = await resolveWorkspace(env, ctx, credential, rawWorkspace);
+  if (credential.kind === "human") await resolveActor(env, workspaceId, req, ctx);
+  return workspaceId;
+}
+
+/**
+ * Owner-only routes need an explicit `x-actor-id`; the shared API_TOKEN must not
+ * inherit an implicit human identity, otherwise the collector/script secret
+ * silently becomes an Owner.
+ */
+function requireActorHeader(req: Request, ctx: RadarContext): string {
+  const header = (req.headers.get("x-actor-id") ?? "").trim();
+  if (!header) {
+    return ctx.fail(400, "actor_required", "An explicit x-actor-id header is required for Owner actions.");
+  }
+  return header;
 }
 
 function requireAgent(req: Request, ctx: RadarContext): string {
@@ -497,12 +581,77 @@ function requireAgent(req: Request, ctx: RadarContext): string {
   return agent;
 }
 
-function requireOwnerCaller(caller: Caller, ctx: RadarContext): RadarActor {
-  if (caller.kind === "agent") {
-    return ctx.fail(403, "forbidden_owner_only", "The radar-agent identity cannot change the registry or create manual drafts.");
+/**
+ * Authenticated Owner resolution for the three human-only mutations. The
+ * machine identity is refused before any workspace lookup.
+ */
+async function requireOwnerActor(
+  req: Request,
+  env: Env,
+  ctx: RadarContext,
+  credential: Credential,
+  rawWorkspace: unknown,
+): Promise<{ workspaceId: string; actor: RadarActor }> {
+  if (credential.kind === "agent") {
+    return ctx.fail(
+      403,
+      "forbidden_owner_only",
+      "The radar-agent identity cannot change the registry or create manual drafts.",
+    );
   }
-  ctx.requireOwner(caller.actor);
-  return caller.actor;
+  requireActorHeader(req, ctx);
+  const workspaceId = await ctx.assertWorkspace(env, rawWorkspace);
+  const actor = await resolveActor(env, workspaceId, req, ctx);
+  ctx.requireOwner(actor);
+  return { workspaceId, actor };
+}
+
+interface TrustView {
+  tier: RadarSourceTier;
+  primary: boolean;
+  crossChecks: { domain: string; tier: RadarSourceTier }[];
+}
+
+/**
+ * Trust is derived from the registry, never from the request or from the stored
+ * score snapshot: a `primary` provenance row only counts when its domain is a
+ * registered, enabled, non-`unverified` source, and a cross-check only counts
+ * when it comes from a registered, enabled, non-`unverified` domain.
+ */
+async function loadTrust(
+  env: Env,
+  workspaceId: string,
+  row: CandidateRow,
+): Promise<{ trust: TrustView; provenance: ProvenanceRow[] }> {
+  const registry = await env.DB.prepare(
+    `SELECT tier, enabled FROM content_radar_sources WHERE workspace_id = ? AND domain = ?`,
+  )
+    .bind(workspaceId, row.source_domain)
+    .first<{ tier: string; enabled: number }>();
+  const tier = (registry?.tier ?? "unverified") as RadarSourceTier;
+  const trusted = (entry: ProvenanceRow) => entry.enabled === 1 && entry.tier !== "unverified";
+  const originTrusted = registry?.enabled === 1 && tier !== "unverified";
+  const provenance = await loadProvenance(env, workspaceId, row.id);
+  return {
+    provenance,
+    trust: {
+      tier,
+      primary:
+        originTrusted &&
+        provenance.some(
+          (entry) =>
+            entry.relation === "primary" && entry.source_domain === row.source_domain && trusted(entry),
+        ),
+      crossChecks: provenance
+        .filter(
+          (entry) =>
+            entry.relation === "crosscheck" &&
+            entry.source_domain !== row.source_domain &&
+            trusted(entry),
+        )
+        .map((entry) => ({ domain: entry.source_domain, tier: entry.tier as RadarSourceTier })),
+    },
+  };
 }
 
 async function loadCandidate(env: Env, workspaceId: string, id: string) {
@@ -618,8 +767,7 @@ export async function routeContentRadar(
 
 async function listCandidates(req: Request, env: Env, ctx: RadarContext) {
   const url = new URL(req.url);
-  const workspaceId = await ctx.assertWorkspace(env, url.searchParams.get("workspace"));
-  await resolveCaller(env, workspaceId, req, ctx);
+  const workspaceId = await authorizeRead(req, env, ctx, url.searchParams.get("workspace"));
 
   const status = url.searchParams.get("status");
   const niche = url.searchParams.get("niche");
@@ -673,8 +821,7 @@ async function listCandidates(req: Request, env: Env, ctx: RadarContext) {
 
 async function getCandidate(req: Request, env: Env, ctx: RadarContext, id: string) {
   const url = new URL(req.url);
-  const workspaceId = await ctx.assertWorkspace(env, url.searchParams.get("workspace"));
-  await resolveCaller(env, workspaceId, req, ctx);
+  const workspaceId = await authorizeRead(req, env, ctx, url.searchParams.get("workspace"));
   const row = await loadCandidate(env, workspaceId, id);
   if (!row) return ctx.fail(404, "candidate_not_found", "Unknown candidate.");
   const sources = await loadProvenance(env, workspaceId, id);
@@ -683,8 +830,7 @@ async function getCandidate(req: Request, env: Env, ctx: RadarContext, id: strin
 
 async function listSources(req: Request, env: Env, ctx: RadarContext) {
   const url = new URL(req.url);
-  const workspaceId = await ctx.assertWorkspace(env, url.searchParams.get("workspace"));
-  await resolveCaller(env, workspaceId, req, ctx);
+  const workspaceId = await authorizeRead(req, env, ctx, url.searchParams.get("workspace"));
   const tier = url.searchParams.get("tier");
   const kind = url.searchParams.get("kind");
   const enabled = url.searchParams.get("enabled");
@@ -725,8 +871,7 @@ async function listSources(req: Request, env: Env, ctx: RadarContext) {
 
 async function listRuns(req: Request, env: Env, ctx: RadarContext) {
   const url = new URL(req.url);
-  const workspaceId = await ctx.assertWorkspace(env, url.searchParams.get("workspace"));
-  await resolveCaller(env, workspaceId, req, ctx);
+  const workspaceId = await authorizeRead(req, env, ctx, url.searchParams.get("workspace"));
   const kind = url.searchParams.get("kind");
   const status = url.searchParams.get("status");
   const limit = queryInt(ctx, url.searchParams.get("limit"), "limit", 1, 100, 20);
@@ -763,8 +908,7 @@ async function listRuns(req: Request, env: Env, ctx: RadarContext) {
 
 async function listDrafts(req: Request, env: Env, ctx: RadarContext) {
   const url = new URL(req.url);
-  const workspaceId = await ctx.assertWorkspace(env, url.searchParams.get("workspace"));
-  await resolveCaller(env, workspaceId, req, ctx);
+  const workspaceId = await authorizeRead(req, env, ctx, url.searchParams.get("workspace"));
   const unimported = url.searchParams.get("unimported");
   if (unimported !== null && unimported !== "" && unimported !== "true" && unimported !== "false") {
     return ctx.fail(400, "validation_failed", "unimported must be true or false.");
@@ -795,8 +939,13 @@ async function listDrafts(req: Request, env: Env, ctx: RadarContext) {
 
 async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   const body = await ctx.readJson(req);
-  requireAgent(req, ctx);
-  const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
+  const agent = requireAgent(req, ctx);
+  const workspaceId = await resolveWorkspace(
+    env,
+    ctx,
+    { kind: "agent", id: agent },
+    body.workspaceId ?? body.workspace,
+  );
 
   if (!isRecord(body.candidate)) {
     return ctx.fail(400, "validation_failed", "candidate must be an object.");
@@ -825,14 +974,15 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   if (sourceInput !== null && !isRecord(sourceInput)) {
     return ctx.fail(400, "validation_failed", "source must be an object.");
   }
-  const sourceTier = ctx.oneOf(sourceInput?.tier ?? "unverified", "source.tier", SOURCE_TIERS);
-  const sourceKind = ctx.oneOf(sourceInput?.kind ?? "discovered", "source.kind", SOURCE_KINDS);
-  if (sourceKind === "discovered" && sourceTier !== "unverified") {
-    return ctx.fail(
-      400,
-      "discovered_source_requires_unverified",
-      "A discovered source must stay unverified until the Owner promotes it.",
-    );
+  // `source.tier` / `source.kind` are validated for shape only and then dropped:
+  // ingest never chooses trust. A domain that is not already in the registry is
+  // always stored as `unverified`/`discovered`; promotion stays Owner-only via
+  // PATCH /sources/:id.
+  if (sourceInput?.tier !== undefined && sourceInput.tier !== null) {
+    ctx.oneOf(sourceInput.tier, "source.tier", SOURCE_TIERS);
+  }
+  if (sourceInput?.kind !== undefined && sourceInput.kind !== null) {
+    ctx.oneOf(sourceInput.kind, "source.kind", SOURCE_KINDS);
   }
   const sourceName = ctx.optionalStr(sourceInput?.name, "source.name", 200) ?? sourceDomain;
   const feedUrl = ctx.optionalStr(sourceInput?.feedUrl, "source.feedUrl", 500);
@@ -886,8 +1036,8 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   )
     .bind(workspaceId, sourceDomain)
     .first<SourceRow>();
-  const resolvedSourceId = existingSource?.id ?? sourceIdForDomain(sourceDomain);
-  const resolvedTier = existingSource?.tier ?? sourceTier;
+  const resolvedSourceId = existingSource?.id ?? (await sourceIdForDomain(sourceDomain));
+  const resolvedTier = (existingSource?.tier ?? "unverified") as RadarSourceTier;
   const now = ctx.nowIso();
 
   const statements: D1PreparedStatement[] = [];
@@ -897,18 +1047,15 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
         `INSERT INTO content_radar_sources
            (workspace_id, id, domain, name, tier, kind, niches, feed_url, enabled,
             requires_crosscheck, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         VALUES (?, ?, ?, ?, 'unverified', 'discovered', ?, ?, 1, 0, ?, ?)
          ON CONFLICT(workspace_id, domain) DO NOTHING`,
       ).bind(
         workspaceId,
         resolvedSourceId,
         sourceDomain,
         sourceName,
-        sourceTier,
-        sourceKind,
         JSON.stringify(sourceNiches),
         feedUrl ?? null,
-        sourceTier === "D" ? 1 : 0,
         now,
         now,
       ),
@@ -916,17 +1063,37 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   }
 
   const byUrl = await env.DB.prepare(
-    `SELECT id, cluster_key FROM content_radar_candidates WHERE workspace_id = ? AND canonical_url = ?`,
+    `SELECT id, cluster_key, niche, draft_id FROM content_radar_candidates
+      WHERE workspace_id = ? AND canonical_url = ?`,
   )
     .bind(workspaceId, canonical)
-    .first<{ id: string; cluster_key: string }>();
+    .first<CandidateRef>();
   const byCluster = byUrl
     ? null
     : await env.DB.prepare(
-        `SELECT id, cluster_key FROM content_radar_candidates WHERE workspace_id = ? AND cluster_key = ?`,
+        `SELECT id, cluster_key, niche, draft_id FROM content_radar_candidates
+          WHERE workspace_id = ? AND cluster_key = ?`,
       )
         .bind(workspaceId, clusterKey)
-        .first<{ id: string; cluster_key: string }>();
+        .first<CandidateRef>();
+
+  const stored = byUrl ?? byCluster;
+  if (stored && stored.niche !== niche) {
+    const clusterDraft = stored.draft_id
+      ? { present: 1 }
+      : await env.DB.prepare(
+          `SELECT 1 AS present FROM content_radar_drafts WHERE workspace_id = ? AND cluster_key = ? LIMIT 1`,
+        )
+          .bind(workspaceId, stored.cluster_key)
+          .first<{ present: number }>();
+    if (stored.draft_id || clusterDraft) {
+      return ctx.fail(
+        409,
+        "niche_locked",
+        "This candidate already produced a draft, so its niche can no longer change.",
+      );
+    }
+  }
 
   const candidateId = byUrl?.id ?? byCluster?.id ?? ctx.uid("radcand");
   const created = !byUrl && !byCluster;
@@ -940,13 +1107,14 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
       ).bind(now, now, publishedAt === null ? 1 : 0, workspaceId, candidateId),
     );
   } else if (byUrl) {
+    // Re-ingest never re-points the candidate: `source_domain`, `source_tier`
+    // and `niche` stay exactly as stored (trust is the Owner's decision).
     statements.push(
       env.DB.prepare(
         `UPDATE content_radar_candidates
             SET title = ?, summary = ?, published_at = COALESCE(?, published_at),
                 published_at_source = ?, discovered_at = ?, last_seen_at = ?,
-                timestamp_fallback = ?, niche = ?, language = ?, source_domain = ?,
-                source_tier = ?, updated_at = ?
+                timestamp_fallback = ?, language = ?, updated_at = ?
           WHERE workspace_id = ? AND id = ?`,
       ).bind(
         title,
@@ -956,10 +1124,7 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
         discoveredAt,
         now,
         publishedAt === null ? 1 : 0,
-        niche,
         language,
-        sourceDomain,
-        resolvedTier,
         now,
         workspaceId,
         candidateId,
@@ -975,8 +1140,7 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?)
          ON CONFLICT(workspace_id, canonical_url) DO UPDATE SET
            last_seen_at = excluded.last_seen_at,
-           updated_at = excluded.updated_at,
-           source_tier = excluded.source_tier`,
+           updated_at = excluded.updated_at`,
       ).bind(
         workspaceId,
         candidateId,
@@ -1007,11 +1171,14 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   const sourceIdByDomain = new Map<string, string>();
   for (const entry of registered.results ?? []) sourceIdByDomain.set(entry.domain, entry.id);
   sourceIdByDomain.set(sourceDomain, resolvedSourceId);
+  for (const entry of provenance) {
+    if (sourceIdByDomain.has(entry.domain)) continue;
+    sourceIdByDomain.set(entry.domain, await sourceIdForDomain(entry.domain));
+  }
 
   for (const entry of provenance) {
-    const entrySourceId = sourceIdByDomain.get(entry.domain) ?? sourceIdForDomain(entry.domain);
-    if (!sourceIdByDomain.has(entry.domain)) {
-      sourceIdByDomain.set(entry.domain, entrySourceId);
+    const entrySourceId = sourceIdByDomain.get(entry.domain) as string;
+    if (!(registered.results ?? []).some((row) => row.domain === entry.domain) && entry.domain !== sourceDomain) {
       statements.push(
         env.DB.prepare(
           `INSERT INTO content_radar_sources
@@ -1055,8 +1222,16 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   try {
     await env.DB.batch(statements);
   } catch (error) {
-    if (error instanceof Error && error.message.includes("UNIQUE constraint failed: content_radar_candidates")) {
+    const message = error instanceof Error ? error.message : "";
+    if (message.includes("UNIQUE constraint failed: content_radar_candidates")) {
       return ctx.fail(409, "candidate_conflict", "This cluster key or canonical URL belongs to another candidate.");
+    }
+    if (message.includes("UNIQUE constraint failed: content_radar_sources")) {
+      return ctx.fail(
+        409,
+        "source_conflict",
+        "This source id or domain is already registered in another row.",
+      );
     }
     throw error;
   }
@@ -1076,8 +1251,13 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
 
 async function scoreCandidate(req: Request, env: Env, ctx: RadarContext, id: string) {
   const body = await ctx.readJson(req);
-  requireAgent(req, ctx);
-  const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
+  const agent = requireAgent(req, ctx);
+  const workspaceId = await resolveWorkspace(
+    env,
+    ctx,
+    { kind: "agent", id: agent },
+    body.workspaceId ?? body.workspace,
+  );
 
   const row = await loadCandidate(env, workspaceId, id);
   if (!row) return ctx.fail(404, "candidate_not_found", "Unknown candidate.");
@@ -1090,24 +1270,19 @@ async function scoreCandidate(req: Request, env: Env, ctx: RadarContext, id: str
     : (Array.isArray(body.riskFlags)
         ? body.riskFlags.map((flag, index) => ctx.oneOf(flag, `riskFlags[${index}]`, RISK_FLAGS))
         : ctx.fail(400, "validation_failed", "riskFlags must be an array."));
-  const asOf = optionalTimestamp(ctx, body.asOf, "asOf") ?? ctx.nowIso();
-
-  const provenance = await loadProvenance(env, workspaceId, id);
-  const sourceIsPrimary = provenance.some(
-    (entry) => entry.relation === "primary" && entry.source_domain === row.source_domain,
-  );
-  const crossChecks = provenance
-    .filter((entry) => entry.relation === "crosscheck" && entry.source_domain !== row.source_domain)
-    .map((entry) => ({ domain: entry.source_domain, tier: entry.tier as RadarSourceTier }));
+  // The evaluation clock is always the server's. A client-supplied `asOf` is
+  // ignored (never validated, never stored), so it cannot move `ageHours`,
+  // `freshness`, or the 24 h eligibility window.
+  const { trust } = await loadTrust(env, workspaceId, row);
 
   const input: RadarScoreInput = {
     rubricVersion: "v1",
-    asOf,
-    sourceTier: row.source_tier as RadarSourceTier,
-    sourceIsPrimary,
+    asOf: ctx.nowIso(),
+    sourceTier: trust.tier,
+    sourceIsPrimary: trust.primary,
     publishedAt: row.published_at,
     discoveredAt: row.discovered_at,
-    independentCrossChecks: crossChecks,
+    independentCrossChecks: trust.crossChecks,
     relevance,
     carouselPotential,
     riskFlags: riskFlags as RadarRiskFlag[],
@@ -1151,16 +1326,22 @@ async function scoreCandidate(req: Request, env: Env, ctx: RadarContext, id: str
 
 async function createDraft(req: Request, env: Env, ctx: RadarContext, candidateId: string) {
   const body = await ctx.readJson(req);
-  const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
-  const caller = await resolveCaller(env, workspaceId, req, ctx);
-
-  const row = await loadCandidate(env, workspaceId, candidateId);
-  if (!row) return ctx.fail(404, "candidate_not_found", "Unknown candidate.");
-
-  if (caller.kind === "agent") {
+  const credential = await verifyCredential(req, env, ctx);
+  if (credential.kind === "agent") {
+    const workspaceId = await resolveWorkspace(env, ctx, credential, body.workspaceId ?? body.workspace);
+    const row = await loadCandidate(env, workspaceId, candidateId);
+    if (!row) return ctx.fail(404, "candidate_not_found", "Unknown candidate.");
     return createAutomaticDraft(env, ctx, workspaceId, row, body);
   }
-  const actor = requireOwnerCaller(caller, ctx);
+  const { workspaceId, actor } = await requireOwnerActor(
+    req,
+    env,
+    ctx,
+    credential,
+    body.workspaceId ?? body.workspace,
+  );
+  const row = await loadCandidate(env, workspaceId, candidateId);
+  if (!row) return ctx.fail(404, "candidate_not_found", "Unknown candidate.");
   return createManualDraft(env, ctx, workspaceId, row, body, actor);
 }
 
@@ -1171,9 +1352,24 @@ async function createAutomaticDraft(
   row: CandidateRow,
   body: Record<string, unknown>,
 ) {
-  if (!Object.keys(readRecordColumn(row.score_input_snapshot)).length) {
+  const storedSnapshot = readRecordColumn(row.score_input_snapshot);
+  if (!Object.keys(storedSnapshot).length) {
     return ctx.fail(409, "candidate_not_scored", "Score this candidate before requesting an automatic draft.");
   }
+  // Eligibility is re-evaluated at draft time: the discrete Hermes judgement
+  // (relevance, carousel potential, risk flags) and the cross-checks come from
+  // the stored snapshot, but the clock is fresh and trust comes from the live
+  // registry. A snapshot frozen at score time can therefore never keep a stale
+  // candidate inside the 24 h window, and an `unverified` origin stays
+  // trust-less no matter what the snapshot recorded.
+  const { trust, provenance } = await loadTrust(env, workspaceId, row);
+  const eligibilitySnapshot = {
+    ...storedSnapshot,
+    asOf: ctx.nowIso(),
+    sourceTier: trust.tier,
+    sourceIsPrimary: trust.primary,
+    independentCrossChecks: trust.crossChecks,
+  } as unknown as RadarScoreInputSnapshot;
   const candidate: RadarCandidate = {
     id: row.id,
     clusterKey: row.cluster_key,
@@ -1184,12 +1380,17 @@ async function createAutomaticDraft(
     discoveredAt: row.discovered_at,
     niche: row.niche as RadarNiche,
     sourceDomain: row.source_domain,
-    sourceTier: row.source_tier as RadarSourceTier,
+    sourceTier: trust.tier,
     status: row.status as RadarCandidateStatus,
-    score: scoreFromRow(row),
+    score: { ...scoreFromRow(row), inputSnapshot: eligibilitySnapshot },
     draftId: row.draft_id,
   };
-  const eligibility = isAutoDraftEligible(candidate);
+  let eligibility;
+  try {
+    eligibility = isAutoDraftEligible(candidate);
+  } catch {
+    return ctx.fail(409, "candidate_not_scored", "The stored score snapshot is incomplete; re-score the candidate.");
+  }
   if (!eligibility.eligible) {
     return ctx.fail(
       409,
@@ -1209,7 +1410,6 @@ async function createAutomaticDraft(
     return ctx.fail(409, "crypto_draft_cap_reached", "One automatic crypto draft already exists for today (Asia/Jakarta).");
   }
 
-  const provenance = await loadProvenance(env, workspaceId, row.id);
   const sourcesSnapshot: RadarDraftSource[] = provenance.map((entry) => ({
     name: entry.name,
     url: entry.canonical_url,
@@ -1408,8 +1608,14 @@ async function createManualDraft(
 
 async function rejectCandidate(req: Request, env: Env, ctx: RadarContext, candidateId: string) {
   const body = await ctx.readJson(req);
-  const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
-  const actor = requireOwnerCaller(await resolveCaller(env, workspaceId, req, ctx), ctx);
+  const credential = await verifyCredential(req, env, ctx);
+  const { workspaceId, actor } = await requireOwnerActor(
+    req,
+    env,
+    ctx,
+    credential,
+    body.workspaceId ?? body.workspace,
+  );
   const reason = ctx.str(body.reason, "reason", 1, 500);
 
   const row = await loadCandidate(env, workspaceId, candidateId);
@@ -1441,8 +1647,14 @@ async function rejectCandidate(req: Request, env: Env, ctx: RadarContext, candid
 
 async function patchSource(req: Request, env: Env, ctx: RadarContext, sourceId: string) {
   const body = await ctx.readJson(req);
-  const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
-  const actor = requireOwnerCaller(await resolveCaller(env, workspaceId, req, ctx), ctx);
+  const credential = await verifyCredential(req, env, ctx);
+  const { workspaceId, actor } = await requireOwnerActor(
+    req,
+    env,
+    ctx,
+    credential,
+    body.workspaceId ?? body.workspace,
+  );
 
   const current = await env.DB.prepare(
     `SELECT workspace_id, id, domain, name, tier, kind, niches, feed_url, enabled,
@@ -1537,8 +1749,13 @@ async function patchSource(req: Request, env: Env, ctx: RadarContext, sourceId: 
 
 async function createRun(req: Request, env: Env, ctx: RadarContext) {
   const body = await ctx.readJson(req);
-  requireAgent(req, ctx);
-  const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
+  const agent = requireAgent(req, ctx);
+  const workspaceId = await resolveWorkspace(
+    env,
+    ctx,
+    { kind: "agent", id: agent },
+    body.workspaceId ?? body.workspace,
+  );
   const kind = ctx.oneOf(body.kind, "kind", RUN_KINDS);
   const meta = body.meta === undefined || body.meta === null ? {} : body.meta;
   if (!isRecord(meta)) return ctx.fail(400, "validation_failed", "meta must be an object.");
@@ -1585,8 +1802,13 @@ async function createRun(req: Request, env: Env, ctx: RadarContext) {
 
 async function updateRun(req: Request, env: Env, ctx: RadarContext, runId: string) {
   const body = await ctx.readJson(req);
-  requireAgent(req, ctx);
-  const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
+  const agent = requireAgent(req, ctx);
+  const workspaceId = await resolveWorkspace(
+    env,
+    ctx,
+    { kind: "agent", id: agent },
+    body.workspaceId ?? body.workspace,
+  );
 
   const current = await env.DB.prepare(
     `SELECT id, kind, status, started_at, finished_at, heartbeat_at, fetched_count, new_count,
@@ -1677,8 +1899,13 @@ async function updateRun(req: Request, env: Env, ctx: RadarContext, runId: strin
 
 async function forceRun(req: Request, env: Env, ctx: RadarContext) {
   const body = await ctx.readJson(req);
-  requireAgent(req, ctx);
-  const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
+  const agent = requireAgent(req, ctx);
+  const workspaceId = await resolveWorkspace(
+    env,
+    ctx,
+    { kind: "agent", id: agent },
+    body.workspaceId ?? body.workspace,
+  );
   const kind = ctx.oneOf(body.kind, "kind", RUN_KINDS);
   const dryRun = body.dryRun === undefined ? false : body.dryRun === true;
   if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
@@ -1716,8 +1943,15 @@ async function forceRun(req: Request, env: Env, ctx: RadarContext) {
 
 async function acknowledgeDraft(req: Request, env: Env, ctx: RadarContext, draftId: string) {
   const body = await ctx.readJson(req);
+  const credential = await verifyCredential(req, env, ctx);
+  // The ACK exists for the Owner's browser after a successful store upsert; the
+  // collector must not be able to empty the Owner's queue by acknowledging.
+  if (credential.kind === "agent") {
+    return ctx.fail(403, "forbidden_human_only", "The radar-agent identity cannot acknowledge a draft import.");
+  }
   const workspaceId = await ctx.assertWorkspace(env, body.workspaceId ?? body.workspace);
-  await resolveCaller(env, workspaceId, req, ctx);
+  requireActorHeader(req, ctx);
+  await resolveActor(env, workspaceId, req, ctx);
 
   const current = await env.DB.prepare(
     `SELECT id, candidate_id, post_id, cluster_key, auto_date_wib, creation_kind, title, document,
