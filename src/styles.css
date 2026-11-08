@@ -10357,7 +10357,7 @@ button.folder-row { cursor: pointer; }
   background: var(--surface-2);
 }
 
-.radar-candidate-actions .btn { width: 100%; min-height: 36px; white-space: normal; }
+.radar-candidate-actions .btn { width: 100%; white-space: normal; }
 .radar-action-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 10px; }
 .radar-action-field select { width: 100%; }
 .btn-danger-subtle { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); color: var(--danger); }

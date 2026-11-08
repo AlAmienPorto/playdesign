@@ -50,3 +50,13 @@ export function classifyRadarEmptyState(input: {
   if (input.sources.length === 0 && input.runs.length === 0 && input.drafts.length === 0) return 'first-run';
   return 'quiet';
 }
+
+export function syncCandidateDetail(
+  current: RadarCandidateRecord | null,
+  nextCandidates: RadarCandidateRecord[],
+): RadarCandidateRecord | null {
+  if (!current) return null;
+  const found = nextCandidates.find((candidate) => candidate.id === current.id);
+  return found ? { ...found, sources: current.sources } : null;
+}
+

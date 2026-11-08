@@ -75,3 +75,43 @@ test('breakdown skor memakai maksimum rubrik v1 yang berjumlah 100', async () =>
   assert.deepEqual(maxima, [30, 25, 15, 15, 10, 5]);
   assert.equal(maxima.reduce((total, value) => total + value, 0), 100);
 });
+
+test('setDetail mempertahankan sources provenance saat kandidat dimuat ulang', async () => {
+  const page = await read('src/pages/ContentRadar.tsx');
+
+  assert.match(page, /sources:\s*current\.sources/);
+});
+
+test('pencarian kandidat di-debounce dan memisahkan fetch kandidat dari metadata statis', async () => {
+  const page = await read('src/pages/ContentRadar.tsx');
+
+  assert.match(page, /debouncedQuery/);
+  assert.match(page, /setTimeout\([\s\S]*?300\)/);
+  assert.match(page, /const loadCandidates = useCallback/);
+  // Pastikan loadCandidates hanya memanggil fetchRadarCandidates, tidak fetchOffice / fetchRadarSources / runs / drafts
+  const loadCandidatesBody = page.slice(page.indexOf('const loadCandidates = useCallback'), page.indexOf('const load = useCallback'));
+  assert.match(loadCandidatesBody, /fetchRadarCandidates/);
+  assert.doesNotMatch(loadCandidatesBody, /fetchOffice/);
+  assert.doesNotMatch(loadCandidatesBody, /fetchRadarSources/);
+  assert.doesNotMatch(loadCandidatesBody, /fetchRadarRuns/);
+  assert.doesNotMatch(loadCandidatesBody, /fetchRadarDrafts/);
+});
+
+test('aksi draft dan pilihan niche mendeteksi status drafted walau draftId kosong', async () => {
+  const page = await read('src/pages/ContentRadar.tsx');
+
+  assert.match(page, /candidate\.status === 'drafted'/);
+  assert.match(page, /isDrafted/);
+});
+
+test('styles.css tidak memiliki konflik min-height 36px pada aksi kandidat', async () => {
+  const styles = await read('src/styles.css');
+
+  assert.doesNotMatch(styles, /\.radar-candidate-actions \.btn[\s\S]*?min-height:\s*36px/);
+});
+
+test('dateTime menjaga parsing aman dari RangeError nilai tanggal tidak valid', async () => {
+  const page = await read('src/pages/ContentRadar.tsx');
+
+  assert.match(page, /Number\.isFinite\(Date\.parse\(value\)\)/);
+});

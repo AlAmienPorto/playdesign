@@ -14,6 +14,7 @@ import {
   buildRadarSummary,
   classifyRadarEmptyState,
   isRadarRunStale,
+  syncCandidateDetail,
 } from './content-radar-dashboard';
 
 const response = (body: unknown) =>
@@ -127,4 +128,31 @@ test('empty state membedakan first-run, filter kosong, dan window sepi', () => {
   assert.equal(classifyRadarEmptyState({ candidates: [], sources: [], runs: [], drafts: [], hasFilters: false }), 'first-run');
   assert.equal(classifyRadarEmptyState({ candidates: [], sources: [{ id: 's' }], runs: [], drafts: [], hasFilters: true }), 'filtered');
   assert.equal(classifyRadarEmptyState({ candidates: [], sources: [{ id: 's' }], runs: [], drafts: [], hasFilters: false }), 'quiet');
+});
+
+test('syncCandidateDetail mempertahankan array sources pada kandidat yang aktif saat list direfresh', () => {
+  const current = {
+    id: 'c-1',
+    title: 'Kandidat 1',
+    score: { total: 80, components: {} },
+    sources: [
+      { id: 's-1', title: 'Sumber 1', url: 'https://example.com', relation: 'primary', tier: 'A' },
+    ],
+  };
+  const nextCandidates = [
+    { id: 'c-1', title: 'Kandidat 1 (Updated)', score: { total: 85, components: {} } },
+    { id: 'c-2', title: 'Kandidat 2', score: { total: 70, components: {} } },
+  ];
+
+  const synced = syncCandidateDetail(current, nextCandidates);
+  assert.equal(synced?.id, 'c-1');
+  assert.equal(synced?.title, 'Kandidat 1 (Updated)');
+  assert.equal(synced?.score.total, 85);
+  assert.equal(synced?.sources?.length, 1);
+  assert.equal(synced?.sources?.[0]?.id, 's-1');
+
+  // Jika kandidat tidak ditemukan di nextCandidates, kembalikan null
+  assert.equal(syncCandidateDetail(current, [{ id: 'c-3' }]), null);
+  // Jika current null, kembalikan null
+  assert.equal(syncCandidateDetail(null, nextCandidates), null);
 });

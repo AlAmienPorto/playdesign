@@ -34,6 +34,7 @@ import {
   buildRadarSummary,
   classifyRadarEmptyState,
   isRadarRunStale,
+  syncCandidateDetail,
 } from '../lib/content-radar-dashboard';
 import {
   AutoBadge,
@@ -76,13 +77,15 @@ type Filters = {
 const INITIAL_FILTERS: Filters = { query: '', niche: '', status: '', tier: '', minScore: '50' };
 
 const dateTime = (value: string | null | undefined) => {
-  if (!value) return 'Belum tersedia';
+  if (!value || !Number.isFinite(Date.parse(value))) return 'Belum tersedia';
   return new Intl.DateTimeFormat('id-ID', {
     dateStyle: 'medium',
     timeStyle: 'short',
     timeZone: 'Asia/Jakarta',
   }).format(new Date(value));
 };
+
+const safeHttpUrl = (url?: string | null) => (url && /^https?:\/\//i.test(url) ? url : '#');
 
 const statusTone = (status: RadarCandidateStatus) => {
   if (status === 'qualified' || status === 'drafted') return 'success' as const;
@@ -101,6 +104,7 @@ export function ContentRadarPage() {
   const workspaceId = db.workspaces.find((workspace) => workspace.active)?.id ?? db.workspaces[0]?.id ?? '';
   const [view, setView] = useState<RadarView>('candidates');
   const [filters, setFilters] = useState<Filters>(INITIAL_FILTERS);
+  const [debouncedQuery, setDebouncedQuery] = useState(filters.query);
   const [candidates, setCandidates] = useState<RadarCandidateRecord[]>([]);
   const [summaryCandidates, setSummaryCandidates] = useState<RadarCandidateRecord[]>([]);
   const [sources, setSources] = useState<RadarSourceRecord[]>([]);
@@ -116,6 +120,19 @@ export function ContentRadarPage() {
   const [rejectReason, setRejectReason] = useState('');
   const initializedRef = useRef(false);
   const requestRef = useRef(0);
+  const isInitialMount = useRef(true);
+  const lastWorkspaceRef = useRef(workspaceId);
+
+  useEffect(() => {
+    if (!filters.query) {
+      setDebouncedQuery('');
+      return;
+    }
+    const timer = setTimeout(() => {
+      setDebouncedQuery(filters.query);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [filters.query]);
 
   const hasFilters =
     filters.query.trim() !== '' ||
@@ -123,6 +140,35 @@ export function ContentRadarPage() {
     filters.status !== '' ||
     filters.tier !== '' ||
     filters.minScore !== INITIAL_FILTERS.minScore;
+
+  const loadCandidates = useCallback(async () => {
+    const requestId = ++requestRef.current;
+    if (!workspaceId) return;
+    try {
+      const nextCandidates = await fetchRadarCandidates({
+        workspaceId,
+        query: debouncedQuery.trim() || undefined,
+        niche: filters.niche || undefined,
+        status: filters.status || undefined,
+        tier: filters.tier || undefined,
+        minScore: Number(filters.minScore),
+        windowHours: 24,
+        limit: 100,
+      });
+      if (requestId !== requestRef.current) return;
+      setError('');
+      setCandidates(nextCandidates);
+      setDetail((current) => {
+        if (!current) return null;
+        const found = nextCandidates.find((c) => c.id === current.id);
+        return found ? { ...found, sources: current.sources } : null;
+      });
+    } catch (nextError) {
+      if (requestId === requestRef.current) {
+        setError(nextError instanceof Error ? nextError.message : 'Permintaan kandidat Radar gagal.');
+      }
+    }
+  }, [debouncedQuery, filters.minScore, filters.niche, filters.status, filters.tier, workspaceId]);
 
   const load = useCallback(async () => {
     const requestId = ++requestRef.current;
@@ -138,7 +184,7 @@ export function ContentRadarPage() {
         fetchOffice(workspaceId),
         fetchRadarCandidates({
           workspaceId,
-          query: filters.query.trim() || undefined,
+          query: debouncedQuery.trim() || undefined,
           niche: filters.niche || undefined,
           status: filters.status || undefined,
           tier: filters.tier || undefined,
@@ -158,9 +204,11 @@ export function ContentRadarPage() {
       setSources(nextSources);
       setRuns(nextRuns);
       setDrafts(nextDrafts);
-      setDetail((current) =>
-        current ? nextCandidates.find((candidate) => candidate.id === current.id) ?? null : null,
-      );
+      setDetail((current) => {
+        if (!current) return null;
+        const found = nextCandidates.find((c) => c.id === current.id);
+        return found ? { ...found, sources: current.sources } : null;
+      });
     } catch (nextError) {
       if (requestId === requestRef.current) {
         setError(nextError instanceof Error ? nextError.message : 'Permintaan Content Radar gagal.');
@@ -171,11 +219,23 @@ export function ContentRadarPage() {
         setLoading(false);
       }
     }
-  }, [filters, workspaceId]);
+  }, [debouncedQuery, filters.minScore, filters.niche, filters.status, filters.tier, workspaceId]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    if (lastWorkspaceRef.current !== workspaceId) {
+      lastWorkspaceRef.current = workspaceId;
+      return;
+    }
+    void loadCandidates();
+  }, [loadCandidates, workspaceId]);
 
   const summary = useMemo(
     () => buildRadarSummary({ candidates: summaryCandidates, sources, drafts }),
@@ -186,7 +246,10 @@ export function ContentRadarPage() {
   const staleCollector = isRadarRunStale(collector);
   const ownerReady = actor?.role === 'owner';
 
-  const resetFilters = () => setFilters(INITIAL_FILTERS);
+  const resetFilters = () => {
+    setFilters(INITIAL_FILTERS);
+    setDebouncedQuery('');
+  };
 
   const withOwner = async (id: string, action: (owner: { workspaceId: string; actorId: string }) => Promise<unknown>, success: string) => {
     if (!actor || actor.role !== 'owner') {
@@ -473,74 +536,77 @@ function CandidateView({
         </Card>
       ) : (
         <div className="radar-candidate-list" aria-label="Kandidat editorial">
-          {candidates.map((candidate, index) => (
-            <article className={`radar-candidate ${index === 0 ? 'is-priority' : ''}`} key={candidate.id}>
-              <div className="radar-candidate-main">
-                <div className="radar-candidate-heading">
-                  <div className={`radar-score ${scoreTone(candidate.score.total)}`} aria-label={`Skor total ${candidate.score.total} dari 100`}>
-                    <strong>{candidate.score.total}</strong><span>/100</span>
-                  </div>
-                  <div>
-                    <div className="radar-candidate-meta">
-                      <Badge tone={statusTone(candidate.status)}>{candidate.status}</Badge>
-                      <Badge tone="neutral">Tier {candidate.sourceTier}</Badge>
-                      <span>{candidate.niche}</span>
-                      <span>{dateTime(candidate.publishedAt ?? candidate.discoveredAt)}</span>
+          {candidates.map((candidate, index) => {
+            const isDrafted = Boolean(candidate.draftId) || candidate.status === 'drafted';
+            return (
+              <article className={`radar-candidate ${index === 0 ? 'is-priority' : ''}`} key={candidate.id}>
+                <div className="radar-candidate-main">
+                  <div className="radar-candidate-heading">
+                    <div className={`radar-score ${scoreTone(candidate.score.total)}`} aria-label={`Skor total ${candidate.score.total} dari 100`}>
+                      <strong>{candidate.score.total}</strong><span>/100</span>
                     </div>
-                    <h2>{candidate.title}</h2>
-                    <p>{candidate.summary}</p>
-                  </div>
-                </div>
-                <div className="radar-score-grid" aria-label="Rincian skor">
-                  {SCORE_PARTS.map((part) => (
-                    <div key={part.key}>
-                      <span>{part.label}</span>
-                      <strong>{candidate.score.components[part.key]} / {part.max}</strong>
+                    <div>
+                      <div className="radar-candidate-meta">
+                        <Badge tone={statusTone(candidate.status)}>{candidate.status}</Badge>
+                        <Badge tone="neutral">Tier {candidate.sourceTier}</Badge>
+                        <span>{candidate.niche}</span>
+                        <span>{dateTime(candidate.publishedAt ?? candidate.discoveredAt)}</span>
+                      </div>
+                      <h2>{candidate.title}</h2>
+                      <p>{candidate.summary}</p>
                     </div>
-                  ))}
-                </div>
-                <div className="radar-evidence-line">
-                  <span><strong>{candidate.sourceDomain}</strong> sebagai sumber utama</span>
-                  <span>{candidate.score.inputSnapshot.independentCrossChecks?.length ?? 0} cross-check independen</span>
-                  {candidate.timestampFallback && <span className="is-risk">Waktu publikasi memakai fallback</span>}
-                </div>
-                <p className="radar-score-reason"><strong>Alasan skor:</strong> {candidate.scoreReason}</p>
-                {candidate.riskFlags.length > 0 && (
-                  <div className="radar-risks" aria-label="Risk flags">
-                    {candidate.riskFlags.map((risk) => <Badge key={risk} tone="danger">{risk}</Badge>)}
                   </div>
-                )}
-                {detail?.id === candidate.id && (
-                  <CandidateProvenance candidate={detail} />
-                )}
-              </div>
-              <div className="radar-candidate-actions">
-                <a href={candidate.canonicalUrl} target="_blank" rel="noreferrer" className="btn btn-ghost">
-                  Buka sumber <ArrowUpRight size={14} aria-hidden="true" />
-                </a>
-                <button type="button" className="btn btn-ghost" onClick={() => void onDetail(candidate)} disabled={detailLoading === candidate.id}>
-                  {detailLoading === candidate.id ? 'Memuat bukti' : detail?.id === candidate.id ? 'Tutup bukti' : 'Lihat provenance'}
-                </button>
-                <label className="radar-action-field">
-                  <span>Niche kandidat</span>
-                  <select
-                    aria-label={`Niche untuk ${candidate.title}`}
-                    value={candidate.niche}
-                    onChange={(event) => onNiche(candidate, event.target.value as RadarNiche)}
-                    disabled={!ownerReady || Boolean(candidate.draftId) || busyId === candidate.id}
-                  >
-                    {NICHES.map((niche) => <option key={niche} value={niche}>{niche}</option>)}
-                  </select>
-                </label>
-                <button type="button" className="btn btn-primary" onClick={() => onDraft(candidate)} disabled={!ownerReady || Boolean(candidate.draftId) || busyId === candidate.id || candidate.status === 'rejected'}>
-                  {candidate.draftId ? 'Draft sudah dibuat' : busyId === candidate.id ? 'Menyimpan' : 'Buat draft'}
-                </button>
-                <button type="button" className="btn btn-danger-subtle" onClick={() => onReject(candidate)} disabled={!ownerReady || Boolean(candidate.draftId) || busyId === candidate.id || candidate.status === 'rejected'}>
-                  Tolak kandidat
-                </button>
-              </div>
-            </article>
-          ))}
+                  <div className="radar-score-grid" aria-label="Rincian skor">
+                    {SCORE_PARTS.map((part) => (
+                      <div key={part.key}>
+                        <span>{part.label}</span>
+                        <strong>{candidate.score.components[part.key]} / {part.max}</strong>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="radar-evidence-line">
+                    <span><strong>{candidate.sourceDomain}</strong> sebagai sumber utama</span>
+                    <span>{candidate.score.inputSnapshot.independentCrossChecks?.length ?? 0} cross-check independen</span>
+                    {candidate.timestampFallback && <span className="is-risk">Waktu publikasi memakai fallback</span>}
+                  </div>
+                  <p className="radar-score-reason"><strong>Alasan skor:</strong> {candidate.scoreReason}</p>
+                  {candidate.riskFlags.length > 0 && (
+                    <div className="radar-risks" aria-label="Risk flags">
+                      {candidate.riskFlags.map((risk) => <Badge key={risk} tone="danger">{risk}</Badge>)}
+                    </div>
+                  )}
+                  {detail?.id === candidate.id && (
+                    <CandidateProvenance candidate={detail} />
+                  )}
+                </div>
+                <div className="radar-candidate-actions">
+                  <a href={safeHttpUrl(candidate.canonicalUrl)} target="_blank" rel="noreferrer" className="btn btn-ghost">
+                    Buka sumber <ArrowUpRight size={14} aria-hidden="true" />
+                  </a>
+                  <button type="button" className="btn btn-ghost" onClick={() => void onDetail(candidate)} disabled={detailLoading === candidate.id}>
+                    {detailLoading === candidate.id ? 'Memuat bukti' : detail?.id === candidate.id ? 'Tutup bukti' : 'Lihat provenance'}
+                  </button>
+                  <label className="radar-action-field">
+                    <span>Niche kandidat</span>
+                    <select
+                      aria-label={`Niche untuk ${candidate.title}`}
+                      value={candidate.niche}
+                      onChange={(event) => onNiche(candidate, event.target.value as RadarNiche)}
+                      disabled={!ownerReady || isDrafted || busyId === candidate.id}
+                    >
+                      {NICHES.map((niche) => <option key={niche} value={niche}>{niche}</option>)}
+                    </select>
+                  </label>
+                  <button type="button" className="btn btn-primary" onClick={() => onDraft(candidate)} disabled={!ownerReady || isDrafted || busyId === candidate.id || candidate.status === 'rejected'}>
+                    {isDrafted ? 'Draft sudah dibuat' : busyId === candidate.id ? 'Menyimpan' : 'Buat draft'}
+                  </button>
+                  <button type="button" className="btn btn-danger-subtle" onClick={() => onReject(candidate)} disabled={!ownerReady || isDrafted || busyId === candidate.id || candidate.status === 'rejected'}>
+                    Tolak kandidat
+                  </button>
+                </div>
+              </article>
+            );
+          })}
         </div>
       )}
     </>
@@ -559,7 +625,7 @@ function CandidateProvenance({ candidate }: { candidate: RadarCandidateRecord })
                 <Badge tone={source.relation === 'primary' ? 'info' : 'neutral'}>{source.relation}</Badge>
                 <Badge tone="neutral">Tier {source.tier}</Badge>
               </div>
-              <a href={source.url} target="_blank" rel="noreferrer">{source.title || source.domain}<ArrowUpRight size={13} aria-hidden="true" /></a>
+              <a href={safeHttpUrl(source.url)} target="_blank" rel="noreferrer">{source.title || source.domain}<ArrowUpRight size={13} aria-hidden="true" /></a>
               <span>{source.name} · {source.domain}</span>
               {source.excerpt && <p>{source.excerpt}</p>}
             </div>
@@ -601,7 +667,7 @@ function SourceRegistry({
           <tbody>
             {sources.map((source) => (
               <tr key={source.id}>
-                <td><strong>{source.name}</strong><span>{source.domain}</span>{source.feedUrl && <a href={source.feedUrl} target="_blank" rel="noreferrer">Feed <ArrowUpRight size={12} aria-hidden="true" /></a>}</td>
+                <td><strong>{source.name}</strong><span>{source.domain}</span>{source.feedUrl && <a href={safeHttpUrl(source.feedUrl)} target="_blank" rel="noreferrer">Feed <ArrowUpRight size={12} aria-hidden="true" /></a>}</td>
                 <td>
                   <select aria-label={`Tier ${source.name}`} value={source.tier} disabled={!ownerReady || busyId === source.id} onChange={(event) => onUpdate(source, { tier: event.target.value as RadarSourceTier })}>
                     {TIERS.map((tier) => <option key={tier} value={tier} disabled={source.kind === 'discovered' && tier !== 'unverified'}>{tier}</option>)}
