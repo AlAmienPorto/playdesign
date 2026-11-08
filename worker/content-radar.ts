@@ -513,6 +513,11 @@ async function verifyCredential(req: Request, env: Env, ctx: RadarContext): Prom
  * Step 2: resolve the workspace. The machine identity is bound to
  * `RADAR_WORKSPACE_ID` and fails closed when that binding is missing, so one
  * leaked collector secret cannot read or write another workspace's Radar data.
+ *
+ * The requested id is compared against the binding *before* `assertWorkspace`,
+ * so a bound machine gets the same `403 forbidden_workspace` whether the
+ * workspace it names exists or not — the machine cannot enumerate workspaces
+ * with a valid secret either.
  */
 async function resolveWorkspace(
   env: Env,
@@ -529,7 +534,11 @@ async function resolveWorkspace(
       "RADAR_WORKSPACE_ID is not configured. Bind the machine identity to one workspace before serving ingest.",
     );
   }
-  const requested = typeof raw === "string" && raw.trim() !== "" ? raw : bound;
+  const trimmed = typeof raw === "string" ? raw.trim() : raw;
+  const requested = trimmed === undefined || trimmed === null || trimmed === "" ? bound : trimmed;
+  if (typeof requested === "string" && requested !== bound) {
+    return ctx.fail(403, "forbidden_workspace", "The radar-agent identity is bound to another workspace.");
+  }
   const workspaceId = await ctx.assertWorkspace(env, requested);
   if (workspaceId !== bound) {
     return ctx.fail(403, "forbidden_workspace", "The radar-agent identity is bound to another workspace.");
@@ -961,7 +970,13 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
     PUBLISHED_AT_SOURCES,
   );
   const discoveredAt = optionalTimestamp(ctx, input.discoveredAt, "candidate.discoveredAt") ?? ctx.nowIso();
-  const niche = ctx.oneOf(input.niche, "candidate.niche", NICHES);
+  // `niche` is optional on re-ingest: a collector that omits it (or whose
+  // classifier is silent for one run) must not turn every routine refresh of a
+  // known candidate into an error. Only an explicit value can conflict with the
+  // stored classification, and a brand-new candidate still has to declare one.
+  const declaredNiche = input.niche === undefined || input.niche === null || input.niche === ""
+    ? null
+    : ctx.oneOf(input.niche, "candidate.niche", NICHES);
   const language = ctx.optionalStr(input.language, "candidate.language", 16) ?? "id";
   const clusterKey = ctx.optionalStr(input.clusterKey, "candidate.clusterKey", 200) ?? canonical;
 
@@ -987,11 +1002,6 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   const sourceName = ctx.optionalStr(sourceInput?.name, "source.name", 200) ?? sourceDomain;
   const feedUrl = ctx.optionalStr(sourceInput?.feedUrl, "source.feedUrl", 500);
   if (feedUrl !== undefined) canonicalUrl(ctx, feedUrl, "source.feedUrl");
-  const sourceNiches = sourceInput?.niches === undefined
-    ? [niche]
-    : (Array.isArray(sourceInput.niches)
-        ? sourceInput.niches.map((value, index) => ctx.oneOf(value, `source.niches[${index}]`, NICHES))
-        : ctx.fail(400, "validation_failed", "source.niches must be an array."));
 
   const provenanceInput = body.provenance === undefined || body.provenance === null ? [] : body.provenance;
   if (!Array.isArray(provenanceInput)) {
@@ -1040,6 +1050,65 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   const resolvedTier = (existingSource?.tier ?? "unverified") as RadarSourceTier;
   const now = ctx.nowIso();
 
+  const byUrl = await env.DB.prepare(
+    `SELECT id, cluster_key, niche, draft_id FROM content_radar_candidates
+      WHERE workspace_id = ? AND canonical_url = ?`,
+  )
+    .bind(workspaceId, canonical)
+    .first<CandidateRef>();
+  const byCluster = byUrl
+    ? null
+    : await env.DB.prepare(
+        `SELECT id, cluster_key, niche, draft_id FROM content_radar_candidates
+          WHERE workspace_id = ? AND cluster_key = ?`,
+      )
+        .bind(workspaceId, clusterKey)
+        .first<CandidateRef>();
+
+  const stored = byUrl ?? byCluster;
+  // The stored row owns the classification; `declaredNiche` can only describe a
+  // candidate that does not exist yet.
+  const niche = stored ? stored.niche : declaredNiche;
+  if (niche === null) {
+    return ctx.fail(400, "validation_failed", "candidate.niche is required for a new candidate.");
+  }
+
+  // The stored niche is authoritative once a candidate exists: a drifting
+  // classifier must not be able to re-label a candidate, because the crypto
+  // quota is counted through `candidates.niche`. An explicit differing value is
+  // therefore never written. When the candidate (or its cluster) already owns a
+  // draft the refresh still has to go through — the collector has no way to fix
+  // the payload and a 409 would leave the candidate stale — so the request
+  // succeeds with `nicheLocked: true` and the stored niche in the response. An
+  // undrafted candidate is refused instead of silently ignoring the value, so a
+  // genuine re-classification is never mistaken for a successful update.
+  let nicheLocked = false;
+  if (stored && declaredNiche !== null && declaredNiche !== stored.niche) {
+    const clusterDraft = stored.draft_id
+      ? true
+      : Boolean(
+          await env.DB.prepare(
+            `SELECT 1 AS present FROM content_radar_drafts WHERE workspace_id = ? AND cluster_key = ? LIMIT 1`,
+          )
+            .bind(workspaceId, stored.cluster_key)
+            .first<{ present: number }>(),
+        );
+    if (!clusterDraft) {
+      return ctx.fail(
+        409,
+        "niche_locked",
+        "This candidate is already stored under another niche; recreate it to reclassify.",
+      );
+    }
+    nicheLocked = true;
+  }
+
+  const sourceNiches = sourceInput?.niches === undefined
+    ? [niche]
+    : (Array.isArray(sourceInput.niches)
+        ? sourceInput.niches.map((value, index) => ctx.oneOf(value, `source.niches[${index}]`, NICHES))
+        : ctx.fail(400, "validation_failed", "source.niches must be an array."));
+
   const statements: D1PreparedStatement[] = [];
   if (!existingSource) {
     statements.push(
@@ -1060,39 +1129,6 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
         now,
       ),
     );
-  }
-
-  const byUrl = await env.DB.prepare(
-    `SELECT id, cluster_key, niche, draft_id FROM content_radar_candidates
-      WHERE workspace_id = ? AND canonical_url = ?`,
-  )
-    .bind(workspaceId, canonical)
-    .first<CandidateRef>();
-  const byCluster = byUrl
-    ? null
-    : await env.DB.prepare(
-        `SELECT id, cluster_key, niche, draft_id FROM content_radar_candidates
-          WHERE workspace_id = ? AND cluster_key = ?`,
-      )
-        .bind(workspaceId, clusterKey)
-        .first<CandidateRef>();
-
-  const stored = byUrl ?? byCluster;
-  if (stored && stored.niche !== niche) {
-    const clusterDraft = stored.draft_id
-      ? { present: 1 }
-      : await env.DB.prepare(
-          `SELECT 1 AS present FROM content_radar_drafts WHERE workspace_id = ? AND cluster_key = ? LIMIT 1`,
-        )
-          .bind(workspaceId, stored.cluster_key)
-          .first<{ present: number }>();
-    if (stored.draft_id || clusterDraft) {
-      return ctx.fail(
-        409,
-        "niche_locked",
-        "This candidate already produced a draft, so its niche can no longer change.",
-      );
-    }
   }
 
   const candidateId = byUrl?.id ?? byCluster?.id ?? ctx.uid("radcand");
@@ -1242,6 +1278,8 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
       candidateId,
       created,
       clustered: byCluster !== null,
+      niche,
+      nicheLocked,
       provenance: provenance.length,
       source: { id: resolvedSourceId, domain: sourceDomain, tier: resolvedTier },
     },
@@ -1668,6 +1706,10 @@ async function patchSource(req: Request, env: Env, ctx: RadarContext, sourceId: 
   const tier = body.tier === undefined || body.tier === null
     ? current.tier
     : ctx.oneOf(body.tier, "tier", SOURCE_TIERS);
+  // `kind` is Owner-correctable: ingest always files a new domain as
+  // `discovered`, so an official/regulator feed needs this route to be labelled
+  // truthfully. It travels in the same UPDATE as `tier`, which keeps the Tier D
+  // `requires_crosscheck = 1` coupling (computed below) atomic with the relabel.
   const kind = body.kind === undefined || body.kind === null
     ? current.kind
     : ctx.oneOf(body.kind, "kind", SOURCE_KINDS);
