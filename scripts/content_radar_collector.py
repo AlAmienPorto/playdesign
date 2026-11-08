@@ -8,6 +8,7 @@ import datetime as dt
 import email.utils
 import hashlib
 import html
+import http.client
 import ipaddress
 import json
 import os
@@ -57,6 +58,72 @@ class _NoFeedRedirectHandler(urllib.request.HTTPRedirectHandler):
         newurl: str,
     ) -> None:
         return None
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args: Any, pinned_ips: list[str] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._pinned_ips = pinned_ips
+        if pinned_ips:
+            def _pinned_create_connection(
+                address: tuple[str, int],
+                timeout: float = socket._GLOBAL_DEFAULT_TIMEOUT,  # type: ignore[assignment]
+                source_address: tuple[str, int] | None = None,
+            ) -> socket.socket:
+                port = address[1]
+                exceptions: list[OSError] = []
+                for ip in pinned_ips:
+                    try:
+                        return socket.create_connection((ip, port), timeout, source_address)
+                    except OSError as exc:
+                        exceptions.append(exc)
+                if exceptions:
+                    raise exceptions[0]
+                raise OSError("no pinned address available")
+
+            self._create_connection = _pinned_create_connection
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, pinned_ips: list[str] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._pinned_ips = pinned_ips
+        if pinned_ips:
+            def _pinned_create_connection(
+                address: tuple[str, int],
+                timeout: float = socket._GLOBAL_DEFAULT_TIMEOUT,  # type: ignore[assignment]
+                source_address: tuple[str, int] | None = None,
+            ) -> socket.socket:
+                port = address[1]
+                exceptions: list[OSError] = []
+                for ip in pinned_ips:
+                    try:
+                        return socket.create_connection((ip, port), timeout, source_address)
+                    except OSError as exc:
+                        exceptions.append(exc)
+                if exceptions:
+                    raise exceptions[0]
+                raise OSError("no pinned address available")
+
+            self._create_connection = _pinned_create_connection
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req: urllib.request.Request) -> Any:
+        pinned_ips = getattr(req, "_pinned_ips", None)
+        return self.do_open(_PinnedHTTPConnection, req, pinned_ips=pinned_ips)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req: urllib.request.Request) -> Any:
+        pinned_ips = getattr(req, "_pinned_ips", None)
+        context = getattr(self, "_context", None)
+        return self.do_open(
+            _PinnedHTTPSConnection,
+            req,
+            context=context,
+            pinned_ips=pinned_ips,
+        )
 
 
 @dataclass(frozen=True)
@@ -277,9 +344,7 @@ def _validate_feed_destination(
     *,
     allow_private: bool,
     resolver: Callable[..., Any],
-) -> None:
-    if allow_private:
-        return
+) -> list[str]:
     parsed = urllib.parse.urlsplit(target)
     host = parsed.hostname
     if host is None:
@@ -291,6 +356,7 @@ def _validate_feed_destination(
         raise FeedError(f"feed DNS error: {type(error).__name__}") from error
     if not addresses:
         raise FeedError("feed DNS returned no addresses")
+    validated_ips: list[str] = []
     for address in addresses:
         socket_address = address[4]
         if not isinstance(socket_address, tuple) or not socket_address:
@@ -299,8 +365,32 @@ def _validate_feed_destination(
             ip = ipaddress.ip_address(str(socket_address[0]))
         except ValueError as error:
             raise FeedError("feed DNS returned an invalid address") from error
-        if not ip.is_global:
+        mapped = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) else None
+        if ip.is_multicast or (mapped is not None and mapped.is_multicast):
             raise FeedError(f"feed destination resolved to disallowed address {ip}")
+        if not allow_private:
+            disallowed = (
+                not ip.is_global
+                or ip.is_loopback
+                or ip.is_private
+                or ip.is_link_local
+                or ip.is_unspecified
+                or ip.is_reserved
+                or getattr(ip, "is_site_local", False)
+            )
+            if not disallowed and mapped is not None:
+                disallowed = (
+                    not mapped.is_global
+                    or mapped.is_loopback
+                    or mapped.is_private
+                    or mapped.is_link_local
+                    or mapped.is_unspecified
+                    or mapped.is_reserved
+                )
+            if disallowed:
+                raise FeedError(f"feed destination resolved to disallowed address {ip}")
+        validated_ips.append(str(socket_address[0]))
+    return validated_ips
 
 
 def fetch_feed(
@@ -315,11 +405,15 @@ def fetch_feed(
     if not isinstance(max_redirects, int) or isinstance(max_redirects, bool) or max_redirects < 0:
         raise ValueError("max_redirects must be a non-negative integer")
     target = canonical_url(url)
-    opener = urllib.request.build_opener(_NoFeedRedirectHandler())
+    opener = urllib.request.build_opener(
+        _NoFeedRedirectHandler(),
+        _PinnedHTTPHandler(),
+        _PinnedHTTPSHandler(),
+    )
     redirects = 0
     redirect_codes = {301, 302, 303, 307, 308}
     while True:
-        _validate_feed_destination(target, allow_private=allow_private, resolver=resolver)
+        validated_ips = _validate_feed_destination(target, allow_private=allow_private, resolver=resolver)
         request = urllib.request.Request(
             target,
             headers={
@@ -327,6 +421,7 @@ def fetch_feed(
                 "User-Agent": "PlayDesign-Content-Radar/1.0",
             },
         )
+        request._pinned_ips = validated_ips  # type: ignore[attr-defined]
         try:
             with opener.open(request, timeout=timeout) as response:
                 content_type = response.headers.get("Content-Type", "")

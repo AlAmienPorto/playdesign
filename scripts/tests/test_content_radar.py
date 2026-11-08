@@ -15,6 +15,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -263,7 +264,47 @@ class CollectorTests(unittest.TestCase):
             with self.assertRaisesRegex(FeedError, "timed out"):
                 fetch_feed(f"{base}/slow", timeout=0.03, max_bytes=1024, allow_private=True)
 
-    def test_collector_rejects_redirect_to_loopback(self) -> None:
+    def test_collector_rejects_multicast_and_disallowed_destinations(self) -> None:
+        for multicast in ("http://224.0.0.1/rss", "http://[ff02::1]/rss"):
+            with self.subTest(multicast=multicast):
+                with self.assertRaisesRegex(FeedError, "disallowed address"):
+                    fetch_feed(multicast, timeout=1, max_bytes=2048)
+                with self.assertRaisesRegex(FeedError, "disallowed address"):
+                    fetch_feed(multicast, timeout=1, max_bytes=2048, allow_private=True)
+
+        for disallowed in (
+            "http://127.0.0.1/rss",
+            "http://[::1]/rss",
+            "http://10.0.0.1/rss",
+            "http://192.168.1.1/rss",
+            "http://169.254.1.1/rss",
+            "http://0.0.0.0/rss",
+            "http://240.0.0.1/rss",
+        ):
+            with self.subTest(disallowed=disallowed):
+                with self.assertRaisesRegex(FeedError, "disallowed address"):
+                    fetch_feed(disallowed, timeout=1, max_bytes=2048)
+
+    def test_collector_rejects_multicast_redirect(self) -> None:
+        class RedirectHandler(BaseHTTPRequestHandler):
+            destination = ""
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", type(self).destination)
+                self.end_headers()
+
+        for target in ("http://224.0.0.1/rss", "http://[ff02::1]/rss"):
+            with self.subTest(target=target):
+                RedirectHandler.destination = target
+                with handler_server(RedirectHandler) as redirect:
+                    with self.assertRaisesRegex(FeedError, "disallowed address"):
+                        fetch_feed(f"{redirect}/start", timeout=1, max_bytes=2048, allow_private=True)
+
+    def test_collector_dials_validated_address_and_preserves_host_header(self) -> None:
         class RedirectHandler(BaseHTTPRequestHandler):
             destination = ""
 
@@ -276,47 +317,36 @@ class CollectorTests(unittest.TestCase):
                 self.end_headers()
 
         with fixture_server() as destination:
-            RedirectHandler.destination = f"{destination}/rss"
+            dest_port = int(destination.split(":")[-1])
+            RedirectHandler.destination = f"http://destination.radar.test:{dest_port}/rss"
             with handler_server(RedirectHandler) as redirect:
-                initial = redirect.replace("127.0.0.1", "localhost")
+                redir_port = int(redirect.split(":")[-1])
+                initial = f"http://initial.radar.test:{redir_port}/start"
 
-                def resolver(host: str, port: int, *args: object, **kwargs: object) -> list[tuple[object, ...]]:
-                    if host == "localhost":
-                        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+                def resolver(host: str, port: int, *args: Any, **kwargs: Any) -> Any:
+                    if host in ("initial.radar.test", "destination.radar.test"):
+                        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
                     return socket.getaddrinfo(host, port, *args, **kwargs)
 
-                with self.assertRaisesRegex(FeedError, "disallowed address"):
-                    fetch_feed(initial, timeout=1, max_bytes=2048, resolver=resolver)
+                dialed: list[tuple[object, ...]] = []
+                original_create_connection = socket.create_connection
 
-    def test_collector_allows_validated_cross_host_redirect(self) -> None:
-        class RedirectHandler(BaseHTTPRequestHandler):
-            destination = ""
+                def spying_create_connection(address: tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
+                    dialed.append(address)
+                    return original_create_connection(address, *args, **kwargs)
 
-            def log_message(self, format: str, *args: object) -> None:
-                pass
+                with mock.patch("socket.create_connection", side_effect=spying_create_connection):
+                    body, content_type = fetch_feed(
+                        initial,
+                        timeout=1,
+                        max_bytes=2048,
+                        allow_private=True,
+                        resolver=resolver,
+                    )
 
-            def do_GET(self) -> None:
-                self.send_response(302)
-                self.send_header("Location", type(self).destination)
-                self.end_headers()
-
-        with fixture_server() as destination:
-            RedirectHandler.destination = f"{destination}/rss"
-            with handler_server(RedirectHandler) as redirect:
-                initial = redirect.replace("127.0.0.1", "localhost")
-
-                def resolver(host: str, port: int, *args: object, **kwargs: object) -> list[tuple[object, ...]]:
-                    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
-
-                body, content_type = fetch_feed(
-                    initial,
-                    timeout=1,
-                    max_bytes=2048,
-                    resolver=resolver,
-                )
-
-        self.assertIn(b"Rilis RSS", body)
-        self.assertEqual(content_type.split(";", 1)[0], "application/rss+xml")
+                self.assertEqual(dialed, [("127.0.0.1", redir_port), ("127.0.0.1", dest_port)])
+                self.assertIn(b"Rilis RSS", body)
+                self.assertEqual(content_type.split(";", 1)[0], "application/rss+xml")
 
     def test_collector_rejects_excessive_feed_redirects(self) -> None:
         class LoopHandler(BaseHTTPRequestHandler):
