@@ -410,13 +410,13 @@ def generate_draft(
             "id": "slide-3",
             "kind": "text",
             "title": "Fakta & Poin Penting",
-            "body": f"Berdasarkan informasi terkonfirmasi dari {source_domain}, perkembangan ini menandai perubahan signifikan yang perlu diantisipasi oleh para praktisi.",
+            "body": f"1. Laporan Primer: Konfirmasi resmi dari {source_domain or 'sumber industri'} mencatat evolusi signifikan ini.\n2. Parameter Kunci: Memperbarui acuan teknis yang relevan dengan ekosistem digital saat ini.\n3. Tren Ke Depan: Menjadi sinyal percepatan adopsi dalam skala yang lebih luas.",
         },
         {
             "id": "slide-4",
             "kind": "text",
             "title": "Dampak bagi Bisnis & Desainer Indonesia",
-            "body": "Inovasi ini membawa peluang efisiensi nyata bagi pelaku bisnis kreatif, desainer, dan UMKM di Indonesia, sekaligus menuntut kesiapan adaptasi alur kerja digital yang lebih tangguh.",
+            "body": "1. Percepatan Produksi: Potensi efisiensi waktu dalam alur kerja kreatif harian.\n2. Standar Kualitas: Mendorong peningkatan kapabilitas dan kualitas output digital lokal.\n3. Diferensiasi Layanan: Membuka celah inovasi penawaran baru bagi UMKM dan kreator.",
         },
         {
             "id": "slide-5",

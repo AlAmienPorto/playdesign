@@ -155,49 +155,168 @@ def build_caption(document: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def build_slide_svg(document: dict, index: int) -> str:
-    """Layout 1080x1350 yang sama dengan preview Carousel Studio."""
+    """Layout 1080x1350 yang selaras dengan preview Carousel Studio."""
     slides = document.get("slides") or []
     slide = slides[index] if 0 <= index < len(slides) else {"kind": "cover", "title": "", "body": ""}
     total = len(slides) or 1
     is_cover = slide.get("kind") == "cover"
     title = str(document.get("headline") or "") if is_cover else str(slide.get("title") or "")
-    if is_cover:
-        body = f"Sumber: {document.get('sourceName') or 'Belum diisi'}"
-    else:
-        body = str(slide.get("body") or "") or "Isi slide belum diisi."
+    has_cover_image = bool(document.get("coverImageUrl"))
 
     style = TEMPLATE_STYLES.get(str(document.get("template") or "split-brand"), TEMPLATE_STYLES["split-brand"])
     bg = str(style["bg"])
     bar = style["bar"]
     overlay = bool(style["overlay"])
-    title_lines = wrap_text(title, 24, 5)
-    body_lines = wrap_text(body, 42, 5 if overlay else 8)
-    title_y = int(style["title_y"])
-    title_spans = "".join(
-        f'<tspan x="88" dy="{0 if position == 0 else 80}">{escape_xml(line)}</tspan>'
-        for position, line in enumerate(title_lines)
-    )
-    body_y = title_y + max(len(title_lines), 1) * 80 + (40 if overlay else 60)
-    body_spans = "".join(
-        f'<tspan x="88" dy="{0 if position == 0 else 46}">{escape_xml(line)}</tspan>'
-        for position, line in enumerate(body_lines)
-    )
-    kicker = escape_xml(str(document.get("kicker") or "PLAYDESIGN / CAROUSEL"))
     counter = f"{index + 1:02d} / {total:02d}"
 
-    # Template full-image: latar tetap solid; foto ditempel di area atas oleh render_png.
     backdrop = f'<rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{bg}"/>'
     bar_rect = (
         f'<rect x="0" y="0" width="24" height="{SLIDE_HEIGHT}" fill="{bar}"/>' if bar else ""
     )
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+
+    tagline = f'<text x="540" y="1260" fill="rgba(255,255,255,0.35)" font-family="{FONT}" font-size="18" font-weight="700" letter-spacing="6" text-anchor="middle">LETS PLAY CREATIVITY WITH US</text>'
+    footer = f'''
+  <text x="88" y="1260" fill="{ACCENT}" font-family="{FONT}" font-size="30" font-weight="700">playdesign</text>
+  {tagline}
+  <text x="992" y="1260" fill="{INK}" font-family="{FONT}" font-size="30" text-anchor="end">{counter}</text>'''
+
+    if is_cover:
+        # Template full-image dengan foto atau overlay eksplisit
+        if overlay or has_cover_image:
+            title_lines = wrap_text(title, 24, 5)
+            body = f"Sumber: {document.get('sourceName') or 'Belum diisi'}"
+            body_lines = wrap_text(body, 42, 5 if overlay else 8)
+            title_y = int(str(style["title_y"]))
+            title_spans = "".join(
+                f'<tspan x="88" dy="{0 if position == 0 else 80}">{escape_xml(line)}</tspan>'
+                for position, line in enumerate(title_lines)
+            )
+            body_y = title_y + max(len(title_lines), 1) * 80 + (40 if overlay else 60)
+            body_spans = "".join(
+                f'<tspan x="88" dy="{0 if position == 0 else 46}">{escape_xml(line)}</tspan>'
+                for position, line in enumerate(body_lines)
+            )
+            kicker = escape_xml(str(document.get("kicker") or "PLAYDESIGN / CAROUSEL"))
+            return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
   {backdrop}
   {bar_rect}
   <text x="88" y="110" fill="{ACCENT}" font-family="{FONT}" font-size="24" font-weight="700" letter-spacing="4">{kicker}</text>
   <text x="88" y="{title_y}" fill="{INK}" font-family="{FONT}" font-size="68" font-weight="800">{title_spans}</text>
   <text x="88" y="{body_y}" fill="{MUTED}" font-family="{FONT}" font-size="30">{body_spans}</text>
-  <text x="88" y="1260" fill="{ACCENT}" font-family="{FONT}" font-size="30" font-weight="700">playdesign</text>
-  <text x="992" y="1260" fill="{INK}" font-family="{FONT}" font-size="30" text-anchor="end">{counter}</text>
+  {footer}
+</svg>'''
+
+        # Editorial Typography Cover (tanpa foto cover / poster berita editorial PlayDesign)
+        kicker_raw = str(document.get("kicker") or "PLAYDESIGN / RADAR").strip()
+        is_crypto = "crypto" in kicker_raw.lower()
+        badge_bg = "#f59e0b" if is_crypto else "#ef4444"
+        clean_kicker = kicker_raw.replace("PLAYDESIGN / ", "").replace("PLAYDESIGN/", "").strip()
+        badge_w = min(max(len(clean_kicker) * 16 + 48, 160), 450)
+
+        watermark = f'<text x="1000" y="620" fill="#ffffff" fill-opacity="0.03" font-family="{FONT}" font-size="180" font-weight="900" text-anchor="end" transform="rotate(-90 1000 620)">PLAYDESIGN</text>'
+
+        title_lines = wrap_text(title, 22, 5)
+        title_y = int(str(style["title_y"]))
+        title_spans = "".join(
+            f'<tspan x="88" dy="{0 if position == 0 else 82}">{escape_xml(line)}</tspan>'
+            for position, line in enumerate(title_lines)
+        )
+
+        subtitle = str(slide.get("body") or "").strip()
+        sub_elements = ""
+        if subtitle:
+            sub_lines = wrap_text(subtitle, 38, 4)
+            sub_y = title_y + len(title_lines) * 82 + 24
+            sub_spans = "".join(
+                f'<tspan x="88" dy="{0 if position == 0 else 46}">{escape_xml(line)}</tspan>'
+                for position, line in enumerate(sub_lines)
+            )
+            sub_elements = f'<text x="88" y="{sub_y}" fill="#c8c0be" font-family="{FONT}" font-size="28">{sub_spans}</text>'
+
+        src_label = f"Sumber: {document.get('sourceName') or 'Belum diisi'}"
+        src_w = min(max(len(src_label) * 14 + 56, 260), 650)
+        source_pill = f'''
+  <rect x="88" y="1110" width="{src_w}" height="50" rx="25" fill="rgba(255,255,255,0.06)" stroke="rgba(255,255,255,0.12)"/>
+  <text x="120" y="1143" fill="#fffaf5" font-family="{FONT}" font-size="22">{escape_xml(src_label)}</text>'''
+
+        badge_pill = f'''
+  <rect x="88" y="100" width="{badge_w}" height="46" rx="23" fill="{badge_bg}"/>
+  <text x="{88 + badge_w // 2}" y="131" fill="#000000" font-family="{FONT}" font-size="20" font-weight="800" letter-spacing="2" text-anchor="middle">{escape_xml(clean_kicker)}</text>
+  <text x="{88 + badge_w + 24}" y="130" fill="#8f8785" font-family="{FONT}" font-size="18" font-weight="600" letter-spacing="3">EDISI EDITORIAL</text>'''
+
+        return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  {backdrop}
+  {bar_rect}
+  {watermark}
+  {badge_pill}
+  <text x="88" y="{title_y}" fill="{INK}" font-family="{FONT}" font-size="68" font-weight="800">{title_spans}</text>
+  {sub_elements}
+  {source_pill}
+  {footer}
+</svg>'''
+
+    # Slide Isi (Slide 2-5): Terstruktur dengan point cards jika teks memiliki baris poin
+    kicker = escape_xml(f"PLAYDESIGN / {index + 1:02d}")
+    title_lines = wrap_text(title, 26, 3)
+    title_spans = "".join(
+        f'<tspan x="88" dy="{0 if position == 0 else 72}">{escape_xml(line)}</tspan>'
+        for position, line in enumerate(title_lines)
+    )
+
+    body_text = str(slide.get("body") or "").strip() or "Isi slide belum diisi."
+    raw_lines = [l.strip() for l in body_text.splitlines() if l.strip()]
+    if len(raw_lines) <= 1 and re.search(r"\b1[\.\)]\s+.*\b2[\.\)]\s+", body_text):
+        raw_lines = [l.strip() for l in re.split(r"(?=\b\d+[\.\)]\s+)", body_text) if l.strip()]
+    points = []
+    for line in raw_lines:
+        match = re.match(r"^(\d+[\.\)]|[-*•])\s*(.*)", line)
+        if match:
+            num = match.group(1).rstrip(".):")
+            points.append((num if len(num) <= 2 else "•", match.group(2)))
+
+    cards_elements = []
+    start_y = 220 + len(title_lines) * 72 + 30
+
+    if len(points) >= 2:
+        curr_y = start_y
+        for num, text in points[:4]:
+            p_lines = wrap_text(text, 44, 4)
+            card_h = max(len(p_lines) * 40 + 36, 96)
+            p_spans = "".join(
+                f'<tspan x="184" dy="{0 if position == 0 else 40}">{escape_xml(pl)}</tspan>'
+                for position, pl in enumerate(p_lines)
+            )
+            card_svg = f'''
+  <rect x="88" y="{curr_y}" width="904" height="{card_h}" rx="14" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="114" y="{curr_y + 20}" width="46" height="46" rx="8" fill="{ACCENT}"/>
+  <text x="137" y="{curr_y + 51}" fill="#ffffff" font-family="{FONT}" font-size="22" font-weight="800" text-anchor="middle">{escape_xml(num)}</text>
+  <text x="184" y="{curr_y + 50}" fill="#c8c0be" font-family="{FONT}" font-size="26">{p_spans}</text>'''
+            cards_elements.append(card_svg)
+            curr_y += card_h + 18
+    else:
+        # Standard paragraph card
+        body_lines = wrap_text(body_text, 42, 8)
+        box_h = max(len(body_lines) * 48 + 48, 140)
+        body_spans = "".join(
+            f'<tspan x="134" dy="{0 if position == 0 else 48}">{escape_xml(line)}</tspan>'
+            for position, line in enumerate(body_lines)
+        )
+        card_svg = f'''
+  <rect x="88" y="{start_y}" width="904" height="{box_h}" rx="14" fill="rgba(255,255,255,0.035)" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="88" y="{start_y}" width="8" height="{box_h}" rx="4" fill="{ACCENT}"/>
+  <text x="134" y="{start_y + 52}" fill="{MUTED}" font-family="{FONT}" font-size="30">{body_spans}</text>'''
+        cards_elements.append(card_svg)
+
+    body_section = "".join(cards_elements)
+
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  {backdrop}
+  {bar_rect}
+  <text x="88" y="105" fill="{ACCENT}" font-family="{FONT}" font-size="24" font-weight="700" letter-spacing="4">{kicker}</text>
+  <rect x="88" y="125" width="80" height="4" fill="{bar if bar else ACCENT}"/>
+  <text x="88" y="220" fill="{INK}" font-family="{FONT}" font-size="56" font-weight="800">{title_spans}</text>
+  {body_section}
+  {footer}
 </svg>'''
 
 
