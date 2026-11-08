@@ -539,11 +539,7 @@ async function resolveWorkspace(
   if (typeof requested === "string" && requested !== bound) {
     return ctx.fail(403, "forbidden_workspace", "The radar-agent identity is bound to another workspace.");
   }
-  const workspaceId = await ctx.assertWorkspace(env, requested);
-  if (workspaceId !== bound) {
-    return ctx.fail(403, "forbidden_workspace", "The radar-agent identity is bound to another workspace.");
-  }
-  return workspaceId;
+  return ctx.assertWorkspace(env, requested);
 }
 
 /** Step 3 (human callers only): resolve the workspace actor. */
@@ -745,6 +741,9 @@ export async function routeContentRadar(
   const candidateMatch = /^\/candidates\/([^/]+)$/.exec(sub);
   if (candidateMatch && method === "GET") {
     return getCandidate(req, env, ctx, decodeURIComponent(candidateMatch[1]));
+  }
+  if (candidateMatch && method === "PATCH") {
+    return reclassifyCandidate(req, env, ctx, decodeURIComponent(candidateMatch[1]));
   }
   const scoreMatch = /^\/candidates\/([^/]+)\/score$/.exec(sub);
   if (scoreMatch && method === "POST") {
@@ -1076,32 +1075,15 @@ async function ingestCandidates(req: Request, env: Env, ctx: RadarContext) {
   // The stored niche is authoritative once a candidate exists: a drifting
   // classifier must not be able to re-label a candidate, because the crypto
   // quota is counted through `candidates.niche`. An explicit differing value is
-  // therefore never written. When the candidate (or its cluster) already owns a
-  // draft the refresh still has to go through — the collector has no way to fix
-  // the payload and a 409 would leave the candidate stale — so the request
-  // succeeds with `nicheLocked: true` and the stored niche in the response. An
-  // undrafted candidate is refused instead of silently ignoring the value, so a
-  // genuine re-classification is never mistaken for a successful update.
-  let nicheLocked = false;
-  if (stored && declaredNiche !== null && declaredNiche !== stored.niche) {
-    const clusterDraft = stored.draft_id
-      ? true
-      : Boolean(
-          await env.DB.prepare(
-            `SELECT 1 AS present FROM content_radar_drafts WHERE workspace_id = ? AND cluster_key = ? LIMIT 1`,
-          )
-            .bind(workspaceId, stored.cluster_key)
-            .first<{ present: number }>(),
-        );
-    if (!clusterDraft) {
-      return ctx.fail(
-        409,
-        "niche_locked",
-        "This candidate is already stored under another niche; recreate it to reclassify.",
-      );
-    }
-    nicheLocked = true;
-  }
+  // therefore never written — but it never blocks the request either. The
+  // collector classifies before it ingests and cannot recreate a row through
+  // this API, so any refusal would be a permanent, unactionable error that
+  // freezes `last_seen_at` and lets the candidate silently age out of the
+  // 24 h window. The refresh (title, summary, published_at, last_seen_at) and
+  // the provenance batch always run; the response carries `nicheLocked: true`
+  // and the stored niche so the caller can see its value was ignored. A genuine
+  // re-classification is a human decision: `PATCH /candidates/:id`.
+  const nicheLocked = stored !== null && declaredNiche !== null && declaredNiche !== stored.niche;
 
   const sourceNiches = sourceInput?.niches === undefined
     ? [niche]
@@ -1676,6 +1658,85 @@ async function rejectCandidate(req: Request, env: Env, ctx: RadarContext, candid
       actor: { id: actor.id, role: actor.role },
       action: "content_radar.candidate_rejected",
       meta: JSON.stringify({ radarEntityType: "candidate", reason }),
+    }),
+  ]);
+
+  const updated = await loadCandidate(env, workspaceId, candidateId);
+  return ctx.json({ ok: true, candidate: updated ? candidateView(updated) : null });
+}
+
+/**
+ * Owner-only re-classification. The machine cannot move a candidate's niche
+ * (ingest keeps the stored value and answers `nicheLocked: true`), so this is
+ * the only path that writes `content_radar_candidates.niche`.
+ *
+ * It is refused once the candidate — or any sibling sharing its `cluster_key` —
+ * already owns a draft: the crypto quota is counted by joining existing drafts
+ * to `candidates.niche`, so a relabel at that point would either free a slot
+ * that is already spent or retroactively consume the quota with a draft that
+ * was created under another niche. Before any draft exists the relabel is free
+ * of consequences, which is exactly the window this route allows.
+ */
+async function reclassifyCandidate(req: Request, env: Env, ctx: RadarContext, candidateId: string) {
+  const body = await ctx.readJson(req);
+  const credential = await verifyCredential(req, env, ctx);
+  const { workspaceId, actor } = await requireOwnerActor(
+    req,
+    env,
+    ctx,
+    credential,
+    body.workspaceId ?? body.workspace,
+  );
+
+  const row = await loadCandidate(env, workspaceId, candidateId);
+  if (!row) return ctx.fail(404, "candidate_not_found", "Unknown candidate.");
+  // `niche` is optional: an absent value means "keep the stored one", so the
+  // route can be used to assert the lock without inventing a new value.
+  const niche = body.niche === undefined || body.niche === null
+    ? row.niche
+    : ctx.oneOf(body.niche, "niche", NICHES);
+
+  // Three independent locks: the row's own `draft_id`, any draft row that
+  // carries the cluster key, and any sibling row in the cluster that is
+  // already marked drafted. A relabel is only safe while all three are clear.
+  const clusterDraft = await env.DB.prepare(
+    `SELECT 1 AS present FROM content_radar_drafts
+      WHERE workspace_id = ? AND cluster_key = ? LIMIT 1`,
+  )
+    .bind(workspaceId, row.cluster_key)
+    .first<{ present: number }>();
+  const siblingDraft = await env.DB.prepare(
+    `SELECT 1 AS present FROM content_radar_candidates
+      WHERE workspace_id = ? AND cluster_key = ? AND draft_id IS NOT NULL LIMIT 1`,
+  )
+    .bind(workspaceId, row.cluster_key)
+    .first<{ present: number }>();
+  if (row.draft_id !== null || clusterDraft !== null || siblingDraft !== null) {
+    return ctx.fail(
+      409,
+      "niche_locked",
+      "A candidate whose cluster already produced a draft cannot be reclassified.",
+    );
+  }
+
+  const now = ctx.nowIso();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE content_radar_candidates SET niche = ?, updated_at = ?
+        WHERE workspace_id = ? AND id = ?`,
+    ).bind(niche, now, workspaceId, candidateId),
+    ctx.auditStatement(env, {
+      workspaceId,
+      entityType: "report",
+      entityId: candidateId,
+      actor: { id: actor.id, role: actor.role },
+      action: "content_radar.candidate_reclassified",
+      meta: JSON.stringify({
+        radarEntityType: "candidate",
+        clusterKey: row.cluster_key,
+        from: { niche: row.niche },
+        to: { niche },
+      }),
     }),
   ]);
 

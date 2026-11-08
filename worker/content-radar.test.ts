@@ -903,6 +903,151 @@ test("reject Owner menulis alasan dan audit, kandidat drafted tidak dapat ditola
   assert.equal(blocked.body.error.code, "candidate_already_drafted");
 });
 
+test("PATCH kandidat: Owner mereklasifikasi kandidat undrafted dan audit tercatat", async () => {
+  const { env: target, token } = await setup();
+  const ingested = await ingest(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/reclass",
+      niche: "ai",
+      clusterKey: "cluster-reclass",
+    },
+    provenance: [{ url: "https://example.com/ai/reclass", relation: "primary" }],
+  });
+  assert.equal(ingested.status, 201, ingested.text);
+  const candidateId = ingested.body.candidateId;
+
+  const patched = await call(target, "PATCH", `/api/content-radar/candidates/${candidateId}`, {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "crypto" },
+  });
+  assert.equal(patched.status, 200, patched.text);
+  assert.equal(patched.body.candidate.niche, "crypto");
+  assert.equal(patched.body.candidate.status, "new");
+
+  const row = await target.DB.prepare(
+    "SELECT niche FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", candidateId)
+    .first();
+  assert.equal(row.niche, "crypto");
+
+  const audit = await target.DB.prepare(
+    `SELECT actor_type, action, meta FROM activity_events
+      WHERE workspace_id = ? AND entity_id = ? AND action = 'content_radar.candidate_reclassified'`,
+  )
+    .bind("ws-a", candidateId)
+    .first();
+  assert.equal(audit.actor_type, "owner");
+  const meta = JSON.parse(audit.meta);
+  assert.equal(meta.radarEntityType, "candidate");
+  assert.equal(meta.clusterKey, "cluster-reclass");
+  assert.equal(meta.from.niche, "ai");
+  assert.equal(meta.to.niche, "crypto");
+});
+
+test("PATCH kandidat menolak reklasifikasi bila cluster sudah punya draft", async () => {
+  const { env: target, token } = await setup();
+  const drafted = await scoredCandidate(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/drafted-reclass",
+      niche: "ai",
+      clusterKey: "cluster-locked",
+    },
+    provenance: [{ url: "https://example.com/ai/drafted-reclass", relation: "primary" }],
+  });
+  assert.equal((await automaticDraft(target, "ws-a", drafted)).status, 201);
+
+  const blocked = await call(target, "PATCH", `/api/content-radar/candidates/${drafted}`, {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "crypto" },
+  });
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.body.error.code, "niche_locked");
+
+  const row = await target.DB.prepare(
+    "SELECT niche, draft_id FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", drafted)
+    .first();
+  assert.equal(row.niche, "ai");
+  assert.ok(row.draft_id);
+
+  const audits = await target.DB.prepare(
+    "SELECT COUNT(*) AS total FROM activity_events WHERE workspace_id = ? AND action = 'content_radar.candidate_reclassified'",
+  )
+    .bind("ws-a")
+    .first();
+  assert.equal(audits.total, 0);
+
+  // The draft row alone is enough: a candidate whose `draft_id` flag was lost
+  // still cannot be relabelled while its cluster owns a draft.
+  await target.DB.prepare(
+    "UPDATE content_radar_candidates SET draft_id = NULL, status = 'qualified' WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", drafted)
+    .run();
+  const flagless = await call(target, "PATCH", `/api/content-radar/candidates/${drafted}`, {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "crypto" },
+  });
+  assert.equal(flagless.status, 409);
+  assert.equal(flagless.body.error.code, "niche_locked");
+});
+
+test("PATCH kandidat menolak mesin, id tak dikenal, dan niche tidak valid", async () => {
+  const { env: target, token } = await setup();
+  const ingested = await ingest(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/guarded",
+      niche: "ai",
+      clusterKey: "cluster-guarded",
+    },
+    provenance: [{ url: "https://example.com/ai/guarded", relation: "primary" }],
+  });
+  assert.equal(ingested.status, 201, ingested.text);
+  const candidateId = ingested.body.candidateId;
+
+  const machine = await call(target, "PATCH", `/api/content-radar/candidates/${candidateId}`, {
+    token: RADAR_TOKEN,
+    body: { workspaceId: "ws-a", niche: "crypto" },
+  });
+  assert.equal(machine.status, 403);
+  assert.equal(machine.body.error.code, "forbidden_owner_only");
+
+  const unknown = await call(target, "PATCH", "/api/content-radar/candidates/radcand-missing", {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "crypto" },
+  });
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.body.error.code, "candidate_not_found");
+
+  const invalid = await call(target, "PATCH", `/api/content-radar/candidates/${candidateId}`, {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "kuliner" },
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.body.error.code, "validation_failed");
+
+  const row = await target.DB.prepare(
+    "SELECT niche FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", candidateId)
+    .first();
+  assert.equal(row.niche, "ai");
+
+  const audits = await target.DB.prepare(
+    "SELECT COUNT(*) AS total FROM activity_events WHERE workspace_id = ? AND action = 'content_radar.candidate_reclassified'",
+  )
+    .bind("ws-a")
+    .first();
+  assert.equal(audits.total, 0);
+});
+
 test("PATCH source tier D memaksa requires_crosscheck dan mengaudit perubahan", async () => {
   const { env: target, token } = await setup();
   await source(target, "ws-a", "src-example-com", "example.com", "B");
@@ -1360,33 +1505,122 @@ test("niche eksplisit yang berbeda tidak membatalkan refresh kandidat drafted", 
     .first();
   assert.equal(automatic.total, 1);
 
-  // An undrafted candidate is refused instead of silently ignoring the value.
+  // An undrafted candidate is refreshed too — the stored niche wins, the value
+  // is reported as ignored, and nothing aborts the write.
   const plain = await ingest(target, "ws-a", {
     candidate: {
       canonicalUrl: "https://example.com/ai/plain",
       niche: "ai",
       clusterKey: "cluster-plain",
+      title: "Judul awal",
+      summary: "Ringkasan awal",
     },
     provenance: [{ url: "https://example.com/ai/plain", relation: "primary" }],
   });
   assert.equal(plain.status, 201, plain.text);
-  const reclassified = await ingest(target, "ws-a", {
+  await target.DB.prepare(
+    "UPDATE content_radar_candidates SET last_seen_at = ? WHERE workspace_id = ? AND id = ?",
+  )
+    .bind(iso(-3_600_000), "ws-a", plain.body.candidateId)
+    .run();
+
+  const relabelled = await ingest(target, "ws-a", {
     candidate: {
       canonicalUrl: "https://example.com/ai/plain",
       niche: "crypto",
       clusterKey: "cluster-plain",
+      title: "Judul setelah percobaan reklasifikasi",
+      summary: "Ringkasan setelah percobaan",
     },
-    provenance: [{ url: "https://example.com/ai/plain", relation: "primary" }],
+    provenance: [
+      { url: "https://example.com/ai/plain", relation: "primary" },
+      { url: "https://other.example.org/ai/plain", relation: "crosscheck" },
+    ],
   });
-  assert.equal(reclassified.status, 409);
-  assert.equal(reclassified.body.error.code, "niche_locked");
+  assert.equal(relabelled.status, 200, relabelled.text);
+  assert.equal(relabelled.body.nicheLocked, true);
+  assert.equal(relabelled.body.niche, "ai");
 
-  const untouched = await target.DB.prepare(
-    "SELECT niche FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  const plainRow = await target.DB.prepare(
+    `SELECT niche, title, summary, last_seen_at FROM content_radar_candidates
+      WHERE workspace_id = ? AND id = ?`,
   )
     .bind("ws-a", plain.body.candidateId)
     .first();
-  assert.equal(untouched.niche, "ai");
+  assert.equal(plainRow.niche, "ai");
+  assert.equal(plainRow.title, "Judul setelah percobaan reklasifikasi");
+  assert.equal(plainRow.summary, "Ringkasan setelah percobaan");
+  assert.ok(Date.parse(plainRow.last_seen_at) > Date.now() - 60_000);
+
+  const plainProvenance = await target.DB.prepare(
+    "SELECT COUNT(*) AS total FROM content_radar_candidate_sources WHERE workspace_id = ? AND candidate_id = ?",
+  )
+    .bind("ws-a", plain.body.candidateId)
+    .first();
+  assert.equal(plainProvenance.total, 2);
+});
+
+test("niche berbeda pada kandidat undrafted tidak memindahkannya ke kuota crypto", async () => {
+  const { env: target } = await setup();
+  const first = await scoredCandidate(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/crypto/one",
+      niche: "crypto",
+      clusterKey: "cluster-crypto-1",
+    },
+    provenance: [{ url: "https://example.com/crypto/one", relation: "primary" }],
+  });
+  assert.equal((await automaticDraft(target, "ws-a", first)).status, 201);
+
+  // Undrafted `ai` candidate that the collector now believes is crypto.
+  const plain = await scoredCandidate(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/drift",
+      niche: "ai",
+      clusterKey: "cluster-drift",
+    },
+    provenance: [{ url: "https://example.com/ai/drift", relation: "primary" }],
+  });
+  const drift = await ingest(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/drift",
+      niche: "crypto",
+      clusterKey: "cluster-drift",
+    },
+    provenance: [{ url: "https://example.com/ai/drift", relation: "primary" }],
+  });
+  assert.equal(drift.status, 200, drift.text);
+  assert.equal(drift.body.nicheLocked, true);
+  assert.equal(drift.body.niche, "ai");
+
+  // A second crypto draft is still impossible after the attempt.
+  const second = await scoredCandidate(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/crypto/two",
+      niche: "crypto",
+      clusterKey: "cluster-crypto-2",
+    },
+    provenance: [{ url: "https://example.com/crypto/two", relation: "primary" }],
+  });
+  const blocked = await automaticDraft(target, "ws-a", second);
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.body.error.code, "crypto_draft_cap_reached");
+
+  const cryptoDrafts = () =>
+    target.DB.prepare(
+      `SELECT COUNT(*) AS total FROM content_radar_drafts d
+         JOIN content_radar_candidates c
+           ON c.workspace_id = d.workspace_id AND c.id = d.candidate_id
+        WHERE d.workspace_id = ? AND c.niche = 'crypto'`,
+    )
+      .bind("ws-a")
+      .first();
+  assert.equal((await cryptoDrafts()).total, 1);
+
+  // The drifted candidate still behaves as `ai`: it is draftable, and the draft
+  // it produces is not counted against the crypto quota.
+  assert.equal((await automaticDraft(target, "ws-a", plain)).status, 201);
+  assert.equal((await cryptoDrafts()).total, 1);
 });
 
 test("re-ingest tanpa niche mempertahankan klasifikasi dan menyegarkan kandidat drafted", async () => {
