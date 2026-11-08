@@ -8,6 +8,7 @@
  */
 
 import { handleAgentChat, handleClearAgentMessages, handleGetAgentMessages } from "./chat";
+import { routeContentRadar } from "./content-radar";
 import { runQcGate, saveQcNote } from "./qc";
 
 import { insertScrapedLeads } from "./scraper";
@@ -34,6 +35,11 @@ export interface Env {
   ACCESS_ENABLED?: string;
   /** Folder Google Drive tujuan video final (id folder, bukan rahasia). */
   VIDEO_DRIVE_FOLDER?: string;
+  /**
+   * Token mesin Content Radar. Bearer ini dipetakan server-side ke identitas
+   * `radar-agent` (ingest/score/draft saja), terpisah dari API_TOKEN manusia.
+   */
+  RADAR_API_TOKEN?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -296,7 +302,7 @@ async function assertToken(req: Request, env: Env) {
   fail(401, "unauthorized", "A valid bearer token is required.");
 }
 
-const actorTypeFor = (role: ActorRole): ActorType => role;
+const actorTypeFor = (role: ActorRole | "agent"): ActorType => role;
 
 async function authenticate(env: Env, workspaceId: string, req: Request): Promise<Actor> {
   const header = (req.headers.get("x-actor-id") ?? "ja").trim();
@@ -330,7 +336,7 @@ const auditStatement = (
     entityType: "task" | "approval" | "run" | "post" | "deal" | "lead" | "agent" | "copilot" | "inbox" | "report";
     entityId: string;
     taskId?: string | null;
-    actor: Actor;
+    actor: { id: string; role: ActorRole | "agent" };
     action: string;
     result?: "ok" | "failed" | "pending" | "denied";
     meta?: string | null;
@@ -2041,6 +2047,31 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/api/auth/login" && method === "POST") return login(req, env);
+
+  const radar = await routeContentRadar(req, env, {
+    json,
+    fail,
+    readJson,
+    str,
+    optionalStr,
+    optionalInt,
+    oneOf,
+    assertToken,
+    authenticate,
+    requireOwner,
+    assertWorkspace,
+    auditStatement,
+    uid,
+    nowIso,
+    machineActor: (request) => {
+      const expected = env.RADAR_API_TOKEN?.trim();
+      if (!expected) return null;
+      const header = request.headers.get("authorization") ?? "";
+      const provided = (/^Bearer\s+(.+)$/i.exec(header)?.[1] ?? "").trim();
+      return provided && tokenMatches(provided, expected) ? "radar-agent" : null;
+    },
+  });
+  if (radar) return radar;
 
   if (path !== "/api/health") await assertToken(req, env);
 
