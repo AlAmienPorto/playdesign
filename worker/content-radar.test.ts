@@ -997,6 +997,213 @@ test("PATCH kandidat menolak reklasifikasi bila cluster sudah punya draft", asyn
   assert.equal(flagless.body.error.code, "niche_locked");
 });
 
+test("PATCH kandidat: no-op mengembalikan kandidat tanpa audit", async () => {
+  const { env: target, token } = await setup();
+  const ingested = await ingest(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/reclass-noop",
+      niche: "ai",
+      clusterKey: "cluster-reclass-noop",
+    },
+    provenance: [{ url: "https://example.com/ai/reclass-noop", relation: "primary" }],
+  });
+  assert.equal(ingested.status, 201, ingested.text);
+
+  const response = await call(target, "PATCH", `/api/content-radar/candidates/${ingested.body.candidateId}`, {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "ai" },
+  });
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.body.candidate.niche, "ai");
+
+  const audits = await target.DB.prepare(
+    "SELECT COUNT(*) AS total FROM activity_events WHERE workspace_id = ? AND action = 'content_radar.candidate_reclassified'",
+  )
+    .bind("ws-a")
+    .first();
+  assert.equal(audits.total, 0);
+});
+
+test("PATCH kandidat: lock atomik menolak draft yang muncul setelah pre-check tanpa audit", async () => {
+  const { env: target, token } = await setup();
+  const ingested = await ingest(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/reclass-race",
+      niche: "ai",
+      clusterKey: "cluster-reclass-race",
+    },
+    provenance: [{ url: "https://example.com/ai/reclass-race", relation: "primary" }],
+  });
+  assert.equal(ingested.status, 201, ingested.text);
+  const candidateId = ingested.body.candidateId;
+  const db = target.DB;
+  let injected = false;
+  const raced = {
+    ...target,
+    DB: {
+      prepare: (sql) => db.prepare(sql),
+      batch: async (statements) => {
+        if (!injected) {
+          injected = true;
+          await db.prepare(
+            `INSERT INTO content_radar_drafts
+              (workspace_id, id, candidate_id, post_id, cluster_key, auto_date_wib, creation_kind,
+               title, document, status, score_snapshot, sources_snapshot, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, NULL, 'manual', ?, '{}', 'Draft', '{}', '[]', 'Owner', ?, ?)`,
+          )
+            .bind(
+              "ws-a",
+              "raddraft-race",
+              candidateId,
+              "post-race",
+              "cluster-reclass-race",
+              "Race lock",
+              "2026-11-08T00:00:00.000Z",
+              "2026-11-08T00:00:00.000Z",
+            )
+            .run();
+        }
+        return db.batch(statements);
+      },
+    },
+  };
+
+  const response = await call(raced, "PATCH", `/api/content-radar/candidates/${candidateId}`, {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "crypto" },
+  });
+  assert.equal(response.status, 409, response.text);
+  assert.equal(response.body.error.code, "niche_locked");
+
+  const row = await db.prepare(
+    "SELECT niche FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", candidateId)
+    .first();
+  assert.equal(row.niche, "ai");
+  const audits = await db.prepare(
+    "SELECT COUNT(*) AS total FROM activity_events WHERE workspace_id = ? AND action = 'content_radar.candidate_reclassified'",
+  )
+    .bind("ws-a")
+    .first();
+  assert.equal(audits.total, 0);
+});
+
+test("PATCH kandidat: draft_id sendiri tetap mengunci tanpa draft row", async () => {
+  const { env: target, token } = await setup();
+  const drafted = await scoredCandidate(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/reclass-own-flag",
+      niche: "ai",
+      clusterKey: "cluster-reclass-own-flag",
+    },
+    provenance: [{ url: "https://example.com/ai/reclass-own-flag", relation: "primary" }],
+  });
+  assert.equal((await automaticDraft(target, "ws-a", drafted)).status, 201);
+  await target.DB.prepare("PRAGMA foreign_keys = OFF").run();
+  await target.DB.prepare("DELETE FROM content_radar_drafts WHERE workspace_id = ? AND candidate_id = ?")
+    .bind("ws-a", drafted)
+    .run();
+  await target.DB.prepare("PRAGMA foreign_keys = ON").run();
+  const db = target.DB;
+  let batchCalled = false;
+  const guarded = {
+    ...target,
+    DB: {
+      prepare: (sql) => db.prepare(sql),
+      batch: (statements) => {
+        batchCalled = true;
+        return db.batch(statements);
+      },
+    },
+  };
+
+  const response = await call(guarded, "PATCH", `/api/content-radar/candidates/${drafted}`, {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "crypto" },
+  });
+  assert.equal(response.status, 409, response.text);
+  assert.equal(response.body.error.code, "niche_locked");
+  assert.equal(batchCalled, false);
+  const row = await target.DB.prepare(
+    "SELECT niche, draft_id FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", drafted)
+    .first();
+  assert.equal(row.niche, "ai");
+  assert.ok(row.draft_id);
+});
+
+test("PATCH kandidat: sibling draft_id tetap mengunci saat draft row berbeda cluster", async () => {
+  const { env: target, token } = await setup();
+  const ingested = await ingest(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/reclass-sibling-target",
+      niche: "ai",
+      clusterKey: "cluster-reclass-sibling",
+    },
+    provenance: [{ url: "https://example.com/ai/reclass-sibling-target", relation: "primary" }],
+  });
+  assert.equal(ingested.status, 201, ingested.text);
+  const targetId = ingested.body.candidateId;
+  const siblingIngested = await ingest(target, "ws-a", {
+    candidate: {
+      canonicalUrl: "https://example.com/ai/reclass-sibling-drafted",
+      niche: "ai",
+      clusterKey: "cluster-reclass-other",
+    },
+    provenance: [{ url: "https://example.com/ai/reclass-sibling-drafted", relation: "primary" }],
+  });
+  assert.equal(siblingIngested.status, 201, siblingIngested.text);
+  const sibling = siblingIngested.body.candidateId;
+  await target.DB.prepare(
+    `INSERT INTO content_radar_drafts
+      (workspace_id, id, candidate_id, post_id, cluster_key, auto_date_wib, creation_kind,
+       title, document, status, score_snapshot, sources_snapshot, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, NULL, 'manual', ?, '{}', 'Draft', '{}', '[]', 'Owner', ?, ?)`,
+  )
+    .bind(
+      "ws-a",
+      "raddraft-sibling",
+      sibling,
+      "post-sibling",
+      "cluster-reclass-other",
+      "Sibling lock",
+      "2026-11-08T00:00:00.000Z",
+      "2026-11-08T00:00:00.000Z",
+    )
+    .run();
+  await target.DB.prepare(
+    "UPDATE content_radar_candidates SET draft_id = ?, status = 'drafted' WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("raddraft-sibling", "ws-a", sibling)
+    .run();
+  await target.DB.prepare("DROP INDEX ux_content_radar_candidates_cluster").run();
+  await target.DB.prepare(
+    "UPDATE content_radar_candidates SET cluster_key = ? WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("cluster-reclass-sibling", "ws-a", sibling)
+    .run();
+
+  const response = await call(target, "PATCH", `/api/content-radar/candidates/${targetId}`, {
+    token,
+    actorId: "ja",
+    body: { workspaceId: "ws-a", niche: "crypto" },
+  });
+  assert.equal(response.status, 409, response.text);
+  assert.equal(response.body.error.code, "niche_locked");
+  const row = await target.DB.prepare(
+    "SELECT niche, draft_id FROM content_radar_candidates WHERE workspace_id = ? AND id = ?",
+  )
+    .bind("ws-a", targetId)
+    .first();
+  assert.equal(row.niche, "ai");
+  assert.equal(row.draft_id, null);
+});
+
 test("PATCH kandidat menolak mesin, id tak dikenal, dan niche tidak valid", async () => {
   const { env: target, token } = await setup();
   const ingested = await ingest(target, "ws-a", {

@@ -41,6 +41,7 @@ export interface RadarAuditInput {
   action: string;
   result?: "ok" | "failed" | "pending" | "denied";
   meta?: string | null;
+  onlyIfPreviousChanged?: boolean;
 }
 
 export interface RadarContext {
@@ -1696,9 +1697,13 @@ async function reclassifyCandidate(req: Request, env: Env, ctx: RadarContext, ca
     ? row.niche
     : ctx.oneOf(body.niche, "niche", NICHES);
 
-  // Three independent locks: the row's own `draft_id`, any draft row that
-  // carries the cluster key, and any sibling row in the cluster that is
-  // already marked drafted. A relabel is only safe while all three are clear.
+  if (niche === row.niche) {
+    return ctx.json({ ok: true, candidate: candidateView(row) });
+  }
+
+  // The cluster-draft row is the authoritative lock. The candidate's own
+  // `draft_id` and any drafted sibling are belt-and-braces against inconsistent
+  // or legacy data. A relabel is only safe while all three checks are clear.
   const clusterDraft = await env.DB.prepare(
     `SELECT 1 AS present FROM content_radar_drafts
       WHERE workspace_id = ? AND cluster_key = ? LIMIT 1`,
@@ -1707,9 +1712,9 @@ async function reclassifyCandidate(req: Request, env: Env, ctx: RadarContext, ca
     .first<{ present: number }>();
   const siblingDraft = await env.DB.prepare(
     `SELECT 1 AS present FROM content_radar_candidates
-      WHERE workspace_id = ? AND cluster_key = ? AND draft_id IS NOT NULL LIMIT 1`,
+      WHERE workspace_id = ? AND cluster_key = ? AND id <> ? AND draft_id IS NOT NULL LIMIT 1`,
   )
-    .bind(workspaceId, row.cluster_key)
+    .bind(workspaceId, row.cluster_key, candidateId)
     .first<{ present: number }>();
   if (row.draft_id !== null || clusterDraft !== null || siblingDraft !== null) {
     return ctx.fail(
@@ -1720,11 +1725,15 @@ async function reclassifyCandidate(req: Request, env: Env, ctx: RadarContext, ca
   }
 
   const now = ctx.nowIso();
-  await env.DB.batch([
+  const results = await env.DB.batch([
     env.DB.prepare(
       `UPDATE content_radar_candidates SET niche = ?, updated_at = ?
-        WHERE workspace_id = ? AND id = ?`,
-    ).bind(niche, now, workspaceId, candidateId),
+        WHERE workspace_id = ? AND id = ? AND draft_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM content_radar_drafts
+             WHERE workspace_id = ? AND cluster_key = ?
+          )`,
+    ).bind(niche, now, workspaceId, candidateId, workspaceId, row.cluster_key),
     ctx.auditStatement(env, {
       workspaceId,
       entityType: "report",
@@ -1737,8 +1746,16 @@ async function reclassifyCandidate(req: Request, env: Env, ctx: RadarContext, ca
         from: { niche: row.niche },
         to: { niche },
       }),
+      onlyIfPreviousChanged: true,
     }),
   ]);
+  if (results[0]?.meta.changes === 0) {
+    return ctx.fail(
+      409,
+      "niche_locked",
+      "A candidate whose cluster already produced a draft cannot be reclassified.",
+    );
+  }
 
   const updated = await loadCandidate(env, workspaceId, candidateId);
   return ctx.json({ ok: true, candidate: updated ? candidateView(updated) : null });

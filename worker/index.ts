@@ -346,12 +346,14 @@ const auditStatement = (
     action: string;
     result?: "ok" | "failed" | "pending" | "denied";
     meta?: string | null;
+    onlyIfPreviousChanged?: boolean;
   },
 ) =>
   env.DB.prepare(
     `INSERT INTO activity_events
       (id, workspace_id, entity_type, entity_id, task_id, actor_type, actor_id, action, result, meta, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE ${input.onlyIfPreviousChanged ? "changes() > 0" : "1"}`,
   ).bind(
     uid("ev"),
     input.workspaceId,
