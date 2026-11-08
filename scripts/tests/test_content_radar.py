@@ -729,14 +729,20 @@ class FakeSelectorApi:
     def create_draft(self, candidate_id: str, document: dict[str, Any]) -> dict[str, Any]:
         self.events.append(("create_draft", {"candidate_id": candidate_id, "document": document}))
         cand = self.candidates[candidate_id]
+        score_obj = cand.get("score") or {}
         draft = {
             "id": f"draft-{candidate_id}",
             "candidateId": candidate_id,
             "postId": f"draft-{candidate_id}",
+            "clusterKey": cand.get("clusterKey") or cand.get("cluster_key") or candidate_id,
             "title": document.get("headline") or cand.get("title"),
-            "document": document,
+            "status": "Draft",
             "creationKind": "automatic",
             "autoDateWib": "2026-11-08",
+            "document": document,
+            "scoreSnapshot": score_obj,
+            "sourcesSnapshot": cand.get("sources") or [],
+            "createdBy": "radar-agent",
         }
         self.created_drafts.append(draft)
         self.drafts.append(draft)
@@ -1054,6 +1060,90 @@ class SelectorTests(unittest.TestCase):
         fail_updates = [e[1] for e in fail_api.events if e[0] == "update_run"]
         self.assertEqual(fail_updates[-1]["status"], "failed")
         self.assertIn("koneksi API terputus", fail_updates[-1]["error"])
+
+    def test_selector_tie_breaker_prefers_newer_effective_timestamp(self) -> None:
+        cand_older = make_test_candidate(
+            "a-older",
+            published_at="2026-11-08T03:00:00Z",
+            discovered_at="2026-11-08T03:00:00Z",
+            relevance=25,
+            carousel_potential=10,
+        )
+        cand_newer = make_test_candidate(
+            "b-newer",
+            published_at="2026-11-08T07:00:00Z",
+            discovered_at="2026-11-08T07:00:00Z",
+            relevance=25,
+            carousel_potential=10,
+        )
+        # Verify both have identical score total (85)
+        self.assertEqual(cand_older["score"]["total"], cand_newer["score"]["total"])
+
+        # Remaining quota = 1 slot (2 existing drafts today)
+        existing = [
+            {"id": "d1", "candidateId": "p1", "creationKind": "automatic", "autoDateWib": "2026-11-08", "document": {"kicker": "TECH"}},
+            {"id": "d2", "candidateId": "p2", "creationKind": "automatic", "autoDateWib": "2026-11-08", "document": {"kicker": "TECH"}},
+        ]
+        api = FakeSelectorApi([cand_older, cand_newer], drafts=existing)
+        result = Selector(api, now=lambda: NOW).run()
+        self.assertEqual(len(result.drafts_created), 1)
+        self.assertEqual(result.drafts_created[0]["candidateId"], "b-newer")
+
+    def test_selector_digest_extracts_score_from_score_snapshot(self) -> None:
+        draft = {
+            "candidateId": "c1",
+            "title": "OpenAI Meluncurkan Fitur Baru",
+            "document": {"kicker": "AI", "sourceUrl": "https://openai.example/news"},
+            "scoreSnapshot": {
+                "rubricVersion": "v1",
+                "total": 88,
+                "components": {"credibility": 30, "freshness": 15, "evidence": 11, "relevance": 21, "potential": 8, "safety": 3},
+            },
+        }
+        result = SelectorResult(
+            run_id="run-1",
+            run_time=NOW,
+            evaluated_count=1,
+            qualified_count=1,
+            rejected_count=0,
+            duplicate_count=0,
+            crypto_skipped_count=0,
+            existing_drafts_today=0,
+            drafts_created=[draft],
+        )
+        digest = format_digest(result)
+        self.assertIn("88/100", digest)
+        self.assertNotIn("?/100", digest)
+
+    def test_selector_enriches_drafts_created_and_digest_from_api_draft_view(self) -> None:
+        cand = make_test_candidate("c-enrich", relevance=25, carousel_potential=10)
+        api = FakeSelectorApi([cand])
+        result = Selector(api, now=lambda: NOW).run()
+
+        self.assertEqual(len(result.drafts_created), 1)
+        draft = result.drafts_created[0]
+        self.assertEqual(draft["candidateId"], "c-enrich")
+        self.assertEqual(draft["niche"], "technology")
+        self.assertEqual(draft["score"], cand["score"]["total"])
+        self.assertEqual(draft["sourceUrl"], "https://c-enrich.example/post")
+
+        digest = result.digest()
+        self.assertIn(f"{cand['score']['total']}/100", digest)
+        self.assertNotIn("?/100", digest)
+        self.assertIn("https://c-enrich.example/post", digest)
+
+    def test_selector_dry_run_skips_create_draft(self) -> None:
+        cand = make_test_candidate("c-dry", relevance=25, carousel_potential=10)
+        api = FakeSelectorApi([cand])
+        selector = Selector(api, now=lambda: NOW, dry_run=True)
+        result = selector.run()
+
+        self.assertEqual(len(api.created_drafts), 0)
+        self.assertEqual(len(result.drafts_created), 1)
+        self.assertEqual(result.drafts_created[0]["candidateId"], "c-dry")
+        digest = result.digest()
+        self.assertIn(f"{cand['score']['total']}/100", digest)
+        self.assertNotIn("?/100", digest)
 
 
 if __name__ == "__main__":

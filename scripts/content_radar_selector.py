@@ -199,9 +199,10 @@ def compute_radar_score(snapshot: dict[str, Any]) -> RadarScoreResult:
     credibility = CREDIBILITY_TABLE.get(source_tier, 5)
 
     # Freshness
-    as_of = _parse_iso_to_utc(str(snapshot.get("asOf", "2026-11-08T08:00:00Z")))
+    default_now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    as_of = _parse_iso_to_utc(str(snapshot.get("asOf") or default_now))
     published_at_str = snapshot.get("publishedAt")
-    discovered_at_str = str(snapshot.get("discoveredAt", "2026-11-08T08:00:00Z"))
+    discovered_at_str = str(snapshot.get("discoveredAt") or default_now)
     effective_str = published_at_str if published_at_str is not None else discovered_at_str
     effective_dt = _parse_iso_to_utc(effective_str)
     age_hours = (as_of - effective_dt).total_seconds() / 3600.0
@@ -499,8 +500,10 @@ def format_digest(result: SelectorResult) -> str:
             niche = (doc.get("kicker") or draft.get("niche") or "TECH").upper()
             title = draft.get("title") or doc.get("headline") or "Tanpa Judul"
             score = draft.get("score")
+            if score is None:
+                score = draft.get("scoreSnapshot") or draft.get("score_snapshot")
             score_val = score if isinstance(score, (int, float)) else (score.get("total") if isinstance(score, dict) else "?")
-            source_url = doc.get("sourceUrl") or draft.get("sourceUrl") or ""
+            source_url = draft.get("sourceUrl") or doc.get("sourceUrl") or draft.get("canonicalUrl") or ""
             lines.append(f"{idx}. *[{niche}]* {title}")
             lines.append(f"   • Skor: {score_val}/100")
             if source_url:
@@ -674,6 +677,7 @@ class Selector:
         now: Callable[[], dt.datetime] = utc_now,
         evaluator: Callable[[dict[str, Any]], Evaluation] | None = None,
         draft_generator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        dry_run: bool = False,
     ) -> None:
         if isinstance(api, ApiClient) and not hasattr(api, "list_candidates"):
             self.api: SelectorApi = SelectorApiClient(
@@ -688,6 +692,7 @@ class Selector:
         self.now = now
         self.evaluator = evaluator or default_evaluator
         self.draft_generator = draft_generator or generate_draft
+        self.dry_run = dry_run
 
     def run(self) -> SelectorResult:
         run_record = self.api.create_run("selector", {"windowHours": 24})
@@ -778,13 +783,19 @@ class Selector:
             # 1. Total score DESC
             # 2. Effective timestamp DESC
             # 3. ID ASC
-            def sort_key(c: dict[str, Any]) -> tuple[int, str, str]:
+            def sort_key(c: dict[str, Any]) -> tuple[int, float, str]:
                 score_obj = c.get("score") or {}
                 total = int(score_obj.get("total", c.get("score_total", 0)))
                 snap = score_obj.get("inputSnapshot") or {}
                 eff_time = str(snap.get("effectiveTimestamp") or c.get("publishedAt") or c.get("discoveredAt") or "")
                 cid = str(c.get("id", ""))
-                return (-total, eff_time, cid)
+                eff_ts = 0.0
+                if eff_time:
+                    try:
+                        eff_ts = _parse_iso_to_utc(eff_time).timestamp()
+                    except Exception:
+                        eff_ts = 0.0
+                return (-total, -eff_ts, cid)
 
             qualified_candidates.sort(key=sort_key)
 
@@ -814,14 +825,41 @@ class Selector:
                 cand_id = str(cand["id"])
                 doc = self.draft_generator(cand)
                 validate_radar_draft(doc, str(cand.get("niche", "technology")))
-                draft_resp = self.api.create_draft(cand_id, doc)
-                draft_data = draft_resp.get("draft") or {
-                    "candidateId": cand_id,
-                    "title": doc.get("headline", cand.get("title")),
-                    "niche": cand.get("niche"),
-                    "score": cand.get("score", {}).get("total", cand.get("score_total")),
-                    "document": doc,
-                }
+                if self.dry_run:
+                    draft_data = {
+                        "candidateId": cand_id,
+                        "title": doc.get("headline", cand.get("title")),
+                        "niche": cand.get("niche"),
+                        "score": cand.get("score", {}).get("total", cand.get("score_total")),
+                        "document": doc,
+                        "sourceUrl": cand.get("canonicalUrl") or cand.get("sourceUrl") or doc.get("sourceUrl"),
+                    }
+                else:
+                    draft_resp = self.api.create_draft(cand_id, doc)
+                    raw_draft = draft_resp.get("draft")
+                    if isinstance(raw_draft, dict):
+                        draft_data = dict(raw_draft)
+                    else:
+                        draft_data = {
+                            "candidateId": cand_id,
+                            "title": doc.get("headline", cand.get("title")),
+                            "document": doc,
+                        }
+                    if "niche" not in draft_data or not draft_data["niche"]:
+                        draft_data["niche"] = cand.get("niche")
+                    if "title" not in draft_data or not draft_data["title"]:
+                        draft_data["title"] = doc.get("headline", cand.get("title"))
+                    if "sourceUrl" not in draft_data or not draft_data["sourceUrl"]:
+                        draft_data["sourceUrl"] = cand.get("canonicalUrl") or cand.get("sourceUrl") or doc.get("sourceUrl")
+                    if "score" not in draft_data or draft_data["score"] is None:
+                        if "scoreSnapshot" in draft_data and isinstance(draft_data["scoreSnapshot"], dict):
+                            draft_data["score"] = draft_data["scoreSnapshot"].get("total")
+                        elif "score_snapshot" in draft_data and isinstance(draft_data["score_snapshot"], dict):
+                            draft_data["score"] = draft_data["score_snapshot"].get("total")
+                        elif isinstance(cand.get("score"), dict):
+                            draft_data["score"] = cand["score"].get("total", cand.get("score_total"))
+                        else:
+                            draft_data["score"] = cand.get("score_total")
                 result.drafts_created.append(draft_data)
 
             self.api.update_run(
@@ -888,7 +926,7 @@ def main(argv: list[str] | None = None) -> int:
             return default_evaluator(cand)
 
         with FileLock(args.lock):
-            selector = Selector(api, evaluator=custom_evaluator)
+            selector = Selector(api, evaluator=custom_evaluator, dry_run=args.dry_run)
             result = selector.run()
     except BlockingIOError:
         return 0
