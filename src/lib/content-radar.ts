@@ -62,6 +62,11 @@ export interface RadarScore {
   inputSnapshot: RadarScoreInputSnapshot;
 }
 
+export interface RadarAdmission {
+  admitted: boolean;
+  reason: 'score_below_50' | null;
+}
+
 export interface RadarCandidate {
   id: string;
   clusterKey: string;
@@ -151,38 +156,134 @@ const RISK_FLAGS = new Set<RadarRiskFlag>([
   'referral_affiliate',
 ]);
 const CONTEXTUAL_RISKS = new Set<RadarRiskFlag>(['context_required', 'disclaimer_required']);
+const OFFSET_ISO_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|[+-]\d{2}:\d{2})$/;
 
-function parseTimestamp(value: string): number | null {
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseTimestamp(value: string, field: string): { milliseconds: number; normalized: string } {
+  const match = OFFSET_ISO_TIMESTAMP.exec(value);
+  if (!match) throw new TypeError(`Invalid ${field} timestamp format`);
+
+  const [, year, month, day, hour, minute, second] = match;
+  const yearNumber = Number(year);
+  const monthNumber = Number(month);
+  const dayNumber = Number(day);
+  const lastDay = new Date(Date.UTC(yearNumber, monthNumber, 0)).getUTCDate();
+  if (
+    monthNumber < 1 ||
+    monthNumber > 12 ||
+    dayNumber < 1 ||
+    dayNumber > lastDay ||
+    Number(hour) > 23 ||
+    Number(minute) > 59 ||
+    Number(second) > 59
+  ) {
+    throw new TypeError(`Invalid ${field} timestamp format`);
+  }
+
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) {
+    throw new TypeError(`Invalid ${field} timestamp format`);
+  }
+  return { milliseconds, normalized: new Date(milliseconds).toISOString() };
+}
+
+function validateScoreInput(input: unknown): asserts input is RadarScoreInput {
+  if (!isRecord(input)) throw new TypeError('Content Radar score input must be an object');
+  if (input.rubricVersion !== 'v1') throw new TypeError('Unsupported Content Radar rubricVersion');
+  if (typeof input.asOf !== 'string') throw new TypeError('asOf must be a string');
+  if (!SOURCE_TIERS.has(input.sourceTier as RadarSourceTier)) throw new TypeError('Invalid source tier');
+  if (typeof input.sourceIsPrimary !== 'boolean') {
+    throw new TypeError('sourceIsPrimary must be a boolean');
+  }
+  if (input.publishedAt !== null && typeof input.publishedAt !== 'string') {
+    throw new TypeError('publishedAt must be a string or null');
+  }
+  if (typeof input.discoveredAt !== 'string') throw new TypeError('discoveredAt must be a string');
+  if (!Array.isArray(input.independentCrossChecks)) {
+    throw new TypeError('independentCrossChecks must be an array');
+  }
+  for (const check of input.independentCrossChecks) {
+    if (!isRecord(check)) throw new TypeError('cross-check entry must be an object');
+    if (typeof check.domain !== 'string' || check.domain.trim() === '') {
+      throw new TypeError('cross-check domain must be a non-empty string');
+    }
+    if (!SOURCE_TIERS.has(check.tier as RadarSourceTier)) {
+      throw new TypeError('Invalid cross-check tier');
+    }
+  }
+  if (!RELEVANCE_VALUES.has(input.relevance as number)) {
+    throw new TypeError('Invalid relevance score');
+  }
+  if (!POTENTIAL_VALUES.has(input.carouselPotential as number)) {
+    throw new TypeError('Invalid carousel potential score');
+  }
+  if (!Array.isArray(input.riskFlags)) throw new TypeError('riskFlags must be an array');
+  if (input.riskFlags.some((flag) => typeof flag !== 'string' || !RISK_FLAGS.has(flag as RadarRiskFlag))) {
+    throw new TypeError('Invalid risk flag');
+  }
+}
+
+function normalizeDomain(value: string): string {
+  const domain = value.trim().toLowerCase();
+  let parsed: URL;
+  try {
+    parsed = new URL(`https://${domain}`);
+  } catch {
+    throw new TypeError('Invalid cross-check domain');
+  }
+  if (
+    parsed.hostname !== domain ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.port !== '' ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== ''
+  ) {
+    throw new TypeError('Invalid cross-check domain');
+  }
+  return domain;
 }
 
 function normalizedCrossChecks(checks: RadarCrossCheckInput[]): RadarCrossCheckInput[] {
   const byDomain = new Map<string, RadarCrossCheckInput>();
   for (const check of checks) {
-    const domain = check.domain.trim().toLowerCase();
-    if (domain && !byDomain.has(domain)) byDomain.set(domain, { domain, tier: check.tier });
+    const domain = normalizeDomain(check.domain);
+    if (!byDomain.has(domain)) byDomain.set(domain, { domain, tier: check.tier });
   }
-  return [...byDomain.values()].sort((left, right) =>
-    left.domain < right.domain ? -1 : left.domain > right.domain ? 1 : 0,
-  );
+  return [...byDomain.values()].sort((left, right) => compareCodeUnits(left.domain, right.domain));
 }
 
 function snapshotScoreInput(input: RadarScoreInput): RadarScoreInputSnapshot {
-  const asOf = parseTimestamp(input.asOf);
-  const publishedAt = input.publishedAt ? parseTimestamp(input.publishedAt) : null;
-  const discoveredAt = parseTimestamp(input.discoveredAt);
-  const timestampFallback = !input.publishedAt;
-  const effectiveTimestamp = timestampFallback ? input.discoveredAt : input.publishedAt!;
-  const effective = timestampFallback ? discoveredAt : publishedAt;
-  const timestampValid = asOf !== null && effective !== null && effective <= asOf;
-  const ageHours = timestampValid ? (asOf - effective) / 3_600_000 : null;
+  const asOf = parseTimestamp(input.asOf, 'asOf');
+  const discoveredAt = parseTimestamp(input.discoveredAt, 'discoveredAt');
+  const publishedAt =
+    input.publishedAt === null ? null : parseTimestamp(input.publishedAt, 'publishedAt');
+  const timestampFallback = input.publishedAt === null;
+  const effective = publishedAt ?? discoveredAt;
+  const timestampValid =
+    discoveredAt.milliseconds <= asOf.milliseconds &&
+    (publishedAt === null || publishedAt.milliseconds <= asOf.milliseconds);
+  const ageHours = timestampValid
+    ? (asOf.milliseconds - effective.milliseconds) / 3_600_000
+    : null;
 
   return {
     ...input,
+    asOf: asOf.normalized,
+    publishedAt: publishedAt?.normalized ?? null,
+    discoveredAt: discoveredAt.normalized,
     independentCrossChecks: normalizedCrossChecks(input.independentCrossChecks),
-    riskFlags: [...new Set(input.riskFlags)].sort(),
-    effectiveTimestamp,
+    riskFlags: [...new Set(input.riskFlags)].sort(compareCodeUnits),
+    effectiveTimestamp: effective.normalized,
     timestampFallback,
     timestampValid,
     ageHours,
@@ -212,6 +313,7 @@ function safetyFor(flags: RadarRiskFlag[]): RadarScoreComponents['safety'] {
 }
 
 export function canonicalizeRadarUrl(url: string): string {
+  if (typeof url !== 'string') throw new TypeError('Content Radar URL must be a string');
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new TypeError('Content Radar URLs must use HTTP/HTTPS');
@@ -225,8 +327,8 @@ export function canonicalizeRadarUrl(url: string): string {
       return !normalized.startsWith('utm_') && !TRACKING_PARAMETERS.has(normalized);
     })
     .sort(([leftKey, leftValue], [rightKey, rightValue]) => {
-      const keyOrder = leftKey.localeCompare(rightKey);
-      return keyOrder || leftValue.localeCompare(rightValue);
+      const keyOrder = compareCodeUnits(leftKey, rightKey);
+      return keyOrder || compareCodeUnits(leftValue, rightValue);
     });
   parsed.search = '';
   for (const [key, value] of parameters) parsed.searchParams.append(key, value);
@@ -237,19 +339,7 @@ export function canonicalizeRadarUrl(url: string): string {
 }
 
 export function computeRadarScore(input: RadarScoreInput): RadarScore {
-  if (input.rubricVersion !== 'v1') throw new TypeError('Unsupported Content Radar rubric');
-  if (!SOURCE_TIERS.has(input.sourceTier)) throw new TypeError('Invalid source tier');
-  if (input.independentCrossChecks.some(({ tier }) => !SOURCE_TIERS.has(tier))) {
-    throw new TypeError('Invalid cross-check tier');
-  }
-  if (input.riskFlags.some((flag) => !RISK_FLAGS.has(flag))) {
-    throw new TypeError('Invalid risk flag');
-  }
-  if (!RELEVANCE_VALUES.has(input.relevance)) throw new TypeError('Invalid relevance score');
-  if (!POTENTIAL_VALUES.has(input.carouselPotential)) {
-    throw new TypeError('Invalid carousel potential score');
-  }
-
+  validateScoreInput(input);
   const inputSnapshot = snapshotScoreInput(input);
   const components: RadarScoreComponents = {
     credibility: CREDIBILITY[input.sourceTier],
@@ -268,8 +358,15 @@ export function computeRadarScore(input: RadarScoreInput): RadarScore {
   };
 }
 
+export function getRadarAdmission(score: RadarScore): RadarAdmission {
+  const recomputedScore = computeRadarScore(score.inputSnapshot);
+  return recomputedScore.total >= 50
+    ? { admitted: true, reason: null }
+    : { admitted: false, reason: 'score_below_50' };
+}
+
 function hasDraftTrust(snapshot: RadarScoreInputSnapshot): boolean {
-  if (snapshot.sourceTier === 'A' && snapshot.sourceIsPrimary) return true;
+  if (snapshot.sourceIsPrimary) return true;
   return (
     snapshot.independentCrossChecks.filter(({ tier }) => tier === 'B' || tier === 'C').length >= 2
   );
@@ -334,9 +431,13 @@ export function radarDraftToSocialPost(draft: RadarDraft): SocialPost {
   }
   for (const source of draft.sourcesSnapshot) canonicalizeRadarUrl(source.url);
   const sourceUrl = canonicalizeRadarUrl(draft.document.sourceUrl);
+  const coverImageUrl = draft.document.coverImageUrl
+    ? canonicalizeRadarUrl(draft.document.coverImageUrl)
+    : draft.document.coverImageUrl;
   const carousel: CarouselDocument = {
     ...draft.document,
     sourceUrl,
+    coverImageUrl,
     slides: draft.document.slides.map((slide) => ({ ...slide })),
     hashtags: [...draft.document.hashtags],
   };
