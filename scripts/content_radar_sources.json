@@ -353,7 +353,7 @@
     "domain": "cointelegraph.com",
     "name": "Cointelegraph",
     "tier": "D",
-    "kind": "community",
+    "kind": "media",
     "feedUrl": "https://cointelegraph.com/rss",
     "enabled": true,
     "requiresCrosscheck": true,

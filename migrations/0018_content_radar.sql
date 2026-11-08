@@ -11,7 +11,10 @@ CREATE TABLE IF NOT EXISTS content_radar_sources (
   domain TEXT NOT NULL,
   name TEXT NOT NULL,
   tier TEXT NOT NULL CHECK (tier IN ('A', 'B', 'C', 'D', 'unverified')),
-  kind TEXT NOT NULL CHECK (kind IN ('official', 'media', 'community', 'regulator', 'research', 'project')),
+  -- 'discovered' is the collector-assigned kind for an unknown domain that was
+  -- auto-registered as `unverified` so provenance rows can reference it.
+  kind TEXT NOT NULL
+    CHECK (kind IN ('official', 'media', 'community', 'regulator', 'research', 'project', 'discovered')),
   niches TEXT NOT NULL DEFAULT '[]'
     CHECK (json_valid(niches) AND json_type(niches) = 'array'),
   feed_url TEXT,
@@ -156,6 +159,12 @@ CREATE INDEX IF NOT EXISTS idx_content_radar_runs_workspace_kind
 
 CREATE INDEX IF NOT EXISTS idx_content_radar_runs_workspace_status
   ON content_radar_runs (workspace_id, status, created_at);
+
+-- Reaper scan index: lets the collector/selector find a stale active run
+-- (`status = 'running'` with an old or missing heartbeat) without a table scan,
+-- so a crashed run can be moved to `cancelled` and the active-kind lock released.
+CREATE INDEX IF NOT EXISTS idx_content_radar_runs_reaper
+  ON content_radar_runs (workspace_id, kind, status, heartbeat_at);
 
 CREATE TABLE IF NOT EXISTS content_radar_drafts (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
