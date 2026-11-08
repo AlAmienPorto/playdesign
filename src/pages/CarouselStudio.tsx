@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   ArrowDown,
   ArrowUp,
@@ -29,7 +30,8 @@ import {
   normalizeCarousel,
   resolveCarouselSelection,
 } from '../lib/carousel';
-import { ApiError, createCarouselExportJob, fetchCarouselExportJobs, scheduleCarouselPublish, type CarouselExportJob, type CarouselPublishPlatform } from '../lib/api';
+import { ApiError, acknowledgeRadarDraftImport, createCarouselExportJob, fetchCarouselExportJobs, fetchOffice, fetchRadarDrafts, scheduleCarouselPublish, type CarouselExportJob, type CarouselPublishPlatform } from '../lib/api';
+import { syncRadarDraftImports, type RadarDraft } from '../lib/content-radar';
 import { useStore } from '../store/store';
 
 const LAST_CAROUSEL_KEY = 'playdesign.carousel.last';
@@ -125,6 +127,7 @@ export function CarouselStudioPage() {
     role,
     user,
     createCarouselDraft,
+    importRadarDrafts,
     saveCarousel,
     submitCarouselReview,
     decideCarouselReview,
@@ -171,6 +174,64 @@ export function CarouselStudioPage() {
   const [publishAt, setPublishAt] = useState('');
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishError, setPublishError] = useState('');
+
+  // Import draft Content Radar yang belum di-import secara otomatis saat Carousel Studio dibuka.
+  useEffect(() => {
+    let cancelled = false;
+    const workspaceId = db.workspaces?.find((w) => w.active)?.id ?? db.workspaces?.[0]?.id ?? 'playdesign';
+
+    const runImport = async () => {
+      let actorId = user.id || 'ja';
+      try {
+        const office = await fetchOffice(workspaceId);
+        if (office.actor?.id) actorId = office.actor.id;
+      } catch {
+        // Tetap gunakan user.id bila fetchOffice gagal atau offline
+      }
+
+      if (cancelled) return;
+
+      try {
+        const res = await syncRadarDraftImports({
+          workspaceId,
+          actorId,
+          fetchDrafts: async () => (await fetchRadarDrafts({ workspaceId, unimported: true, limit: 100 })) as unknown as RadarDraft[],
+          importDrafts: importRadarDrafts,
+          ackDraft: (draftId) => acknowledgeRadarDraftImport(draftId, { workspaceId, actorId }),
+        });
+
+        if (cancelled) return;
+        if (res.imported.length > 0) {
+          toast(`Mengimpor ${res.imported.length} draft dari Content Radar.`, 'success');
+        }
+        if (res.failed.length > 0) {
+          toast(`${res.failed.length} draft radar belum berhasil disinkronkan.`, 'warning');
+        }
+      } catch {
+        // Gagal import tidak memblokir editor
+      }
+    };
+
+    runImport();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Jika dokumen kosong dan ada post Instagram (misal setelah import), pilih draft pertama
+  useEffect(() => {
+    if (!document && instagramPosts.length > 0) {
+      const targetId = selectedId || resolveCarouselSelection(instagramPosts, null);
+      const post = instagramPosts.find((row) => row.id === targetId) ?? instagramPosts[0];
+      if (post) {
+        setSelectedId(post.id);
+        setDocument(normalizeCarousel(post));
+        setSavedAt(post.carousel?.updatedAt ?? post.date);
+        setScheduleAt(toLocalDateTime(post.date));
+      }
+    }
+  }, [document, selectedId, instagramPosts]);
 
   // Status/pointer Drive dibaca dari D1; halaman tidak pernah menyimpan byte gambar.
   useEffect(() => {
@@ -483,6 +544,15 @@ export function CarouselStudioPage() {
   const canSubmit = (status === 'Draft' || status === 'Rejected') && !dirty && can('content.write');
   const canExport = status === 'Approved' && !dirty && isOwner && !exportBusy;
   const exportRunning = Boolean(exportJob && ACTIVE_EXPORT_STATUSES.includes(exportJob.status));
+  const isRadarDraft = Boolean(
+    selectedPost?.radarDraftId ||
+    selectedPost?.author === 'radar-agent' ||
+    selectedPost?.id?.startsWith('radar') ||
+    selectedPost?.carousel?.kicker?.toLowerCase().includes('radar'),
+  );
+  const sanitizedSourceUrl = document.sourceUrl && /^https?:\/\//i.test(document.sourceUrl)
+    ? document.sourceUrl
+    : null;
 
   return (
     <>
@@ -492,6 +562,7 @@ export function CarouselStudioPage() {
         desc="Draft → review Owner → Approved → ekspor Drive atau jadwalkan. Konten AI tidak pernah tayang tanpa keputusan manusia."
         actions={
           <>
+            {isRadarDraft && <Badge tone="brand">Content Radar</Badge>}
             <Badge tone={dirty ? 'warning' : 'success'}>{dirty ? 'Belum disimpan' : 'Tersimpan'}</Badge>
             <button type="button" className="btn btn-ghost" onClick={createDraft} disabled={!can('content.write')}>
               <Plus size={15} /> Draft baru
@@ -516,6 +587,56 @@ export function CarouselStudioPage() {
           <span>{savedAt ? `Terakhir disimpan ${new Date(savedAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}` : 'Perubahan lokal belum disimpan'}</span>
         </div>
       </div>
+
+      {isRadarDraft && (
+        <div
+          className="carousel-provenance-bar"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            padding: '10px 14px',
+            background: 'var(--surface-2)',
+            border: '1px solid var(--line)',
+            borderRadius: 'var(--radius)',
+            marginBottom: '14px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Badge tone="brand">Content Radar</Badge>
+            <span style={{ fontSize: '12.5px', color: 'var(--muted)' }}>
+              Draft ini bersumber dari Content Radar.
+            </span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Link
+              to="/marketing/content-radar"
+              className="btn btn-ghost"
+              style={{ fontSize: '12px', padding: '4px 10px' }}
+            >
+              Kembali ke Content Radar
+            </Link>
+            {sanitizedSourceUrl && (
+              <a
+                href={sanitizedSourceUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="btn btn-ghost"
+                style={{
+                  fontSize: '12px',
+                  padding: '4px 10px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                <ExternalLink size={13} /> Sumber asli
+              </a>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="carousel-studio">
         <aside className="carousel-preview-rail" aria-label="Pratinjau carousel">
@@ -842,6 +963,18 @@ export function CarouselStudioPage() {
                 </Field>
                 <Field className="span-2" label="URL sumber">
                   <input type="url" className="input" value={document.sourceUrl} onChange={(event) => patchDocument({ sourceUrl: event.target.value })} placeholder="https://…" />
+                  {isRadarDraft && (
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+                      <Link to="/marketing/content-radar" className="btn btn-ghost" style={{ fontSize: '11.5px', padding: '2px 8px' }}>
+                        Kembali ke Content Radar
+                      </Link>
+                      {sanitizedSourceUrl && (
+                        <a href={sanitizedSourceUrl} target="_blank" rel="noreferrer" className="btn btn-ghost" style={{ fontSize: '11.5px', padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          <ExternalLink size={12} /> Buka sumber asli
+                        </a>
+                      )}
+                    </div>
+                  )}
                 </Field>
                 <Field className="span-2" label="URL foto cover" hint={imageInvalid ? 'Foto tidak dapat dimuat. Preview memakai placeholder.' : 'Kosongkan jika foto belum siap.'}>
                   <input type="url" className={`input${imageInvalid ? ' is-invalid' : ''}`} value={document.coverImageUrl} onChange={(event) => patchDocument({ coverImageUrl: event.target.value })} placeholder="https://…" />

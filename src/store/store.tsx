@@ -32,7 +32,8 @@ import type {
   CarouselDocument,
 } from '../data/types';
 import { SEED } from '../data/seed';
-import { createCarouselDraftInDb, decideCarouselInDb, saveCarouselInDb, submitCarouselForReviewInDb } from '../lib/carousel-store';
+import { createCarouselDraftInDb, decideCarouselInDb, importRadarDrafts, importRadarDraftsInDb, saveCarouselInDb, submitCarouselForReviewInDb } from '../lib/carousel-store';
+import type { RadarDraft } from '../lib/content-radar';
 import { hasPermission } from '../lib/permissions';
 import { dayOffset, uid } from '../lib/utils';
 import { fetchOffice, fetchOutreach, getCredential, saveOutreach, type OutreachStatus } from '../lib/api';
@@ -124,6 +125,7 @@ interface StoreValue {
   removeMenuItem: (menuId: string, itemId: string) => void;
   moveMenuItem: (menuId: string, itemId: string, direction: -1 | 1) => void;
   createCarouselDraft: () => string | null;
+  importRadarDrafts: (drafts: RadarDraft[]) => string[];
   saveCarousel: (postId: string, document: CarouselDocument) => boolean;
   submitCarouselReview: (postId: string) => boolean;
   decideCarouselReview: (postId: string, decision: 'approved' | 'rejected' | 'revision', note: string) => boolean;
@@ -1122,6 +1124,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return postId;
   };
 
+  const importRadarDraftsAction = (drafts: RadarDraft[]) => {
+    let importedIds: string[] = [];
+    setDb((prev) => {
+      const result = importRadarDraftsInDb(prev, drafts, user.name);
+      importedIds = result.imported;
+      return result.db;
+    });
+    return importedIds;
+  };
+
   const saveCarousel = (postId: string, document: CarouselDocument) => {
     if (!can('content.write')) {
       toast('Peran ini tidak punya izin menyimpan carousel.', 'danger');
@@ -1299,6 +1311,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       removeMenuItem,
       moveMenuItem,
       createCarouselDraft,
+      importRadarDrafts: importRadarDraftsAction,
       saveCarousel,
       submitCarouselReview,
       decideCarouselReview,
@@ -1324,5 +1337,7 @@ export function useStore() {
   if (!ctx) throw new Error('useStore must be used inside StoreProvider');
   return ctx;
 }
+
+export { importRadarDrafts, importRadarDraftsInDb };
 
 export const activeUser = (db: DB) => db.users[0];

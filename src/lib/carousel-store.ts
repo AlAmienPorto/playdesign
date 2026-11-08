@@ -1,4 +1,5 @@
 import type { Approval, CarouselDocument, DB, SocialPost } from '../data/types';
+import { radarDraftToSocialPost, type RadarDraft } from './content-radar';
 
 export interface SaveCarouselResult {
   ok: boolean;
@@ -284,4 +285,115 @@ export function decideCarouselInDb(
       ],
     },
   };
+}
+
+function isPostHumanEdited(existing: SocialPost, original: SocialPost): boolean {
+  if (existing.status !== 'Draft') return true;
+  if (
+    existing.submittedAt ||
+    existing.reviewedBy ||
+    existing.reviewedAt ||
+    existing.reviewNote ||
+    existing.approvedAt
+  ) {
+    return true;
+  }
+  if (existing.title !== original.title) return true;
+  if ((existing.caption ?? '') !== (original.caption ?? '')) return true;
+  if (existing.mediaUrl !== original.mediaUrl) return true;
+  if (JSON.stringify(existing.hashtags ?? []) !== JSON.stringify(original.hashtags ?? [])) return true;
+  if (JSON.stringify(existing.slides ?? []) !== JSON.stringify(original.slides ?? [])) return true;
+  if (existing.carousel && original.carousel) {
+    const c1 = existing.carousel;
+    const c2 = original.carousel;
+    if (c1.headline !== c2.headline) return true;
+    if (c1.kicker !== c2.kicker) return true;
+    if (c1.highlight !== c2.highlight) return true;
+    if (c1.template !== c2.template) return true;
+    if (c1.sourceName !== c2.sourceName) return true;
+    if (c1.sourceUrl !== c2.sourceUrl) return true;
+    if (c1.coverImageUrl !== c2.coverImageUrl) return true;
+    if (c1.slides.length !== c2.slides.length) return true;
+    for (let i = 0; i < c1.slides.length; i++) {
+      const s1 = c1.slides[i];
+      const s2 = c2.slides[i];
+      if (s1.title !== s2?.title || s1.body !== s2?.body) return true;
+    }
+  }
+  return false;
+}
+
+export function importRadarDraftsInDb(
+  db: DB,
+  drafts: RadarDraft[],
+  actor = 'radar-agent',
+): { imported: string[]; db: DB } {
+  if (!Array.isArray(drafts) || drafts.length === 0) {
+    return { imported: [], db };
+  }
+
+  const now = new Date().toISOString();
+  const imported: string[] = [];
+  const newAuditEntries: DB['audit'] = [];
+  const nextSocial: SocialPost[] = [...db.social];
+
+  for (const draft of drafts) {
+    let post: SocialPost;
+    try {
+      post = radarDraftToSocialPost(draft);
+    } catch {
+      continue;
+    }
+
+    const existingIndex = nextSocial.findIndex((item) => item.id === draft.postId);
+
+    if (existingIndex < 0) {
+      nextSocial.unshift({
+        ...post,
+        status: 'Draft',
+      });
+      newAuditEntries.push({
+        id: newId('au'),
+        at: now,
+        actor: actor || draft.createdBy || 'radar-agent',
+        action: 'Mengimpor Draft Content Radar',
+        target: post.title,
+        module: 'Carousel Studio',
+      });
+      imported.push(draft.id);
+    } else {
+      const existing = nextSocial[existingIndex];
+      const edited = isPostHumanEdited(existing, post);
+      if (edited) {
+        imported.push(draft.id);
+      } else {
+        imported.push(draft.id);
+      }
+    }
+  }
+
+  return {
+    imported,
+    db: {
+      ...db,
+      social: nextSocial,
+      audit: newAuditEntries.length > 0 ? [...newAuditEntries, ...db.audit] : db.audit,
+    },
+  };
+}
+
+export function importRadarDrafts(
+  draftsOrDb: RadarDraft[] | DB,
+  draftsOrActor?: RadarDraft[] | string,
+  maybeActor?: string,
+): { imported: string[]; db: DB } {
+  if (Array.isArray(draftsOrDb)) {
+    const drafts = draftsOrDb;
+    const actor = typeof draftsOrActor === 'string' ? draftsOrActor : 'radar-agent';
+    return importRadarDraftsInDb({ social: [], audit: [] } as unknown as DB, drafts, actor);
+  }
+  const db = draftsOrDb;
+  const drafts = Array.isArray(draftsOrActor) ? draftsOrActor : [];
+  const actor = typeof maybeActor === 'string' ? maybeActor : 'radar-agent';
+  return importRadarDraftsInDb(db, drafts, actor);
 }

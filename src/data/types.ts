@@ -378,6 +378,8 @@ export interface SocialPost {
   reviewedAt?: string;
   reviewNote?: string;
   approvedAt?: string;
+  radarDraftId?: string;
+  radarCandidateId?: string;
 }
 
 export interface RawLead {

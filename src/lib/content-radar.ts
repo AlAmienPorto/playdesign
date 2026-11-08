@@ -454,5 +454,79 @@ export function radarDraftToSocialPost(draft: RadarDraft): SocialPost {
     slides: carousel.slides.map((slide) => slide.title),
     author: draft.createdBy,
     carousel,
+    radarDraftId: draft.id,
+    radarCandidateId: draft.candidateId,
+  };
+}
+
+export { importRadarDrafts, importRadarDraftsInDb } from './carousel-store';
+
+export interface SyncRadarDraftsOptions {
+  workspaceId: string;
+  actorId: string;
+  fetchDrafts: () => Promise<RadarDraft[]>;
+  importDrafts: (drafts: RadarDraft[]) => string[];
+  ackDraft: (draftId: string, context: { workspaceId: string; actorId: string }) => Promise<unknown>;
+}
+
+export interface SyncRadarDraftsResult {
+  total: number;
+  imported: string[];
+  acked: string[];
+  failed: string[];
+}
+
+export async function syncRadarDraftImports(
+  options: SyncRadarDraftsOptions,
+): Promise<SyncRadarDraftsResult> {
+  const { workspaceId, actorId, importDrafts, fetchDrafts, ackDraft } = options;
+
+  let drafts: RadarDraft[] = [];
+  try {
+    drafts = await fetchDrafts();
+  } catch {
+    return { total: 0, imported: [], acked: [], failed: [] };
+  }
+
+  if (!Array.isArray(drafts) || drafts.length === 0) {
+    return { total: 0, imported: [], acked: [], failed: [] };
+  }
+
+  let importedIds: string[] = [];
+  try {
+    importedIds = importDrafts(drafts);
+  } catch {
+    return {
+      total: drafts.length,
+      imported: [],
+      acked: [],
+      failed: drafts.map((d) => d.id),
+    };
+  }
+
+  const importedSet = new Set(importedIds);
+  const acked: string[] = [];
+  const failed: string[] = [];
+
+  for (const draft of drafts) {
+    if (!importedSet.has(draft.id)) {
+      failed.push(draft.id);
+    }
+  }
+
+  for (const draftId of importedIds) {
+    try {
+      await ackDraft(draftId, { workspaceId, actorId });
+      acked.push(draftId);
+    } catch {
+      failed.push(draftId);
+    }
+  }
+
+  return {
+    total: drafts.length,
+    imported: importedIds,
+    acked,
+    failed,
   };
 }

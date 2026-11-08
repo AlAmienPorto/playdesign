@@ -5,13 +5,18 @@ import {
   canonicalizeRadarUrl,
   computeRadarScore,
   getRadarAdmission,
+  importRadarDrafts,
+  importRadarDraftsInDb,
   isAutoDraftEligible,
   radarDraftToSocialPost,
   selectDailyDrafts,
+  syncRadarDraftImports,
   type RadarCandidate,
   type RadarDraft,
   type RadarScoreInput,
 } from './content-radar';
+import { SEED } from '../data/seed';
+import type { SocialPost } from '../data/types';
 
 const timestampInput = (overrides: Partial<RadarScoreInput> = {}): RadarScoreInput => ({
   rubricVersion: 'v1',
@@ -597,4 +602,125 @@ test('radarDraftToSocialPost menolak cover dan media URL non-HTTP yang tidak kos
   }
 
   assert.equal(radarDraftToSocialPost(draftFixture()).mediaUrl, undefined);
+});
+
+test('importRadarDrafts: draft baru di-upsert satu kali dengan status Draft dan audit Mengimpor Draft Content Radar', () => {
+  const db = structuredClone(SEED);
+  const draft = draftFixture();
+  const initialAuditCount = db.audit.length;
+
+  const result = importRadarDraftsInDb(db, [draft], 'Jawad Al Amien');
+
+  assert.deepEqual(result.imported, [draft.id]);
+  const post = result.db.social.find((item: SocialPost) => item.id === draft.postId);
+  assert.ok(post, 'Post hasil import harus ada di social');
+  if (!post) return;
+  assert.equal(post.status, 'Draft');
+  assert.equal(post.title, draft.title);
+  assert.equal(post.channel, 'Instagram');
+  assert.equal(post.carousel?.slides.length, 4);
+
+  assert.equal(result.db.audit.length, initialAuditCount + 1);
+  const audit = result.db.audit[0];
+  assert.equal(audit.action, 'Mengimpor Draft Content Radar');
+  assert.equal(audit.target, draft.title);
+  assert.equal(audit.module, 'Carousel Studio');
+  assert.equal(audit.actor, 'Jawad Al Amien');
+});
+
+test('importRadarDrafts: draft yang sama pada reload tidak diduplikasi', () => {
+  const db = structuredClone(SEED);
+  const draft = draftFixture();
+
+  const first = importRadarDraftsInDb(db, [draft], 'Jawad Al Amien');
+  assert.deepEqual(first.imported, [draft.id]);
+  assert.equal(first.db.social.filter((item: SocialPost) => item.id === draft.postId).length, 1);
+  const auditCountAfterFirst = first.db.audit.length;
+
+  const second = importRadarDraftsInDb(first.db, [draft], 'Jawad Al Amien');
+  assert.deepEqual(second.imported, [draft.id]);
+  assert.equal(second.db.social.filter((item: SocialPost) => item.id === draft.postId).length, 1);
+  assert.equal(second.db.audit.length, auditCountAfterFirst, 'Reload tidak boleh menambah audit duplikat');
+});
+
+test('importRadarDrafts: draft existing dengan edit manusia tidak ditimpa', () => {
+  const db = structuredClone(SEED);
+  const draft = draftFixture();
+
+  // Simulasikan post yang sudah ada di database dan telah diedit oleh manusia
+  const humanEditedPost = {
+    ...radarDraftToSocialPost(draft),
+    title: 'Judul yang sudah disunting manusia',
+    caption: 'Caption baru dari copywriter.',
+    status: 'Review' as const,
+    carousel: {
+      ...draft.document,
+      headline: 'Judul yang sudah disunting manusia',
+      caption: 'Caption baru dari copywriter.',
+      slides: draft.document.slides.map((s, idx) =>
+        idx === 1 ? { ...s, body: 'Poin kedua dirombak total oleh tim' } : s,
+      ),
+    },
+  };
+  db.social.unshift(humanEditedPost);
+
+  const result = importRadarDraftsInDb(db, [draft], 'radar-agent');
+
+  assert.deepEqual(result.imported, [draft.id]);
+  const post = result.db.social.find((item: SocialPost) => item.id === draft.postId);
+  assert.ok(post);
+  if (!post) return;
+  assert.equal(post.title, 'Judul yang sudah disunting manusia');
+  assert.equal(post.caption, 'Caption baru dari copywriter.');
+  assert.equal(post.status, 'Review', 'Status Review manusia tidak boleh di-reset ke Draft');
+  assert.equal(post.carousel?.headline, 'Judul yang sudah disunting manusia');
+  assert.equal(post.carousel?.slides[1]?.body, 'Poin kedua dirombak total oleh tim');
+});
+
+test('importRadarDrafts: acknowledgement hanya dilakukan untuk upsert sukses', async () => {
+  const db = structuredClone(SEED);
+  const validDraft = draftFixture();
+  validDraft.id = 'draft-valid-1';
+  validDraft.postId = 'radar-post-valid-1';
+
+  const invalidDraft = draftFixture(3); // 3 slides melanggar batas 4-8 slide, radarDraftToSocialPost akan throw
+  invalidDraft.id = 'draft-invalid-3-slides';
+  invalidDraft.postId = 'radar-post-invalid';
+
+  // 1. Verifikasi importRadarDraftsInDb melewati draft tidak valid
+  const storeResult = importRadarDraftsInDb(db, [invalidDraft, validDraft]);
+  assert.deepEqual(storeResult.imported, ['draft-valid-1']);
+  assert.equal(storeResult.db.social.some((item: SocialPost) => item.id === 'radar-post-invalid'), false);
+
+  // 2. Verifikasi syncRadarDraftImports hanya memanggil ACK untuk draft yang sukses di-upsert
+  const ackedDrafts: string[] = [];
+  const syncResult = await syncRadarDraftImports({
+    workspaceId: 'playdesign',
+    actorId: 'owner-1',
+    fetchDrafts: async () => [invalidDraft, validDraft],
+    importDrafts: (drafts: RadarDraft[]) => {
+      const res = importRadarDraftsInDb(db, drafts);
+      return res.imported;
+    },
+    ackDraft: async (draftId: string) => {
+      ackedDrafts.push(draftId);
+    },
+  });
+
+  assert.deepEqual(syncResult.imported, ['draft-valid-1']);
+  assert.deepEqual(syncResult.acked, ['draft-valid-1']);
+  assert.deepEqual(ackedDrafts, ['draft-valid-1'], 'Draft yang gagal upsert tidak boleh di-ACK');
+  assert.deepEqual(syncResult.failed, ['draft-invalid-3-slides']);
+});
+
+test('importRadarDrafts: status post hasil import selalu Draft dan tidak membuat approval pending', () => {
+  const db = structuredClone(SEED);
+  const draft = draftFixture();
+  const initialApprovals = db.approvals.length;
+
+  const result = importRadarDraftsInDb(db, [draft]);
+  const post = result.db.social.find((item: SocialPost) => item.id === draft.postId);
+
+  assert.equal(post?.status, 'Draft');
+  assert.equal(result.db.approvals.length, initialApprovals, 'Import radar tidak boleh membuat approval pending otomatis');
 });

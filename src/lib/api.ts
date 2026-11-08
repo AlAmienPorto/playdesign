@@ -435,6 +435,7 @@ export async function reviseVideoScene(input: {
 /* ------------------------------------------------------------------ */
 
 import type { CarouselDocument } from '../data/types';
+import type { RadarDraftSource, RadarScore } from './content-radar';
 
 export type CarouselJobStatus = 'queued' | 'rendering' | 'uploading' | 'done' | 'failed' | 'canceled';
 export type CarouselPublishStatus = 'idle' | 'queued' | 'scheduling' | 'scheduled' | 'failed';
@@ -611,6 +612,9 @@ export interface RadarDraftRecord {
   status: 'Draft';
   creationKind: 'automatic' | 'manual';
   autoDateWib: string | null;
+  document: CarouselDocument;
+  scoreSnapshot: RadarScore;
+  sourcesSnapshot: RadarDraftSource[];
   createdBy: string;
   importedAt: string | null;
   createdAt: string;
@@ -764,4 +768,19 @@ export async function updateRadarSource(
     },
   );
   return payload.source;
+}
+
+export async function acknowledgeRadarDraftImport(
+  draftId: string,
+  context: { workspaceId: string; actorId: string },
+): Promise<{ ok: boolean; draftId: string; importedAt: string; alreadyImported: boolean }> {
+  const payload = await request<{ ok: boolean; draftId: string; importedAt: string; alreadyImported: boolean }>(
+    `/api/content-radar/drafts/${encodeURIComponent(draftId)}/imported`,
+    {
+      method: 'POST',
+      headers: ownerHeaders(context.actorId),
+      body: JSON.stringify({ workspaceId: context.workspaceId }),
+    },
+  );
+  return payload;
 }
