@@ -8,6 +8,7 @@ import datetime as dt
 import email.utils
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import re
@@ -35,6 +36,8 @@ XML_CONTENT_TYPES = {
 }
 DEFAULT_FEED_TIMEOUT = 12.0
 DEFAULT_FEED_MAX_BYTES = 2_097_152
+DEFAULT_FEED_MAX_REDIRECTS = 5
+ERROR_EXAMPLE_LIMIT = 5
 DEFAULT_LOCK_PATH = Path.home() / ".cache" / "playdesign" / "content-radar-collector.lock"
 VALID_NICHES = {"ai", "technology", "design", "security", "internet", "crypto"}
 
@@ -43,12 +46,25 @@ class FeedError(RuntimeError):
     pass
 
 
+class _NoFeedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 @dataclass(frozen=True)
 class FeedEntry:
     title: str
     url: str
     summary: str
-    published_at: str
+    published_at: str | None
 
 
 @dataclass
@@ -56,15 +72,34 @@ class CollectorResult:
     fetched: int = 0
     created: int = 0
     updated: int = 0
+    error_count: int = 0
     errors: list[dict[str, str]] = field(default_factory=list)
 
+    @property
+    def errors_truncated(self) -> int:
+        return self.error_count - len(self.errors)
+
+    def add_error(self, error: dict[str, str]) -> None:
+        self.error_count += 1
+        if len(self.errors) < ERROR_EXAMPLE_LIMIT:
+            self.errors.append(error)
+
+    def error_meta(self) -> dict[str, object]:
+        return {
+            "sourceErrors": self.errors,
+            "errorCount": self.error_count,
+            "errorsTruncated": self.errors_truncated,
+        }
+
     def output(self) -> dict[str, object] | None:
-        if not self.created and not self.updated and not self.errors:
+        if not self.created and not self.updated and not self.error_count:
             return None
         return {
             "fetched": self.fetched,
             "new": self.created,
             "updated": self.updated,
+            "errorCount": self.error_count,
+            "errorsTruncated": self.errors_truncated,
             "errors": self.errors,
         }
 
@@ -211,55 +246,123 @@ def parse_feed(body: bytes, content_type: str, now: dt.datetime | None = None) -
         title = _text(_child(element, "title"))
         raw_url = _entry_url(element)
         published_text = _text(_child(element, "pubdate", "published", "updated", "date"))
-        if not title or not raw_url or not published_text:
+        if not title or not raw_url:
             continue
         try:
             url = canonical_url(raw_url)
-            published = _timestamp(published_text)
+            published = _timestamp(published_text) if published_text else None
         except ValueError:
             continue
-        if published > current + FUTURE_SKEW or published < current - FETCH_WINDOW:
+        if published is not None and (
+            published > current + FUTURE_SKEW or published < current - FETCH_WINDOW
+        ):
             continue
         if url in seen:
             continue
         seen.add(url)
         summary = _text(_child(element, "description", "summary", "content"))[:2000]
-        entries.append(FeedEntry(title=title[:300], url=url, summary=summary, published_at=_iso(published)))
+        entries.append(
+            FeedEntry(
+                title=title[:300],
+                url=url,
+                summary=summary,
+                published_at=_iso(published) if published is not None else None,
+            )
+        )
     return entries
 
 
-def fetch_feed(url: str, *, timeout: float, max_bytes: int) -> tuple[bytes, str]:
-    target = canonical_url(url)
-    request = urllib.request.Request(
-        target,
-        headers={
-            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9",
-            "User-Agent": "PlayDesign-Content-Radar/1.0",
-        },
-    )
+def _validate_feed_destination(
+    target: str,
+    *,
+    allow_private: bool,
+    resolver: Callable[..., Any],
+) -> None:
+    if allow_private:
+        return
+    parsed = urllib.parse.urlsplit(target)
+    host = parsed.hostname
+    if host is None:
+        raise FeedError("feed URL has no host")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            content_type = response.headers.get("Content-Type", "")
-            mime = content_type.split(";", 1)[0].strip().lower()
-            if mime not in XML_CONTENT_TYPES and not mime.endswith("+xml"):
-                raise FeedError(f"unexpected content type {mime or 'missing'}")
-            body = response.read(max_bytes + 1)
-            if len(body) > max_bytes:
-                raise FeedError("response exceeded byte cap")
-            return body, content_type
-    except FeedError:
-        raise
-    except (TimeoutError, socket.timeout) as error:
-        raise FeedError("feed request timed out") from error
-    except urllib.error.HTTPError as error:
-        raise FeedError(f"feed HTTP {error.code}") from error
-    except urllib.error.URLError as error:
-        reason = error.reason
-        if isinstance(reason, (TimeoutError, socket.timeout)):
-            raise FeedError("feed request timed out") from error
-        raise FeedError(f"feed network error: {type(reason).__name__}") from error
+        addresses = resolver(host, port, type=socket.SOCK_STREAM)
     except OSError as error:
-        raise FeedError(f"feed network error: {type(error).__name__}") from error
+        raise FeedError(f"feed DNS error: {type(error).__name__}") from error
+    if not addresses:
+        raise FeedError("feed DNS returned no addresses")
+    for address in addresses:
+        socket_address = address[4]
+        if not isinstance(socket_address, tuple) or not socket_address:
+            raise FeedError("feed DNS returned an invalid address")
+        try:
+            ip = ipaddress.ip_address(str(socket_address[0]))
+        except ValueError as error:
+            raise FeedError("feed DNS returned an invalid address") from error
+        if not ip.is_global:
+            raise FeedError(f"feed destination resolved to disallowed address {ip}")
+
+
+def fetch_feed(
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int,
+    allow_private: bool = False,
+    resolver: Callable[..., Any] = socket.getaddrinfo,
+    max_redirects: int = DEFAULT_FEED_MAX_REDIRECTS,
+) -> tuple[bytes, str]:
+    if not isinstance(max_redirects, int) or isinstance(max_redirects, bool) or max_redirects < 0:
+        raise ValueError("max_redirects must be a non-negative integer")
+    target = canonical_url(url)
+    opener = urllib.request.build_opener(_NoFeedRedirectHandler())
+    redirects = 0
+    redirect_codes = {301, 302, 303, 307, 308}
+    while True:
+        _validate_feed_destination(target, allow_private=allow_private, resolver=resolver)
+        request = urllib.request.Request(
+            target,
+            headers={
+                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9",
+                "User-Agent": "PlayDesign-Content-Radar/1.0",
+            },
+        )
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                content_type = response.headers.get("Content-Type", "")
+                mime = content_type.split(";", 1)[0].strip().lower()
+                if mime not in XML_CONTENT_TYPES and not mime.endswith("+xml"):
+                    raise FeedError(f"unexpected content type {mime or 'missing'}")
+                body = response.read(max_bytes + 1)
+                if len(body) > max_bytes:
+                    raise FeedError("response exceeded byte cap")
+                return body, content_type
+        except FeedError:
+            raise
+        except (TimeoutError, socket.timeout) as error:
+            raise FeedError("feed request timed out") from error
+        except urllib.error.HTTPError as error:
+            try:
+                if error.code not in redirect_codes:
+                    raise FeedError(f"feed HTTP {error.code}") from error
+                location = error.headers.get("Location")
+                if not location:
+                    raise FeedError(f"feed redirect HTTP {error.code} has no location") from error
+                if redirects >= max_redirects:
+                    raise FeedError("too many redirects") from error
+                target = canonical_url(urllib.parse.urljoin(target, location))
+                redirects += 1
+            except ValueError as redirect_error:
+                raise FeedError(f"invalid feed redirect: {redirect_error}") from redirect_error
+            finally:
+                error.close()
+        except urllib.error.URLError as error:
+            reason = error.reason
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                raise FeedError("feed request timed out") from error
+            raise FeedError(f"feed network error: {type(reason).__name__}") from error
+        except OSError as error:
+            raise FeedError(f"feed network error: {type(error).__name__}") from error
 
 
 def persist_discovery_evidence(
@@ -405,8 +508,8 @@ class Collector:
         run = self.api.create_run("collector", {"fetchWindowHours": 26})
         run_id = str(run["id"])
         result = CollectorResult()
-        self.api.update_run(run_id, status="running")
         try:
+            self.api.update_run(run_id, status="running")
             sources = self.api.list_sources()
             for source in sources:
                 feed_url = source.get("feedUrl")
@@ -420,25 +523,27 @@ class Collector:
                     )
                     entries = parse_feed(body, content_type, self.now())
                 except Exception as error:
-                    result.errors.append(_error(source, error))
+                    result.add_error(_error(source, error))
                     continue
                 result.fetched += len(entries)
                 for entry in entries:
                     source_domain = str(
                         source.get("domain") or urllib.parse.urlsplit(entry.url).hostname or ""
                     ).lower()
+                    candidate: dict[str, object] = {
+                        "canonicalUrl": entry.url,
+                        "title": entry.title,
+                        "summary": entry.summary,
+                        "discoveredAt": _iso(self.now()),
+                        "niche": _niche(source),
+                        "language": "id",
+                        "sourceDomain": source_domain,
+                    }
+                    if entry.published_at is not None:
+                        candidate["publishedAt"] = entry.published_at
+                        candidate["publishedAtSource"] = "feed"
                     payload: dict[str, object] = {
-                        "candidate": {
-                            "canonicalUrl": entry.url,
-                            "title": entry.title,
-                            "summary": entry.summary,
-                            "publishedAt": entry.published_at,
-                            "publishedAtSource": "feed",
-                            "discoveredAt": _iso(self.now()),
-                            "niche": _niche(source),
-                            "language": "id",
-                            "sourceDomain": source_domain,
-                        },
+                        "candidate": candidate,
                         "source": {
                             "name": str(source.get("name") or source.get("domain") or "feed")[:200],
                             "feedUrl": canonical_url(feed_url),
@@ -458,7 +563,7 @@ class Collector:
                     try:
                         response = self.api.ingest(payload)
                     except Exception as error:
-                        result.errors.append(_error(source, error))
+                        result.add_error(_error(source, error))
                         continue
                     if response.get("created") is True:
                         result.created += 1
@@ -468,7 +573,7 @@ class Collector:
                 fetched=result.fetched,
                 new=result.created,
                 updated=result.updated,
-                meta={"sourceErrors": result.errors},
+                meta=result.error_meta(),
             )
             return result
         except Exception as error:
@@ -480,7 +585,7 @@ class Collector:
                     new=result.created,
                     updated=result.updated,
                     error=str(error)[:2000],
-                    meta={"sourceErrors": result.errors},
+                    meta=result.error_meta(),
                 )
             except Exception:
                 pass

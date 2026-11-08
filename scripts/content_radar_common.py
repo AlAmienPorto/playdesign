@@ -18,6 +18,19 @@ DEFAULT_API_TIMEOUT = 15.0
 DEFAULT_API_MAX_BYTES = 1_048_576
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 class ConfigError(RuntimeError):
     pass
 
@@ -76,7 +89,15 @@ def load_config(
     if missing:
         raise ConfigError("Missing Content Radar configuration: " + ", ".join(missing))
     parsed = urllib.parse.urlsplit(api_base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ConfigError("RADAR_API_BASE_URL must be a canonical HTTP(S) origin")
     return RadarConfig(api_base_url=api_base_url, api_token=api_token, workspace_id=workspace_id)
 
@@ -123,6 +144,7 @@ class ApiClient:
         self.workspace_id = workspace_id
         self.timeout = timeout
         self.max_bytes = max_bytes
+        self._opener = urllib.request.build_opener(_NoRedirectHandler())
 
     def _request(
         self,
@@ -142,7 +164,7 @@ class ApiClient:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._opener.open(request, timeout=self.timeout) as response:
                 payload = response.read(self.max_bytes + 1)
                 if len(payload) > self.max_bytes:
                     raise ApiError(method, path, response.status, "response exceeded byte cap")
@@ -162,6 +184,8 @@ class ApiClient:
                     detail = str(api_error.get("code") or api_error.get("message") or detail)
             except (OSError, ValueError, TypeError):
                 pass
+            finally:
+                error.close()
             raise ApiError(method, path, error.code, detail) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise ApiError(method, path, None, type(error).__name__) from error

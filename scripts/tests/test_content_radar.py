@@ -30,7 +30,9 @@ from content_radar_collector import (  # noqa: E402
     parse_feed,
     persist_discovery_evidence,
 )
-from content_radar_common import ApiClient, ConfigError, FileLock, load_config  # noqa: E402
+from content_radar_common import ApiClient, ApiError, ConfigError, FileLock, load_config  # noqa: E402
+
+ERROR_EXAMPLE_LIMIT = 5
 
 UTC = dt.timezone.utc
 NOW = dt.datetime(2026, 11, 8, 8, 0, tzinfo=UTC)
@@ -48,10 +50,15 @@ def rss(*items: str) -> bytes:
 
 
 def rss_item(title: str, link: str, published: str = RECENT_RFC, description: str = "Ringkas") -> str:
+    published_element = f"<pubDate>{published}</pubDate>" if published else ""
     return (
         f"<item><title>{title}</title><link>{link}</link>"
-        f"<pubDate>{published}</pubDate><description>{description}</description></item>"
+        f"{published_element}<description>{description}</description></item>"
     )
+
+
+def fetch_test_feed(url: str, *, timeout: float, max_bytes: int) -> tuple[bytes, str]:
+    return fetch_feed(url, timeout=timeout, max_bytes=max_bytes, allow_private=True)
 
 
 ATOM = f"""<?xml version="1.0"?>
@@ -150,6 +157,19 @@ def fixture_server():
         thread.join(timeout=1)
 
 
+@contextlib.contextmanager
+def handler_server(handler: type[BaseHTTPRequestHandler]):
+    server = QuietServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 class FakeApi:
     def __init__(self, sources: list[dict[str, object]], fail_ingest_url: str | None = None) -> None:
         self.sources = sources
@@ -188,17 +208,129 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(atom_entries[0].title, "Rilis Atom")
         self.assertEqual(atom_entries[0].url, "https://example.com/atom")
 
+    def test_collector_accepts_undated_rss_and_atom_entries(self) -> None:
+        atom = b"""<?xml version='1.0'?>
+        <feed xmlns='http://www.w3.org/2005/Atom'>
+          <entry><title>Atom tanpa tanggal</title><link href='https://example.com/atom-undated' /></entry>
+        </feed>"""
+
+        rss_entries = parse_feed(
+            rss(rss_item("RSS tanpa tanggal", "https://example.com/rss-undated", published="")),
+            "application/rss+xml",
+            NOW,
+        )
+        atom_entries = parse_feed(atom, "application/atom+xml", NOW)
+
+        self.assertEqual(rss_entries[0].published_at, None)
+        self.assertEqual(atom_entries[0].published_at, None)
+
+    def test_collector_ingests_undated_entry_with_discovery_fallback(self) -> None:
+        source = {
+            "id": "undated",
+            "name": "Undated",
+            "domain": "example.com",
+            "feedUrl": "https://feeds.example.com/rss",
+            "enabled": True,
+            "niches": ["technology"],
+        }
+        api = FakeApi([source])
+        body = rss(rss_item("Tanpa tanggal", "https://example.com/undated", published=""))
+        result = Collector(
+            api,
+            timeout=1,
+            max_bytes=2048,
+            now=lambda: NOW,
+            fetcher=lambda *args, **kwargs: (body, "application/rss+xml"),
+        ).run()
+
+        self.assertEqual(result.created, 1)
+        candidate = dict(api.payloads[0]["candidate"])
+        provenance = dict(api.payloads[0]["provenance"][0])
+        self.assertEqual(candidate["discoveredAt"], "2026-11-08T08:00:00Z")
+        self.assertNotIn("publishedAt", candidate)
+        self.assertNotIn("publishedAtSource", candidate)
+        self.assertIsNone(provenance["publishedAt"])
+
     def test_collector_rejects_non_xml_content_type_and_response_cap(self) -> None:
         with fixture_server() as base:
             with self.assertRaisesRegex(FeedError, "content type"):
-                fetch_feed(f"{base}/bad-type", timeout=1, max_bytes=1024)
+                fetch_feed(f"{base}/bad-type", timeout=1, max_bytes=1024, allow_private=True)
             with self.assertRaisesRegex(FeedError, "byte cap"):
-                fetch_feed(f"{base}/large", timeout=1, max_bytes=128)
+                fetch_feed(f"{base}/large", timeout=1, max_bytes=128, allow_private=True)
 
     def test_collector_uses_explicit_timeout(self) -> None:
         with fixture_server() as base:
             with self.assertRaisesRegex(FeedError, "timed out"):
-                fetch_feed(f"{base}/slow", timeout=0.03, max_bytes=1024)
+                fetch_feed(f"{base}/slow", timeout=0.03, max_bytes=1024, allow_private=True)
+
+    def test_collector_rejects_redirect_to_loopback(self) -> None:
+        class RedirectHandler(BaseHTTPRequestHandler):
+            destination = ""
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", type(self).destination)
+                self.end_headers()
+
+        with fixture_server() as destination:
+            RedirectHandler.destination = f"{destination}/rss"
+            with handler_server(RedirectHandler) as redirect:
+                initial = redirect.replace("127.0.0.1", "localhost")
+
+                def resolver(host: str, port: int, *args: object, **kwargs: object) -> list[tuple[object, ...]]:
+                    if host == "localhost":
+                        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+                    return socket.getaddrinfo(host, port, *args, **kwargs)
+
+                with self.assertRaisesRegex(FeedError, "disallowed address"):
+                    fetch_feed(initial, timeout=1, max_bytes=2048, resolver=resolver)
+
+    def test_collector_allows_validated_cross_host_redirect(self) -> None:
+        class RedirectHandler(BaseHTTPRequestHandler):
+            destination = ""
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", type(self).destination)
+                self.end_headers()
+
+        with fixture_server() as destination:
+            RedirectHandler.destination = f"{destination}/rss"
+            with handler_server(RedirectHandler) as redirect:
+                initial = redirect.replace("127.0.0.1", "localhost")
+
+                def resolver(host: str, port: int, *args: object, **kwargs: object) -> list[tuple[object, ...]]:
+                    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+                body, content_type = fetch_feed(
+                    initial,
+                    timeout=1,
+                    max_bytes=2048,
+                    resolver=resolver,
+                )
+
+        self.assertIn(b"Rilis RSS", body)
+        self.assertEqual(content_type.split(";", 1)[0], "application/rss+xml")
+
+    def test_collector_rejects_excessive_feed_redirects(self) -> None:
+        class LoopHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", "/loop")
+                self.end_headers()
+
+        with handler_server(LoopHandler) as base:
+            with self.assertRaisesRegex(FeedError, "too many redirects"):
+                fetch_feed(f"{base}/loop", timeout=1, max_bytes=2048, allow_private=True, max_redirects=2)
 
     def test_collector_canonicalizes_only_http_urls(self) -> None:
         self.assertEqual(
@@ -233,7 +365,7 @@ class CollectorTests(unittest.TestCase):
                 {"id": "atom", "name": "Atom", "feedUrl": f"{base}/atom", "enabled": True, "niches": ["ai"]},
             ]
             api = FakeApi(sources, fail_ingest_url="https://example.com/atom")
-            result = Collector(api, timeout=0.03, max_bytes=2048, now=lambda: NOW).run()
+            result = Collector(api, timeout=0.03, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
 
         self.assertEqual(result.fetched, 2)
         self.assertEqual(result.created, 1)
@@ -254,7 +386,7 @@ class CollectorTests(unittest.TestCase):
                 "niches": ["technology"],
             }
             api = FakeApi([source])
-            Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW).run()
+            Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
 
         payload = api.payloads[0]
         self.assertNotIn("tier", payload.get("source", {}))
@@ -267,6 +399,41 @@ class CollectorTests(unittest.TestCase):
         provenance = dict(payload["provenance"][0])
         self.assertEqual(provenance["relation"], "primary")
         self.assertEqual(provenance["domain"], "registry.example")
+
+    def test_collector_api_rejects_cross_origin_redirect_without_forwarding_token(self) -> None:
+        class CaptureHandler(BaseHTTPRequestHandler):
+            authorization: str | None = None
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                type(self).authorization = self.headers.get("Authorization")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"run":{"id":"stolen"}}')
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            destination = ""
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                self.send_response(307)
+                self.send_header("Location", type(self).destination)
+                self.end_headers()
+
+        CaptureHandler.authorization = None
+        with handler_server(CaptureHandler) as capture:
+            RedirectHandler.destination = f"{capture}/capture"
+            with handler_server(RedirectHandler) as redirect:
+                client = ApiClient(redirect, FixtureHandler.token, "ws-a", timeout=1, max_bytes=2048)
+                with self.assertRaises(ApiError):
+                    client.create_run("collector")
+
+        self.assertIsNone(CaptureHandler.authorization)
 
     def test_collector_api_uses_bearer_auth_workspace_and_never_logs_secret(self) -> None:
         secret = FixtureHandler.token
@@ -292,11 +459,32 @@ class CollectorTests(unittest.TestCase):
 
         api = BrokenApi([])
         with self.assertRaisesRegex(RuntimeError, "registry unavailable"):
-            Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW).run()
+            Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
 
         updates = [event[1] for event in api.events if event[0] == "update"]
         self.assertEqual([update["status"] for update in updates], ["running", "failed"])
         self.assertNotIn("token", json.dumps(updates))
+
+    def test_collector_run_lifecycle_marks_failed_when_running_transition_fails(self) -> None:
+        class FirstUpdateFailsApi(FakeApi):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.update_attempts = 0
+
+            def update_run(self, run_id: str, **fields: object) -> dict[str, object]:
+                self.update_attempts += 1
+                self.events.append(("update", {"runId": run_id, **fields}))
+                if self.update_attempts == 1:
+                    raise RuntimeError("running transition failed")
+                return {"id": run_id, "status": fields.get("status")}
+
+        api = FirstUpdateFailsApi()
+        with self.assertRaisesRegex(RuntimeError, "running transition failed"):
+            Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
+
+        updates = [event[1] for event in api.events if event[0] == "update"]
+        self.assertEqual([update["status"] for update in updates], ["running", "failed"])
+        self.assertEqual(api.update_attempts, 2)
 
     def test_collector_loads_protected_local_config_and_rejects_open_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -308,6 +496,56 @@ class CollectorTests(unittest.TestCase):
             config.chmod(0o644)
             with self.assertRaises(ConfigError):
                 load_config({}, config)
+
+    def test_collector_rejects_api_base_url_with_path_query_or_fragment(self) -> None:
+        for base_url in (
+            "https://radar.example/base",
+            "https://radar.example/?mode=test",
+            "https://radar.example/#section",
+        ):
+            with self.subTest(base_url=base_url), tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "radar.json"
+                config.write_text(
+                    json.dumps({"apiBaseUrl": base_url, "apiToken": "sekret", "workspaceId": "ws-a"})
+                )
+                config.chmod(0o600)
+                with self.assertRaisesRegex(ConfigError, "origin"):
+                    load_config({}, config)
+
+    def test_collector_caps_error_examples_and_reports_total(self) -> None:
+        source = {
+            "id": "many-errors",
+            "feedUrl": "https://feeds.example.com/rss",
+            "enabled": True,
+            "niches": ["technology"],
+        }
+        body = rss(
+            *(rss_item(f"Item {index}", f"https://example.com/{index}") for index in range(ERROR_EXAMPLE_LIMIT + 3))
+        )
+        api = FakeApi([source])
+        api.fail_ingest_url = "all"
+
+        def fail_all(payload: dict[str, object]) -> dict[str, object]:
+            api.payloads.append(payload)
+            raise RuntimeError("ingest ditolak")
+
+        api.ingest = fail_all  # type: ignore[method-assign]
+        result = Collector(
+            api,
+            timeout=1,
+            max_bytes=8192,
+            now=lambda: NOW,
+            fetcher=lambda *args, **kwargs: (body, "application/rss+xml"),
+        ).run()
+
+        self.assertEqual(result.error_count, ERROR_EXAMPLE_LIMIT + 3)
+        self.assertEqual(len(result.errors), ERROR_EXAMPLE_LIMIT)
+        output = result.output()
+        self.assertEqual(output["errorCount"], ERROR_EXAMPLE_LIMIT + 3)
+        self.assertEqual(output["errorsTruncated"], 3)
+        terminal_update = [event[1] for event in api.events if event[0] == "update"][-1]
+        self.assertEqual(terminal_update["meta"]["errorCount"], ERROR_EXAMPLE_LIMIT + 3)
+        self.assertEqual(terminal_update["meta"]["errorsTruncated"], 3)
 
     def test_collector_file_lock_prevents_local_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -359,7 +597,7 @@ class CollectorTests(unittest.TestCase):
             api = ExistingApi(
                 [{"id": "rss", "feedUrl": f"{base}/rss", "enabled": True, "niches": ["technology"]}]
             )
-            result = Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW).run()
+            result = Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
         self.assertEqual(result.updated, 0)
         self.assertIsNone(result.output())
 
@@ -367,7 +605,7 @@ class CollectorTests(unittest.TestCase):
         api = FakeApi([])
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
-            result = Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW).run()
+            result = Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
         self.assertEqual(result.created, 0)
         self.assertEqual(stream.getvalue(), "")
 
