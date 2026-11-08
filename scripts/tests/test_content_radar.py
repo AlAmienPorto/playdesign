@@ -32,6 +32,19 @@ from content_radar_collector import (  # noqa: E402
     persist_discovery_evidence,
 )
 from content_radar_common import ApiClient, ApiError, ConfigError, FileLock, load_config  # noqa: E402
+from content_radar_selector import (  # noqa: E402
+    DraftValidationError,
+    Evaluation,
+    Selector,
+    SelectorApiClient,
+    SelectorResult,
+    compute_radar_score,
+    format_digest,
+    generate_draft,
+    is_auto_draft_eligible,
+    validate_discrete_evaluation,
+    validate_radar_draft,
+)
 
 ERROR_EXAMPLE_LIMIT = 5
 
@@ -638,6 +651,409 @@ class CollectorTests(unittest.TestCase):
             result = Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
         self.assertEqual(result.created, 0)
         self.assertEqual(stream.getvalue(), "")
+
+
+class FakeSelectorApi:
+    def __init__(
+        self,
+        candidates: list[dict[str, Any]] | None = None,
+        drafts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.candidates = {c["id"]: dict(c) for c in (candidates or [])}
+        self.drafts = [dict(d) for d in (drafts or [])]
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.created_drafts: list[dict[str, Any]] = []
+
+    def create_run(self, kind: str, meta: dict[str, object] | None = None) -> dict[str, object]:
+        self.events.append(("create_run", {"kind": kind, "meta": meta or {}}))
+        return {"id": "run-selector-1", "status": "queued"}
+
+    def update_run(self, run_id: str, **fields: object) -> dict[str, object]:
+        self.events.append(("update_run", {"runId": run_id, **fields}))
+        return {"id": run_id, "status": fields.get("status")}
+
+    def list_candidates(
+        self,
+        *,
+        window: int = 24,
+        min_score: int = 0,
+        status: str | None = None,
+        niche: str | None = None,
+        tier: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        self.events.append(("list_candidates", {"window": window, "min_score": min_score}))
+        return list(self.candidates.values())
+
+    def get_candidate(self, candidate_id: str) -> dict[str, Any]:
+        self.events.append(("get_candidate", {"id": candidate_id}))
+        return {"candidate": dict(self.candidates[candidate_id])}
+
+    def score_candidate(
+        self,
+        candidate_id: str,
+        relevance: int,
+        carousel_potential: int,
+        reason: str,
+        risk_flags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.events.append(
+            (
+                "score_candidate",
+                {
+                    "candidate_id": candidate_id,
+                    "relevance": relevance,
+                    "carousel_potential": carousel_potential,
+                    "reason": reason,
+                    "risk_flags": risk_flags or [],
+                },
+            )
+        )
+        cand = self.candidates[candidate_id]
+        score = cand.get("score") or {}
+        snapshot = dict(score.get("inputSnapshot") or {})
+        snapshot["relevance"] = relevance
+        snapshot["carouselPotential"] = carousel_potential
+        snapshot["riskFlags"] = risk_flags or []
+        recomputed = compute_radar_score(snapshot)
+        cand["score"] = {
+            "total": recomputed.total,
+            "components": recomputed.components,
+            "inputSnapshot": recomputed.input_snapshot,
+        }
+        cand["score_total"] = recomputed.total
+        cand["status"] = "qualified" if recomputed.total >= 50 else cand.get("status", "new")
+        return {"ok": True, "candidate": cand, "score": cand["score"]}
+
+    def create_draft(self, candidate_id: str, document: dict[str, Any]) -> dict[str, Any]:
+        self.events.append(("create_draft", {"candidate_id": candidate_id, "document": document}))
+        cand = self.candidates[candidate_id]
+        draft = {
+            "id": f"draft-{candidate_id}",
+            "candidateId": candidate_id,
+            "postId": f"draft-{candidate_id}",
+            "title": document.get("headline") or cand.get("title"),
+            "document": document,
+            "creationKind": "automatic",
+            "autoDateWib": "2026-11-08",
+        }
+        self.created_drafts.append(draft)
+        self.drafts.append(draft)
+        cand["draftId"] = draft["id"]
+        cand["status"] = "drafted"
+        return {"ok": True, "draft": draft}
+
+    def list_drafts(self, *, unimported: bool | None = None) -> list[dict[str, Any]]:
+        self.events.append(("list_drafts", {"unimported": unimported}))
+        return self.drafts
+
+
+def make_test_candidate(
+    cid: str,
+    *,
+    niche: str = "technology",
+    tier: str = "A",
+    source_is_primary: bool = True,
+    cross_checks: list[dict[str, str]] | None = None,
+    risk_flags: list[str] | None = None,
+    cluster_key: str | None = None,
+    relevance: int = 21,
+    carousel_potential: int = 8,
+    published_at: str = "2026-11-08T06:00:00Z",
+    discovered_at: str = "2026-11-08T06:00:00Z",
+    draft_id: str | None = None,
+    status: str = "qualified",
+) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "rubricVersion": "v1",
+        "asOf": "2026-11-08T08:00:00Z",
+        "effectiveTimestamp": published_at,
+        "timestampValid": True,
+        "timestampFallback": False,
+        "ageHours": 2.0,
+        "sourceTier": tier,
+        "sourceIsPrimary": source_is_primary,
+        "publishedAt": published_at,
+        "discoveredAt": discovered_at,
+        "independentCrossChecks": cross_checks or [],
+        "relevance": relevance,
+        "carouselPotential": carousel_potential,
+        "riskFlags": risk_flags or [],
+    }
+    score_computed = compute_radar_score(snapshot)
+    return {
+        "id": cid,
+        "clusterKey": cluster_key or f"cluster-{cid}",
+        "canonicalUrl": f"https://{cid}.example/post",
+        "title": f"Perkembangan Terbaru {cid}",
+        "summary": f"Ringkasan kabar teknologi terkini untuk {cid}",
+        "publishedAt": published_at,
+        "discoveredAt": discovered_at,
+        "niche": niche,
+        "sourceDomain": f"{cid}.example",
+        "sourceTier": tier,
+        "status": status,
+        "draftId": draft_id,
+        "score": {
+            "total": score_computed.total,
+            "components": score_computed.components,
+            "inputSnapshot": score_computed.input_snapshot,
+        },
+    }
+
+
+class SelectorTests(unittest.TestCase):
+    def test_selector_rejects_invalid_discrete_relevance_values(self) -> None:
+        for invalid in (-1, 5, 7, 10, 15, 20, 24, 30):
+            with self.assertRaisesRegex(ValueError, "relevance"):
+                validate_discrete_evaluation(invalid, 8, "Relevan untuk UMKM", [])
+        for valid in (0, 8, 13, 18, 21, 25):
+            validate_discrete_evaluation(valid, 8, "Relevan untuk UMKM", [])
+
+    def test_selector_rejects_invalid_discrete_carousel_potential_values(self) -> None:
+        for invalid in (-1, 1, 2, 4, 6, 7, 9, 12):
+            with self.assertRaisesRegex(ValueError, "carousel potential"):
+                validate_discrete_evaluation(21, invalid, "Potensi visual", [])
+        for valid in (0, 3, 5, 8, 10):
+            validate_discrete_evaluation(21, valid, "Potensi visual", [])
+
+    def test_selector_rejects_invalid_risk_flags_and_empty_reason(self) -> None:
+        with self.assertRaisesRegex(ValueError, "risk flag"):
+            validate_discrete_evaluation(21, 8, "Relevan", ["random_risk"])
+        with self.assertRaisesRegex(ValueError, "reason"):
+            validate_discrete_evaluation(21, 8, "   ", [])
+        with self.assertRaisesRegex(ValueError, "reason"):
+            validate_discrete_evaluation(21, 8, "x" * 501, [])
+
+    def test_selector_excludes_candidate_without_crosscheck_or_untrusted(self) -> None:
+        tier_d = make_test_candidate(
+            "community",
+            tier="D",
+            source_is_primary=False,
+            cross_checks=[{"domain": "x.example", "tier": "D"}],
+            relevance=25,
+            carousel_potential=10,
+        )
+        eligible, reasons = is_auto_draft_eligible(tier_d)
+        self.assertFalse(eligible)
+        self.assertIn("insufficient_crosscheck", reasons)
+
+        api = FakeSelectorApi([tier_d])
+        selector = Selector(api, now=lambda: NOW)
+        result = selector.run()
+        self.assertEqual(len(result.drafts_created), 0)
+        self.assertEqual(result.qualified_count, 0)
+        self.assertEqual(result.rejected_count, 1)
+
+    def test_selector_excludes_unverified_source_without_crosschecks(self) -> None:
+        unverified = make_test_candidate(
+            "unverified-src",
+            tier="unverified",
+            source_is_primary=False,
+            cross_checks=[],
+            relevance=25,
+            carousel_potential=10,
+        )
+        eligible, reasons = is_auto_draft_eligible(unverified)
+        self.assertFalse(eligible)
+        self.assertIn("insufficient_crosscheck", reasons)
+
+        api = FakeSelectorApi([unverified])
+        result = Selector(api, now=lambda: NOW).run()
+        self.assertEqual(len(result.drafts_created), 0)
+
+    def test_selector_enforces_max_one_crypto_draft_per_day(self) -> None:
+        c1 = make_test_candidate("crypto-high", niche="crypto", relevance=25, carousel_potential=10)
+        c2 = make_test_candidate("crypto-second", niche="crypto", relevance=21, carousel_potential=8)
+        c3 = make_test_candidate("ai-story", niche="ai", relevance=21, carousel_potential=8)
+
+        api = FakeSelectorApi([c1, c2, c3])
+        result = Selector(api, now=lambda: NOW).run()
+
+        self.assertEqual(len(result.drafts_created), 2)
+        niches = [d["document"]["kicker"].lower() for d in result.drafts_created]
+        self.assertEqual(niches.count("crypto"), 1)
+        self.assertIn("ai", niches)
+        self.assertEqual(result.crypto_skipped_count, 1)
+
+    def test_selector_creates_fewer_than_three_drafts_when_quota_unfilled(self) -> None:
+        high = make_test_candidate("only-one", relevance=25, carousel_potential=10)
+        low1 = make_test_candidate("low-1", relevance=0, carousel_potential=0, risk_flags=["context_required"])
+        low2 = make_test_candidate("low-2", relevance=8, carousel_potential=3, risk_flags=["context_required"])
+
+        api = FakeSelectorApi([high, low1, low2])
+        result = Selector(api, now=lambda: NOW).run()
+
+        self.assertEqual(len(result.drafts_created), 1)
+        self.assertEqual(result.drafts_created[0]["candidateId"], "only-one")
+        self.assertEqual(result.qualified_count, 1)
+        self.assertEqual(result.rejected_count, 2)
+
+        # 0 qualify case
+        api_zero = FakeSelectorApi([low1, low2])
+        result_zero = Selector(api_zero, now=lambda: NOW).run()
+        self.assertEqual(len(result_zero.drafts_created), 0)
+        self.assertEqual(result_zero.qualified_count, 0)
+        self.assertEqual(result_zero.rejected_count, 2)
+
+    def test_selector_handles_partial_retry_honoring_existing_drafts_today(self) -> None:
+        existing_auto_draft = {
+            "id": "draft-prev-crypto",
+            "candidateId": "prev-crypto",
+            "creationKind": "automatic",
+            "autoDateWib": "2026-11-08",
+            "document": {"kicker": "CRYPTO"},
+            "niche": "crypto",
+        }
+        cand_crypto = make_test_candidate("crypto-new", niche="crypto", relevance=25, carousel_potential=10)
+        cand_ai = make_test_candidate("ai-new", niche="ai", relevance=25, carousel_potential=10)
+        cand_design = make_test_candidate("design-new", niche="design", relevance=21, carousel_potential=8)
+        cand_sec = make_test_candidate("sec-new", niche="security", relevance=21, carousel_potential=8)
+
+        api = FakeSelectorApi(
+            [cand_crypto, cand_ai, cand_design, cand_sec],
+            drafts=[existing_auto_draft],
+        )
+        result = Selector(api, now=lambda: NOW).run()
+
+        # Existing draft consumed 1 daily slot and 1 crypto slot.
+        # Remaining daily quota: 3 - 1 = 2. Remaining crypto: 0.
+        self.assertEqual(len(result.drafts_created), 2)
+        niches = [d["document"]["kicker"].lower() for d in result.drafts_created]
+        self.assertNotIn("crypto", niches)
+        self.assertEqual(result.existing_drafts_today, 1)
+
+    def test_selector_deterministic_digest_with_no_candidates(self) -> None:
+        result = SelectorResult(
+            run_id="run-1",
+            run_time=NOW,
+            evaluated_count=3,
+            qualified_count=0,
+            rejected_count=3,
+            duplicate_count=0,
+            crypto_skipped_count=0,
+            existing_drafts_today=0,
+            drafts_created=[],
+        )
+        digest = format_digest(result)
+        self.assertIn("Content Radar", digest)
+        self.assertIn("WIB", digest)
+        self.assertIn("Kandidat Memenuhi Syarat (≥75): 0", digest)
+        self.assertIn("Draft Dibuat: 0 / 3", digest)
+        self.assertIn("https://kantor.playdesign.my.id/#/marketing/content-radar", digest)
+        self.assertNotIn("Authorization", digest)
+        self.assertNotIn("Bearer", digest)
+
+    def test_selector_deterministic_digest_with_selected_drafts(self) -> None:
+        draft = {
+            "candidateId": "c1",
+            "title": "OpenAI Meluncurkan Fitur Baru",
+            "niche": "ai",
+            "score": 88,
+            "sourceUrl": "https://openai.example/news",
+        }
+        result = SelectorResult(
+            run_id="run-1",
+            run_time=NOW,
+            evaluated_count=5,
+            qualified_count=2,
+            rejected_count=3,
+            duplicate_count=0,
+            crypto_skipped_count=0,
+            existing_drafts_today=0,
+            drafts_created=[draft],
+        )
+        digest = format_digest(result)
+        self.assertIn("OpenAI Meluncurkan Fitur Baru", digest)
+        self.assertIn("88/100", digest)
+        self.assertIn("https://openai.example/news", digest)
+        self.assertIn("Kandidat Memenuhi Syarat (≥75): 2", digest)
+        self.assertIn("Draft Dibuat: 1 / 3", digest)
+
+    def test_selector_validates_draft_slide_count_between_4_and_8(self) -> None:
+        doc_too_few = generate_draft(make_test_candidate("few"))
+        doc_too_few["slides"] = doc_too_few["slides"][:3]
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(doc_too_few, "technology")
+
+        doc_too_many = generate_draft(make_test_candidate("many"))
+        extra_slides = [
+            {"id": f"slide-{i}", "kind": "text", "title": f"Slide {i}", "body": "Konten"}
+            for i in range(len(doc_too_many["slides"]) + 1, 10)
+        ]
+        doc_too_many["slides"].extend(extra_slides)
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(doc_too_many, "technology")
+
+        doc_valid = generate_draft(make_test_candidate("valid"))
+        self.assertTrue(4 <= len(doc_valid["slides"]) <= 8)
+        validate_radar_draft(doc_valid, "technology")
+
+    def test_selector_validates_draft_bahasa_indonesia_and_local_impact(self) -> None:
+        doc = generate_draft(make_test_candidate("id-impact"))
+        validate_radar_draft(doc, "technology")
+
+        # Without local context
+        doc_no_local = dict(doc)
+        doc_no_local["slides"] = [
+            {"id": "s1", "kind": "cover", "title": "Headline", "body": "Subtitle"},
+            {"id": "s2", "kind": "text", "title": "Details", "body": "Some details"},
+            {"id": "s3", "kind": "text", "title": "Summary", "body": "Summary text"},
+            {"id": "s4", "kind": "text", "title": "Outro", "body": "Outro text"},
+        ]
+        doc_no_local["caption"] = "Read the article here."
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(doc_no_local, "technology")
+
+    def test_selector_validates_crypto_disclaimer_required(self) -> None:
+        crypto_doc = generate_draft(make_test_candidate("crypto-doc", niche="crypto"))
+        validate_radar_draft(crypto_doc, "crypto")
+
+        # Remove disclaimer
+        crypto_no_disclaimer = dict(crypto_doc)
+        crypto_no_disclaimer["caption"] = "Update pasar crypto terkini untuk pelaku digital."
+        crypto_no_disclaimer["slides"] = [
+            {"id": "s1", "kind": "cover", "title": "Kripto Baru", "body": "Dampak bagi UMKM dan desainer Indonesia"},
+            {"id": "s2", "kind": "text", "title": "Perkembangan", "body": "Teknologi blockchain untuk industri kreatif"},
+            {"id": "s3", "kind": "text", "title": "Inovasi", "body": "Adopsi digital di Indonesia"},
+            {"id": "s4", "kind": "text", "title": "Peluang", "body": "Peluang bisnis digital"},
+        ]
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(crypto_no_disclaimer, "crypto")
+
+    def test_selector_validates_no_third_party_media_as_final_media(self) -> None:
+        doc = generate_draft(make_test_candidate("media-check"))
+        doc["coverImageUrl"] = "https://external-cdn.com/stolen-graphic.jpg"
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(doc, "technology")
+
+        doc["coverImageUrl"] = ""
+        validate_radar_draft(doc, "technology")
+
+    def test_selector_run_lifecycle_queued_running_succeeded_or_failed(self) -> None:
+        cand = make_test_candidate("c-lifecycle", relevance=25, carousel_potential=10)
+        api = FakeSelectorApi([cand])
+        result = Selector(api, now=lambda: NOW).run()
+
+        event_names = [e[0] for e in api.events]
+        self.assertIn("create_run", event_names)
+        self.assertIn("update_run", event_names)
+        status_updates = [e[1]["status"] for e in api.events if e[0] == "update_run"]
+        self.assertEqual(status_updates[0], "running")
+        self.assertEqual(status_updates[-1], "succeeded")
+
+        # Failure lifecycle
+        class FailingApi(FakeSelectorApi):
+            def list_candidates(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+                raise RuntimeError("koneksi API terputus")
+
+        fail_api = FailingApi()
+        with self.assertRaises(RuntimeError):
+            Selector(fail_api, now=lambda: NOW).run()
+        fail_updates = [e[1] for e in fail_api.events if e[0] == "update_run"]
+        self.assertEqual(fail_updates[-1]["status"], "failed")
+        self.assertIn("koneksi API terputus", fail_updates[-1]["error"])
 
 
 if __name__ == "__main__":
