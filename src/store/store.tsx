@@ -1126,7 +1126,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const importRadarDraftsAction = (drafts: RadarDraft[]) => {
     const result = importRadarDraftsInDb(db, drafts, user.name);
-    setDb(result.db);
+    setDb((prev) => importRadarDraftsInDb(prev, drafts, user.name).db);
     return result.imported;
   };
 

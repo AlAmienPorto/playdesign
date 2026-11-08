@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
@@ -602,6 +603,27 @@ test('radarDraftToSocialPost menolak cover dan media URL non-HTTP yang tidak kos
   }
 
   assert.equal(radarDraftToSocialPost(draftFixture()).mediaUrl, undefined);
+});
+
+test('store import Radar menghitung ACK sinkron tetapi commit terhadap DB terbaru', async () => {
+  const storeSource = await readFile(new URL('../store/store.tsx', import.meta.url), 'utf8');
+  const action = storeSource.match(
+    /const importRadarDraftsAction = \(drafts: RadarDraft\[\]\) => \{([\s\S]*?)\n  \};/,
+  )?.[1];
+
+  assert.ok(action, 'Store harus mendefinisikan importRadarDraftsAction');
+  assert.match(
+    action,
+    /const result = importRadarDraftsInDb\(db, drafts, user\.name\);/,
+    'ACK IDs harus tetap dihitung sinkron dari snapshot render',
+  );
+  assert.match(
+    action,
+    /setDb\(\(prev\) => importRadarDraftsInDb\(prev, drafts, user\.name\)\.db\);/,
+    'Commit harus memakai prev terbaru agar update yang masuk selama fetch tidak hilang',
+  );
+  assert.doesNotMatch(action, /setDb\(result\.db\)/, 'Store tidak boleh direct-set DB snapshot lama');
+  assert.match(action, /return result\.imported;/, 'Action harus langsung mengembalikan ACK IDs');
 });
 
 test('importRadarDrafts: draft baru di-upsert satu kali dengan status Draft dan audit Mengimpor Draft Content Radar', () => {
