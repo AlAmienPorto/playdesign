@@ -89,7 +89,16 @@ export interface ApiLead {
   confidenceScore?: number;
 }
 
+export interface OfficeActor {
+  id: string;
+  name: string;
+  role: 'owner' | 'spv' | 'operator';
+  workspaceId: string;
+}
+
 export interface OfficeSnapshot {
+  actor?: OfficeActor;
+  workspace?: { id: string; name: string } | null;
   leads?: ApiLead[];
   tasks?: unknown[];
   runs?: unknown[];
@@ -490,4 +499,269 @@ export async function scheduleCarouselPublish(input: {
     },
   );
   return payload.job;
+}
+
+export type RadarNiche = 'ai' | 'technology' | 'design' | 'security' | 'internet' | 'crypto';
+export type RadarSourceTier = 'A' | 'B' | 'C' | 'D' | 'unverified';
+export type RadarCandidateStatus = 'new' | 'qualified' | 'rejected' | 'drafted' | 'archived';
+export type RadarSourceKind = 'official' | 'media' | 'community' | 'regulator' | 'research' | 'project' | 'discovered';
+export type RadarRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface RadarScoreComponents {
+  credibility: number;
+  relevance: number;
+  freshness: number;
+  evidence: number;
+  carouselPotential: number;
+  safety: number;
+}
+
+export interface RadarCandidateRecord {
+  id: string;
+  clusterKey: string;
+  canonicalUrl: string;
+  title: string;
+  summary: string;
+  publishedAt: string | null;
+  publishedAtSource: string | null;
+  discoveredAt: string;
+  lastSeenAt: string;
+  timestampFallback: boolean;
+  niche: RadarNiche;
+  language: string;
+  status: RadarCandidateStatus;
+  sourceDomain: string;
+  sourceTier: RadarSourceTier;
+  score: {
+    rubricVersion: 'v1';
+    components: RadarScoreComponents;
+    total: number;
+    inputSnapshot: {
+      independentCrossChecks?: Array<{ domain: string; tier: RadarSourceTier }>;
+      ageHours?: number | null;
+      [key: string]: unknown;
+    };
+  };
+  scoreReason: string;
+  riskFlags: string[];
+  rejectionReason: string | null;
+  draftId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  sources?: RadarProvenanceSource[];
+}
+
+export interface RadarProvenanceSource {
+  id: string;
+  url: string;
+  domain: string;
+  relation: 'primary' | 'crosscheck' | 'signal';
+  title: string;
+  publishedAt: string | null;
+  excerpt: string | null;
+  tier: RadarSourceTier;
+  name: string;
+  enabled: boolean;
+}
+
+export interface RadarSourceRecord {
+  id: string;
+  domain: string;
+  name: string;
+  tier: RadarSourceTier;
+  kind: RadarSourceKind;
+  niches: RadarNiche[];
+  feedUrl: string | null;
+  enabled: boolean;
+  requiresCrosscheck: boolean;
+  verifiedAt: string | null;
+  verifiedBy: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RadarRun {
+  id: string;
+  kind: 'collector' | 'selector';
+  status: RadarRunStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+  heartbeatAt: string | null;
+  counts: {
+    fetched: number;
+    new: number;
+    updated: number;
+    qualified: number;
+    drafted: number;
+    rejected: number;
+  };
+  error: string | null;
+  meta: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RadarDraftRecord {
+  id: string;
+  candidateId: string;
+  postId: string;
+  clusterKey: string;
+  title: string;
+  status: 'Draft';
+  creationKind: 'automatic' | 'manual';
+  autoDateWib: string | null;
+  createdBy: string;
+  importedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RadarCandidateFilters {
+  workspaceId: string;
+  niche?: RadarNiche;
+  status?: RadarCandidateStatus;
+  tier?: RadarSourceTier;
+  minScore?: number;
+  query?: string;
+  windowHours?: number;
+  limit?: number;
+  offset?: number;
+}
+
+interface RadarOwnerContext {
+  workspaceId: string;
+  actorId: string;
+}
+
+const radarQuery = (workspaceId: string, values: Record<string, unknown>) => {
+  const params = new URLSearchParams({ workspace: workspaceId });
+  for (const [key, value] of Object.entries(values)) {
+    if (key === 'workspaceId' || value === undefined || value === '') continue;
+    params.set(key, String(value));
+  }
+  return params.toString();
+};
+
+const ownerHeaders = (actorId: string) => {
+  const resolved = actorId.trim();
+  if (!resolved) throw new Error('Actor autentik wajib tersedia untuk aksi Owner.');
+  return { 'x-actor-id': resolved };
+};
+
+export async function fetchRadarCandidates(filters: RadarCandidateFilters): Promise<RadarCandidateRecord[]> {
+  const payload = await request<{ candidates: RadarCandidateRecord[] }>(
+    `/api/content-radar/candidates?${radarQuery(filters.workspaceId, {
+      niche: filters.niche,
+      status: filters.status,
+      tier: filters.tier,
+      minScore: filters.minScore,
+      query: filters.query,
+      window: filters.windowHours,
+      limit: filters.limit,
+      offset: filters.offset,
+    })}`,
+  );
+  return payload.candidates ?? [];
+}
+
+export async function fetchRadarCandidate(workspaceId: string, id: string): Promise<RadarCandidateRecord> {
+  const payload = await request<{ candidate: RadarCandidateRecord }>(
+    `/api/content-radar/candidates/${encodeURIComponent(id)}?${radarQuery(workspaceId, {})}`,
+  );
+  return payload.candidate;
+}
+
+export async function fetchRadarSources(input: {
+  workspaceId: string;
+  tier?: RadarSourceTier;
+  kind?: RadarSourceKind;
+  enabled?: boolean;
+  limit?: number;
+}): Promise<RadarSourceRecord[]> {
+  const payload = await request<{ sources: RadarSourceRecord[] }>(
+    `/api/content-radar/sources?${radarQuery(input.workspaceId, input)}`,
+  );
+  return payload.sources ?? [];
+}
+
+export async function fetchRadarRuns(input: {
+  workspaceId: string;
+  kind?: RadarRun['kind'];
+  status?: RadarRunStatus;
+  limit?: number;
+}): Promise<RadarRun[]> {
+  const payload = await request<{ runs: RadarRun[] }>(
+    `/api/content-radar/runs?${radarQuery(input.workspaceId, input)}`,
+  );
+  return payload.runs ?? [];
+}
+
+export async function fetchRadarDrafts(input: {
+  workspaceId: string;
+  unimported?: boolean;
+  limit?: number;
+}): Promise<RadarDraftRecord[]> {
+  const payload = await request<{ drafts: RadarDraftRecord[] }>(
+    `/api/content-radar/drafts?${radarQuery(input.workspaceId, input)}`,
+  );
+  return payload.drafts ?? [];
+}
+
+export async function createRadarDraft(candidateId: string, context: RadarOwnerContext): Promise<RadarDraftRecord> {
+  const payload = await request<{ draft: RadarDraftRecord }>(
+    `/api/content-radar/candidates/${encodeURIComponent(candidateId)}/draft`,
+    {
+      method: 'POST',
+      headers: ownerHeaders(context.actorId),
+      body: JSON.stringify({ workspaceId: context.workspaceId }),
+    },
+  );
+  return payload.draft;
+}
+
+export async function rejectRadarCandidate(
+  candidateId: string,
+  input: RadarOwnerContext & { reason: string },
+): Promise<RadarCandidateRecord> {
+  const payload = await request<{ candidate: RadarCandidateRecord }>(
+    `/api/content-radar/candidates/${encodeURIComponent(candidateId)}/reject`,
+    {
+      method: 'POST',
+      headers: ownerHeaders(input.actorId),
+      body: JSON.stringify({ workspaceId: input.workspaceId, reason: input.reason }),
+    },
+  );
+  return payload.candidate;
+}
+
+export async function reclassifyRadarCandidate(
+  candidateId: string,
+  input: RadarOwnerContext & { niche: RadarNiche },
+): Promise<RadarCandidateRecord> {
+  const payload = await request<{ candidate: RadarCandidateRecord }>(
+    `/api/content-radar/candidates/${encodeURIComponent(candidateId)}`,
+    {
+      method: 'PATCH',
+      headers: ownerHeaders(input.actorId),
+      body: JSON.stringify({ workspaceId: input.workspaceId, niche: input.niche }),
+    },
+  );
+  return payload.candidate;
+}
+
+export async function updateRadarSource(
+  sourceId: string,
+  input: RadarOwnerContext & Partial<Pick<RadarSourceRecord, 'tier' | 'kind' | 'enabled' | 'requiresCrosscheck' | 'notes'>>,
+): Promise<RadarSourceRecord> {
+  const { workspaceId, actorId, ...patch } = input;
+  const payload = await request<{ source: RadarSourceRecord }>(
+    `/api/content-radar/sources/${encodeURIComponent(sourceId)}`,
+    {
+      method: 'PATCH',
+      headers: ownerHeaders(actorId),
+      body: JSON.stringify({ workspaceId, ...patch }),
+    },
+  );
+  return payload.source;
 }
