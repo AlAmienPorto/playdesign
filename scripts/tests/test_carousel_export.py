@@ -209,7 +209,17 @@ def main() -> int:
     full = runner.build_slide_svg(dict(DOCUMENT, template="full-image"), 0)
     check("template split-dark beda palet", "#090b10" in dark and "#090b10" not in brand, "palet")
     check("template full-image tanpa bar samping", "<rect x=\"0\" y=\"0\" width=\"24\"" not in full, "bar")
-    check("template full-image menurunkan judul", 'y="860"' in full and 'y="420"' in brand, "posisi judul")
+    poster = runner.build_slide_svg(dict(DOCUMENT, template="poster"), 0)
+    kolase = runner.build_slide_svg(dict(DOCUMENT, template="kolase"), 0)
+    blok = runner.build_slide_svg(dict(DOCUMENT, template="blok"), 0)
+    check("template full-image menyiapkan overlay transparan", "<image" not in full and "<rect" in full, "overlay")
+    check("template poster memakai nomor edisi raksasa", 'font-size="380"' in poster, "nomor")
+    check("template kolase menumpuk tiga blok", kolase.count("fill-opacity=\"0.20\"") == 1, "blok")
+    check(
+        "template blok berlatar aksen penuh dan kapital",
+        '<rect width="1080" height="1350" fill="#ef5a6b"' in blok and DOCUMENT["headline"].upper()[:10] in blok,
+        "blok tebal",
+    )
 
     # ---------- brand kit (aksen + handle) ----------
     accented = runner.build_slide_svg(dict(DOCUMENT, accent="#1e6f5c", brandHandle="plydsgn"), 0)

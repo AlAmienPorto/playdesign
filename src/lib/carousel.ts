@@ -1,6 +1,6 @@
 import type { CarouselDocument, CarouselSlide, SocialPost } from '../data/types';
 
-export type CarouselTemplate = CarouselDocument['template'];
+export type CarouselTemplate = 'split-brand' | 'split-dark' | 'full-image' | 'poster' | 'kolase' | 'blok';
 
 /** Palet & deskripsi tiap template. Dipakai galeri template di studio. */
 export const CAROUSEL_TEMPLATES: ReadonlyArray<{
@@ -8,13 +8,54 @@ export const CAROUSEL_TEMPLATES: ReadonlyArray<{
   label: string;
   description: string;
   swatch: string;
+  /** Jenis konten yang paling cocok (rujukan pola template per kategori). */
+  useCase: string;
 }> = [
-  { id: 'split-brand', label: 'Split brand', description: 'Pita merah brand, judul di bawah', swatch: '#bf1d2d' },
-  { id: 'split-dark', label: 'Split dark', description: 'Hitam pekat, aksen lembut', swatch: '#ef5a6b' },
-  { id: 'full-image', label: 'Full image', description: 'Foto penuh, judul menimpa', swatch: '#11131a' },
+  {
+    id: 'split-brand',
+    label: 'Editorial split',
+    description: 'Badge niche, judul dijangkar bawah, pita aksen kiri',
+    swatch: '#bf1d2d',
+    useCase: 'Berita & edukasi',
+  },
+  {
+    id: 'split-dark',
+    label: 'Statement',
+    description: 'Satu kalimat besar di tengah, dua garis aksen',
+    swatch: '#ef5a6b',
+    useCase: 'Kutipan & opini',
+  },
+  {
+    id: 'full-image',
+    label: 'Full-bleed foto',
+    description: 'Foto penuh kanvas, judul menimpa scrim gelap',
+    swatch: '#0b0c10',
+    useCase: 'Liputan & foto berizin',
+  },
+  {
+    id: 'poster',
+    label: 'Poster tipografi',
+    description: 'Nomor edisi raksasa, judul besar, tanpa badge',
+    swatch: '#8f1d24',
+    useCase: 'Tips & manifesto',
+  },
+  {
+    id: 'kolase',
+    label: 'Kolase',
+    description: 'Blok warna bertumpuk di kanan, judul menimpa ruang kosong',
+    swatch: '#ff6b70',
+    useCase: 'Berita ringan & promo',
+  },
+  {
+    id: 'blok',
+    label: 'Blok tebal',
+    description: 'Latar aksen penuh, tipografi hitam kapital',
+    swatch: '#f5c542',
+    useCase: 'Promo & pengumuman',
+  },
 ];
 
-const TEMPLATES: CarouselDocument['template'][] = ['split-brand', 'split-dark', 'full-image'];
+const TEMPLATES: CarouselTemplate[] = CAROUSEL_TEMPLATES.map((item) => item.id);
 
 /** Normalisasi warna aksen: hanya #rgb / #rrggbb, selain itu string kosong. */
 export function normalizeAccent(value: string | undefined): string {

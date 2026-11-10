@@ -966,6 +966,7 @@ export function CarouselStudioPage() {
                         <span className="carousel-template-meta">
                           <strong>{tpl.label}</strong>
                           <span>{tpl.description}</span>
+                          <em>{tpl.useCase}</em>
                         </span>
                       </button>
                     ))}

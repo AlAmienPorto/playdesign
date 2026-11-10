@@ -84,6 +84,20 @@ export function CarouselPreview({ document, activeIndex, compact = false, onImag
       aria-label={`Pratinjau slide ${activeIndex + 1} dari ${document.slides.length}`}
       style={document.accent ? ({ '--carousel-accent': document.accent } as CSSProperties) : undefined}
     >
+      {document.template === 'kolase' ? (
+        <div className="carousel-kolase-stack" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </div>
+      ) : null}
+      {document.template === 'poster' ? (
+        <svg className="carousel-poster-number" viewBox="0 0 100 60" aria-hidden="true" focusable="false">
+          <text x="98" y="48" textAnchor="end" fontSize="52" fontWeight="900" fill="currentColor">
+            {String(activeIndex + 1).padStart(2, '0')}
+          </text>
+        </svg>
+      ) : null}
       {slide.kind === 'cover' ? (
         showImage ? (
           <>

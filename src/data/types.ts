@@ -342,7 +342,7 @@ export interface CarouselSlide {
 
 export interface CarouselDocument {
   kicker: string;
-  template: 'split-brand' | 'split-dark' | 'full-image';
+  template: 'split-brand' | 'split-dark' | 'full-image' | 'poster' | 'kolase' | 'blok';
   /** Warna aksen brand (hex #rrggbb). Kosong = ikut palet template. */
   accent?: string;
   /** Handle brand di footer slide, mis. "@plydsgn". */

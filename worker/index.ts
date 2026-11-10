@@ -1735,7 +1735,7 @@ function normalizeCarouselDocument(raw: unknown) {
     fail(400, "invalid_document", "Slide pertama harus berupa cover.");
   }
 
-  const template = ["split-brand", "split-dark", "full-image"].includes(String(doc.template))
+  const template = ["split-brand", "split-dark", "full-image", "poster", "kolase", "blok"].includes(String(doc.template))
     ? String(doc.template)
     : "split-brand";
 

@@ -1,5 +1,6 @@
 // @ts-nocheck — dieksekusi oleh Node/tsx, bukan build Vite.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -118,10 +119,29 @@ test('normalizeCarousel membuang aksen tidak valid dan handle kosong', () => {
 test('CAROUSEL_TEMPLATES mencakup semua template yang didukung', () => {
   assert.deepEqual(
     CAROUSEL_TEMPLATES.map((item) => item.id).sort(),
-    ['full-image', 'split-brand', 'split-dark'],
+    ['blok', 'full-image', 'kolase', 'poster', 'split-brand', 'split-dark'],
   );
   for (const item of CAROUSEL_TEMPLATES) {
     assert.ok(item.label.length > 0 && item.description.length > 0);
+    assert.ok(item.useCase.length > 0);
+    assert.match(item.swatch, /^#[0-9a-f]{6}$/);
+  }
+});
+
+test('setiap template punya hook CSS pratinjau', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const hooks: Record<string, string[]> = {
+    'split-brand': ['.carousel-canvas::before', '--carousel-accent'],
+    'split-dark': ['.carousel-canvas.template-split-dark .carousel-editorial-cover'],
+    'full-image': ['.carousel-canvas.template-full-image .carousel-cover-copy'],
+    poster: ['.carousel-canvas.template-poster .carousel-editorial-cover h2', '.carousel-poster-number'],
+    kolase: ['.carousel-kolase-stack', '.carousel-canvas.template-kolase .carousel-editorial-cover'],
+    blok: ['.carousel-canvas.template-blok', '.carousel-canvas.template-blok .carousel-point-badge'],
+  };
+  for (const item of CAROUSEL_TEMPLATES) {
+    for (const hook of hooks[item.id]) {
+      assert.ok(css.includes(hook), `CSS kehilangan hook ${hook} untuk template ${item.id}`);
+    }
   }
 });
 

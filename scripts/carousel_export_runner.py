@@ -58,11 +58,14 @@ MUTED = "#d8d2cf"
 ACCENT = "#ef5a6b"
 DEFAULT_ACCENT = ACCENT
 
-# Sama dengan preview: template mengubah palet, bukan hanya label.
+# Sama dengan preview: tiap template punya komposisi cover & slide isi sendiri.
 TEMPLATE_STYLES: dict[str, dict[str, object]] = {
-    "split-brand": {"bg": "#11131a", "bar": "#bf1d2d", "title_y": 420, "overlay": False},
-    "split-dark": {"bg": "#090b10", "bar": "#ef5a6b", "title_y": 420, "overlay": False},
-    "full-image": {"bg": "#11131a", "bar": None, "title_y": 860, "overlay": True},
+    "split-brand": {"bg": "#11131a", "bar": "#bf1d2d", "cover": "split", "text": "cards"},
+    "split-dark": {"bg": "#090b10", "bar": None, "cover": "statement", "text": "statement"},
+    "full-image": {"bg": "#0b0c10", "bar": None, "cover": "photo", "text": "cards"},
+    "poster": {"bg": "#11131a", "bar": "#bf1d2d", "cover": "poster", "text": "poster"},
+    "kolase": {"bg": "#11131a", "bar": None, "cover": "kolase", "text": "cards"},
+    "blok": {"bg": "#ef5a6b", "bar": None, "cover": "blok", "text": "blok"},
 }
 
 
@@ -174,125 +177,187 @@ def build_caption(document: dict) -> str:
 # SVG -> PNG
 # ---------------------------------------------------------------------------
 
-def build_slide_svg(document: dict, index: int) -> str:
-    """Layout 1080x1350 yang selaras dengan preview Carousel Studio."""
-    slides = document.get("slides") or []
-    slide = slides[index] if 0 <= index < len(slides) else {"kind": "cover", "title": "", "body": ""}
-    total = len(slides) or 1
-    is_cover = slide.get("kind") == "cover"
-    title = str(document.get("headline") or "") if is_cover else str(slide.get("title") or "")
-    has_cover_image = bool(document.get("coverImageUrl"))
+MARGIN = 88
+FOOTER_BASELINE = 1260
+FOOTER_TAGLINE_X = 293
+FOOTER_COUNTER_X = 880
 
-    style = dict(TEMPLATE_STYLES.get(str(document.get("template") or "split-brand"), TEMPLATE_STYLES["split-brand"]))
-    # Brand kit: aksen & handle dari dokumen menimpa palet template.
-    accent_override = normalize_hex_accent(document.get("accent"))
-    ACCENT = accent_override or DEFAULT_ACCENT  # noqa: N806 - sengaja membayangi konstanta modul
-    brand = normalize_brand_handle(document.get("brandHandle")) or "playdesign"
-    if accent_override:
-        style["bar"] = accent_override
-    bg = str(style["bg"])
-    bar = style["bar"]
-    overlay = bool(style["overlay"])
-    counter = f"{index + 1:02d} / {total:02d}"
 
-    backdrop = f'<rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{bg}"/>'
-    bar_rect = (
-        f'<rect x="0" y="0" width="24" height="{SLIDE_HEIGHT}" fill="{bar}"/>' if bar else ""
+def _text_block(
+    lines: list[str],
+    *,
+    x: int,
+    baseline: int,
+    line_height: int,
+    fill: str,
+    size: int,
+    weight: int = 800,
+    anchor: str = "start",
+    letter_spacing: int = 0,
+) -> str:
+    """Teks multi-baris sebagai satu <text> dengan tspan per baris."""
+    if not lines:
+        return ""
+    spans = "".join(
+        f'<tspan x="{x}" dy="{0 if position == 0 else line_height}">{escape_xml(line)}</tspan>'
+        for position, line in enumerate(lines)
+    )
+    spacing = f' letter-spacing="{letter_spacing}"' if letter_spacing else ""
+    centering = f' text-anchor="{anchor}"' if anchor != "start" else ""
+    return (
+        f'<text x="{x}" y="{baseline}" fill="{fill}" font-family="{FONT}" '
+        f'font-size="{size}" font-weight="{weight}"{spacing}{centering}>{spans}</text>'
     )
 
-    tagline = f'<text x="540" y="1260" fill="rgba(255,255,255,0.35)" font-family="{FONT}" font-size="18" font-weight="700" letter-spacing="6" text-anchor="middle">LETS PLAY CREATIVITY WITH US</text>'
-    footer = f'''
-  <text x="88" y="1260" fill="{ACCENT}" font-family="{FONT}" font-size="30" font-weight="700">{escape_xml(brand)}</text>
-  {tagline}
-  <text x="992" y="1260" fill="{INK}" font-family="{FONT}" font-size="30" text-anchor="end">{counter}</text>'''
 
-    if is_cover:
-        # Template full-image dengan foto atau overlay eksplisit
-        if overlay or has_cover_image:
-            title_lines = wrap_text(title, 24, 5)
-            body = f"Sumber: {document.get('sourceName') or 'Belum diisi'}"
-            body_lines = wrap_text(body, 42, 5 if overlay else 8)
-            title_y = int(str(style["title_y"]))
-            title_spans = "".join(
-                f'<tspan x="88" dy="{0 if position == 0 else 80}">{escape_xml(line)}</tspan>'
-                for position, line in enumerate(title_lines)
-            )
-            body_y = title_y + max(len(title_lines), 1) * 80 + (40 if overlay else 60)
-            body_spans = "".join(
-                f'<tspan x="88" dy="{0 if position == 0 else 46}">{escape_xml(line)}</tspan>'
-                for position, line in enumerate(body_lines)
-            )
-            kicker = escape_xml(str(document.get("kicker") or "PLAYDESIGN / CAROUSEL"))
-            return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
-  {backdrop}
-  {bar_rect}
-  <text x="88" y="110" fill="{ACCENT}" font-family="{FONT}" font-size="24" font-weight="700" letter-spacing="4">{kicker}</text>
-  <text x="88" y="{title_y}" fill="{INK}" font-family="{FONT}" font-size="68" font-weight="800">{title_spans}</text>
-  <text x="88" y="{body_y}" fill="{MUTED}" font-family="{FONT}" font-size="30">{body_spans}</text>
-  {footer}
+def _paragraph_lines(body: str, max_chars: int, max_lines: int) -> list[str]:
+    """Pecah isi slide per baris logis, bukan digabung jadi satu paragraf."""
+    out: list[str] = []
+    for raw in str(body or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        out.extend(wrap_text(line, max_chars, max_lines))
+        if len(out) >= max_lines:
+            break
+    return out[:max_lines]
+
+def _footer(brand: str, counter: str, accent: str) -> str:
+    return (
+        f'<text x="{MARGIN}" y="{FOOTER_BASELINE}" fill="{accent}" font-family="{FONT}" '
+        f'font-size="30" font-weight="700">{escape_xml(brand)}</text>'
+        f'<text x="{FOOTER_TAGLINE_X}" y="{FOOTER_BASELINE}" fill="rgba(255,255,255,0.34)" font-family="{FONT}" '
+        f'font-size="15" font-weight="700" letter-spacing="2">'
+        f"LETS PLAY CREATIVITY WITH US</text>"
+        f'<text x="{FOOTER_COUNTER_X}" y="{FOOTER_BASELINE}" fill="{INK}" font-family="{FONT}" font-size="30" '
+        f'font-weight="700">{counter}</text>'
+    )
+
+
+def _niche_label(kicker_raw: str) -> str:
+    return kicker_raw.replace("PLAYDESIGN / ", "").replace("PLAYDESIGN/", "").strip() or "EDITORIAL"
+
+
+def _niche_badge(label: str, kicker_raw: str, accent: str) -> str:
+    """Badge niche solid: kuning untuk crypto, aksen brand untuk sisanya."""
+    bg = "#f59e0b" if "crypto" in kicker_raw.lower() else accent
+    width = min(max(len(label) * 17 + 56, 168), 470)
+    return (
+        f'<rect x="{MARGIN}" y="128" width="{width}" height="48" rx="24" fill="{bg}"/>'
+        f'<text x="{MARGIN + width // 2}" y="160" fill="#000000" font-family="{FONT}" font-size="21" '
+        f'font-weight="800" letter-spacing="2" text-anchor="middle">{escape_xml(label)}</text>'
+    )
+
+
+def _source_pill(document: dict) -> str:
+    label = f"Sumber: {document.get('sourceName') or 'Belum diisi'}"
+    width = min(max(len(label) * 14 + 60, 280), 680)
+    return (
+        f'<rect x="{MARGIN}" y="1078" width="{width}" height="56" rx="28" '
+        f'fill="rgba(255,255,255,0.10)" stroke="rgba(255,255,255,0.22)"/>'
+        f'<text x="{MARGIN + 32}" y="1114" fill="{INK}" font-family="{FONT}" font-size="23">'
+        f"{escape_xml(label)}</text>"
+    )
+
+
+def _cover_split(document: dict, title: str, subtitle: str, accent: str, bar: str, kicker_raw: str, brand: str, counter: str) -> str:
+    """Editorial split: metadata di atas, judul dijangkar bawah, pita aksen kiri."""
+    label = _niche_label(kicker_raw)
+    title_lines = wrap_text(title, 22, 5)
+    title_y = 1000 - (len(title_lines) - 1) * 82
+    deck = wrap_text(subtitle, 40, 2) if subtitle else []
+    deck_y = title_y - 70 - max(len(deck) - 1, 0) * 40
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{TEMPLATE_STYLES['split-brand']['bg']}"/>
+  <rect x="0" y="0" width="24" height="{SLIDE_HEIGHT}" fill="{bar}"/>
+  <text x="1010" y="780" fill="#ffffff" fill-opacity="0.035" font-family="{FONT}" font-size="200" font-weight="900" text-anchor="end" transform="rotate(-90 1010 780)">PLAYDESIGN</text>
+  <text x="{MARGIN}" y="104" fill="#8f8785" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="5">EDISI EDITORIAL</text>
+  {_niche_badge(label, kicker_raw, accent)}
+  <rect x="{MARGIN}" y="200" width="904" height="1" fill="rgba(255,255,255,0.12)"/>
+  {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#b8b0ae", size=28, weight=400)}
+  {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=82, fill=INK, size=68, weight=800)}
+  {_source_pill(document)}
+  {_footer(brand, counter, accent)}
 </svg>'''
 
-        # Editorial Typography Cover (tanpa foto cover / poster berita editorial PlayDesign)
-        kicker_raw = str(document.get("kicker") or "PLAYDESIGN / RADAR").strip()
-        is_crypto = "crypto" in kicker_raw.lower()
-        badge_bg = "#f59e0b" if is_crypto else (accent_override or "#ef4444")
-        clean_kicker = kicker_raw.replace("PLAYDESIGN / ", "").replace("PLAYDESIGN/", "").strip()
-        badge_w = min(max(len(clean_kicker) * 16 + 48, 160), 450)
 
-        watermark = f'<text x="1000" y="620" fill="#ffffff" fill-opacity="0.03" font-family="{FONT}" font-size="180" font-weight="900" text-anchor="end" transform="rotate(-90 1000 620)">PLAYDESIGN</text>'
-
-        title_lines = wrap_text(title, 22, 5)
-        title_y = int(str(style["title_y"]))
-        title_spans = "".join(
-            f'<tspan x="88" dy="{0 if position == 0 else 82}">{escape_xml(line)}</tspan>'
-            for position, line in enumerate(title_lines)
-        )
-
-        subtitle = str(slide.get("body") or "").strip()
-        sub_elements = ""
-        if subtitle:
-            sub_lines = wrap_text(subtitle, 38, 4)
-            sub_y = title_y + len(title_lines) * 82 + 24
-            sub_spans = "".join(
-                f'<tspan x="88" dy="{0 if position == 0 else 46}">{escape_xml(line)}</tspan>'
-                for position, line in enumerate(sub_lines)
-            )
-            sub_elements = f'<text x="88" y="{sub_y}" fill="#c8c0be" font-family="{FONT}" font-size="28">{sub_spans}</text>'
-
-        src_label = f"Sumber: {document.get('sourceName') or 'Belum diisi'}"
-        src_w = min(max(len(src_label) * 14 + 56, 260), 650)
-        source_pill = f'''
-  <rect x="88" y="1110" width="{src_w}" height="50" rx="25" fill="rgba(255,255,255,0.06)" stroke="rgba(255,255,255,0.12)"/>
-  <text x="120" y="1143" fill="#fffaf5" font-family="{FONT}" font-size="22">{escape_xml(src_label)}</text>'''
-
-        badge_pill = f'''
-  <rect x="88" y="100" width="{badge_w}" height="46" rx="23" fill="{badge_bg}"/>
-  <text x="{88 + badge_w // 2}" y="131" fill="#000000" font-family="{FONT}" font-size="20" font-weight="800" letter-spacing="2" text-anchor="middle">{escape_xml(clean_kicker)}</text>
-  <text x="{88 + badge_w + 24}" y="130" fill="#8f8785" font-family="{FONT}" font-size="18" font-weight="600" letter-spacing="3">EDISI EDITORIAL</text>'''
-
-        return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
-  {backdrop}
-  {bar_rect}
-  {watermark}
-  {badge_pill}
-  <text x="88" y="{title_y}" fill="{INK}" font-family="{FONT}" font-size="68" font-weight="800">{title_spans}</text>
-  {sub_elements}
-  {source_pill}
-  {footer}
+def _cover_statement(document: dict, title: str, subtitle: str, accent: str, kicker_raw: str, brand: str, counter: str) -> str:
+    """Statement: satu kalimat besar di tengah, dua garis aksen, tanpa kartu."""
+    title_lines = wrap_text(title, 24, 5)
+    block_bottom = 700
+    title_y = block_bottom - (len(title_lines) - 1) * 88
+    attribution = str(document.get("sourceName") or "").strip()
+    attribution_svg = (
+        _text_block([f"— {attribution}"], x=540, baseline=block_bottom + 96, line_height=40,
+                    fill="#b3aaa8", size=24, weight=600, anchor="middle")
+        if attribution
+        else ""
+    )
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{TEMPLATE_STYLES['split-dark']['bg']}"/>
+  <text x="540" y="150" fill="{accent}" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="6" text-anchor="middle">{escape_xml(_niche_label(kicker_raw).upper())}</text>
+  <rect x="470" y="186" width="140" height="3" fill="{accent}"/>
+  {_text_block(title_lines, x=540, baseline=title_y, line_height=88, fill=INK, size=62, weight=800, anchor="middle")}
+  <rect x="470" y="{block_bottom + 44}" width="140" height="3" fill="rgba(255,255,255,0.22)"/>
+  {attribution_svg}
+  {_footer(brand, counter, accent)}
 </svg>'''
 
-    # Slide Isi (Slide 2-5): Terstruktur dengan point cards jika teks memiliki baris poin
+
+def _cover_photo(document: dict, title: str, subtitle: str, accent: str, kicker_raw: str, brand: str, counter: str) -> str:
+    """Full-bleed: foto penuh kanvas, judul menimpa di area scrim.
+
+    Scrim gradien dikerjakan ImageMagick saat komposit (renderer SVG bawaan
+    ImageMagick tidak mendukung linearGradient), jadi SVG ini transparan penuh
+    ketika foto tersedia.
+    """
+    has_photo = bool(document.get("coverImageUrl"))
+    backdrop = "" if has_photo else f'<rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{TEMPLATE_STYLES["full-image"]["bg"]}"/>'
+    title_lines = wrap_text(title, 20, 4)
+    title_y = 980 - (len(title_lines) - 1) * 82
+    deck = wrap_text(subtitle, 40, 2) if subtitle else []
+    deck_y = title_y - 66 - max(len(deck) - 1, 0) * 40
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  {backdrop}
+  <rect x="{MARGIN}" y="128" width="8" height="48" fill="{accent}"/>
+  <text x="{MARGIN + 26}" y="162" fill="{INK}" font-family="{FONT}" font-size="21" font-weight="800" letter-spacing="3">{escape_xml(_niche_label(kicker_raw).upper())}</text>
+  {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#ddd6d3", size=28, weight=400)}
+  {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=82, fill="#ffffff", size=66, weight=800)}
+  <text x="{MARGIN}" y="1060" fill="#f0eae8" font-family="{FONT}" font-size="22" letter-spacing="2">SUMBER: {escape_xml(str(document.get('sourceName') or 'BELUM DIISI').upper())}</text>
+  {_footer(brand, counter, accent)}
+</svg>'''
+
+
+def _cover_poster(document: dict, title: str, subtitle: str, accent: str, kicker_raw: str, brand: str, counter: str, index: int) -> str:
+    """Poster tipografi: nomor raksasa, judul besar, tanpa badge pil."""
+    title_lines = wrap_text(title, 16, 4)
+    title_y = 1010 - (len(title_lines) - 1) * 96
+    deck = wrap_text(subtitle, 46, 2) if subtitle else []
+    deck_y = title_y - 74 - max(len(deck) - 1, 0) * 40
+    number = f"{index + 1:02d}"
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{TEMPLATE_STYLES['poster']['bg']}"/>
+  <rect x="0" y="0" width="{SLIDE_WIDTH}" height="10" fill="{accent}"/>
+  <text x="992" y="420" fill="{accent}" fill-opacity="0.16" font-family="{FONT}" font-size="380" font-weight="900" text-anchor="end">{number}</text>
+  <text x="{MARGIN}" y="120" fill="{INK}" font-family="{FONT}" font-size="21" font-weight="800" letter-spacing="6">{escape_xml(_niche_label(kicker_raw).upper())}</text>
+  <rect x="{MARGIN}" y="150" width="64" height="6" fill="{accent}"/>
+  {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#b8b0ae", size=29, weight=400)}
+  {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=96, fill=INK, size=84, weight=800)}
+  <text x="{MARGIN}" y="1058" fill="#8f8785" font-family="{FONT}" font-size="21" font-weight="600" letter-spacing="3">{escape_xml(str(document.get('sourceName') or 'Belum diisi'))}</text>
+  {_footer(brand, counter, accent)}
+</svg>'''
+
+
+def _text_cards(document: dict, slide: dict, title: str, accent: str, bar: str, brand: str, counter: str, index: int) -> str:
+    """Slide isi standar: kartu bernomor untuk poin, kartu paragraf untuk teks biasa."""
     kicker = escape_xml(f"PLAYDESIGN / {index + 1:02d}")
+    style = TEMPLATE_STYLES.get(str(document.get("template") or "split-brand"), TEMPLATE_STYLES["split-brand"])
+    bg = str(style["bg"])
     title_lines = wrap_text(title, 26, 3)
-    title_spans = "".join(
-        f'<tspan x="88" dy="{0 if position == 0 else 72}">{escape_xml(line)}</tspan>'
-        for position, line in enumerate(title_lines)
-    )
-
     body_text = str(slide.get("body") or "").strip() or "Isi slide belum diisi."
-    raw_lines = [l.strip() for l in body_text.splitlines() if l.strip()]
+    raw_lines = [line.strip() for line in body_text.splitlines() if line.strip()]
     if len(raw_lines) <= 1 and re.search(r"\b1[\.\)]\s+.*\b2[\.\)]\s+", body_text):
-        raw_lines = [l.strip() for l in re.split(r"(?=\b\d+[\.\)]\s+)", body_text) if l.strip()]
+        raw_lines = [line.strip() for line in re.split(r"(?=\b\d+[\.\)]\s+)", body_text) if line.strip()]
     points = []
     for line in raw_lines:
         match = re.match(r"^(\d+[\.\)]|[-*•])\s*(.*)", line)
@@ -300,51 +365,185 @@ def build_slide_svg(document: dict, index: int) -> str:
             num = match.group(1).rstrip(".):")
             points.append((num if len(num) <= 2 else "•", match.group(2)))
 
-    cards_elements = []
+    cards_elements: list[str] = []
     start_y = 220 + len(title_lines) * 72 + 30
 
     if len(points) >= 2:
         curr_y = start_y
         for num, text in points[:4]:
-            p_lines = wrap_text(text, 44, 4)
-            card_h = max(len(p_lines) * 40 + 36, 96)
-            p_spans = "".join(
+            point_lines = wrap_text(text, 44, 4)
+            card_h = max(len(point_lines) * 40 + 36, 96)
+            point_spans = "".join(
                 f'<tspan x="184" dy="{0 if position == 0 else 40}">{escape_xml(pl)}</tspan>'
-                for position, pl in enumerate(p_lines)
+                for position, pl in enumerate(point_lines)
             )
-            card_svg = f'''
-  <rect x="88" y="{curr_y}" width="904" height="{card_h}" rx="14" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.08)"/>
-  <rect x="114" y="{curr_y + 20}" width="46" height="46" rx="8" fill="{ACCENT}"/>
-  <text x="137" y="{curr_y + 51}" fill="#ffffff" font-family="{FONT}" font-size="22" font-weight="800" text-anchor="middle">{escape_xml(num)}</text>
-  <text x="184" y="{curr_y + 50}" fill="#c8c0be" font-family="{FONT}" font-size="26">{p_spans}</text>'''
-            cards_elements.append(card_svg)
+            cards_elements.append(
+                f'<rect x="{MARGIN}" y="{curr_y}" width="904" height="{card_h}" rx="14" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.08)"/>'
+                f'<rect x="114" y="{curr_y + 20}" width="46" height="46" rx="8" fill="{accent}"/>'
+                f'<text x="137" y="{curr_y + 51}" fill="#ffffff" font-family="{FONT}" font-size="22" font-weight="800" text-anchor="middle">{escape_xml(num)}</text>'
+                f'<text x="184" y="{curr_y + 50}" fill="#c8c0be" font-family="{FONT}" font-size="26">{point_spans}</text>'
+            )
             curr_y += card_h + 18
     else:
-        # Standard paragraph card
         body_lines = wrap_text(body_text, 42, 8)
         box_h = max(len(body_lines) * 48 + 48, 140)
         body_spans = "".join(
             f'<tspan x="134" dy="{0 if position == 0 else 48}">{escape_xml(line)}</tspan>'
             for position, line in enumerate(body_lines)
         )
-        card_svg = f'''
-  <rect x="88" y="{start_y}" width="904" height="{box_h}" rx="14" fill="rgba(255,255,255,0.035)" stroke="rgba(255,255,255,0.08)"/>
-  <rect x="88" y="{start_y}" width="8" height="{box_h}" rx="4" fill="{ACCENT}"/>
-  <text x="134" y="{start_y + 52}" fill="{MUTED}" font-family="{FONT}" font-size="30">{body_spans}</text>'''
-        cards_elements.append(card_svg)
-
-    body_section = "".join(cards_elements)
+        cards_elements.append(
+            f'<rect x="{MARGIN}" y="{start_y}" width="904" height="{box_h}" rx="14" fill="rgba(255,255,255,0.035)" stroke="rgba(255,255,255,0.08)"/>'
+            f'<rect x="{MARGIN}" y="{start_y}" width="8" height="{box_h}" rx="4" fill="{accent}"/>'
+            f'<text x="134" y="{start_y + 52}" fill="{MUTED}" font-family="{FONT}" font-size="30">{body_spans}</text>'
+        )
 
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
-  {backdrop}
-  {bar_rect}
-  <text x="88" y="105" fill="{ACCENT}" font-family="{FONT}" font-size="24" font-weight="700" letter-spacing="4">{kicker}</text>
-  <rect x="88" y="125" width="80" height="4" fill="{bar if bar else ACCENT}"/>
-  <text x="88" y="220" fill="{INK}" font-family="{FONT}" font-size="56" font-weight="800">{title_spans}</text>
-  {body_section}
-  {footer}
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{bg}"/>
+  {f'<rect x="0" y="0" width="24" height="{SLIDE_HEIGHT}" fill="{bar}"/>' if bar else ''}
+  <text x="{MARGIN}" y="105" fill="{accent}" font-family="{FONT}" font-size="24" font-weight="700" letter-spacing="4">{kicker}</text>
+  <rect x="{MARGIN}" y="125" width="80" height="4" fill="{bar or accent}"/>
+  {_text_block(title_lines, x=MARGIN, baseline=220, line_height=72, fill=INK, size=56, weight=800)}
+  {''.join(cards_elements)}
+  {_footer(brand, counter, accent)}
 </svg>'''
 
+
+def _text_statement(document: dict, slide: dict, title: str, accent: str, brand: str, counter: str, index: int) -> str:
+    """Slide isi statement: judul besar di tengah, isi sebagai satu paragraf tengah."""
+    title_lines = wrap_text(title, 26, 4)
+    title_y = 520 - (len(title_lines) - 1) * 82
+    body = str(slide.get("body") or "").strip()
+    body_lines = _paragraph_lines(body, 50, 8)
+    body_y = title_y + (len(title_lines) - 1) * 82 + 100
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{TEMPLATE_STYLES['split-dark']['bg']}"/>
+  <text x="540" y="150" fill="{accent}" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="6" text-anchor="middle">BAGIAN {index + 1:02d}</text>
+  <rect x="470" y="186" width="140" height="3" fill="{accent}"/>
+  {_text_block(title_lines, x=540, baseline=title_y, line_height=82, fill=INK, size=58, weight=800, anchor="middle")}
+  {_text_block(body_lines, x=540, baseline=body_y, line_height=52, fill="#c8c0be", size=30, weight=400, anchor="middle")}
+  {_footer(brand, counter, accent)}
+</svg>'''
+
+
+def _text_poster(document: dict, slide: dict, title: str, accent: str, brand: str, counter: str, index: int) -> str:
+    """Slide isi poster: nomor bagian raksasa, judul menempel, isi rata kiri."""
+    title_lines = wrap_text(title, 24, 4)
+    title_y = 640 - (len(title_lines) - 1) * 80
+    body = str(slide.get("body") or "").strip()
+    body_lines = _paragraph_lines(body, 44, 8)
+    body_y = title_y + (len(title_lines) - 1) * 80 + 90
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{TEMPLATE_STYLES['poster']['bg']}"/>
+  <rect x="0" y="0" width="{SLIDE_WIDTH}" height="10" fill="{accent}"/>
+  <text x="992" y="470" fill="{accent}" fill-opacity="0.14" font-family="{FONT}" font-size="380" font-weight="900" text-anchor="end">{index + 1:02d}</text>
+  <rect x="{MARGIN}" y="120" width="64" height="6" fill="{accent}"/>
+  {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=80, fill=INK, size=64, weight=800)}
+  {_text_block(body_lines, x=MARGIN, baseline=body_y, line_height=50, fill="#c8c0be", size=30, weight=400)}
+  {_footer(brand, counter, accent)}
+</svg>'''
+
+
+def _cover_blok(document: dict, title: str, subtitle: str, accent: str, kicker_raw: str, brand: str, counter: str) -> str:
+    """Blok tebal (rujukan ATHLETIC): latar aksen penuh, tipografi hitam kapital."""
+    title_lines = wrap_text(title.upper(), 15, 4)
+    title_y = 990 - (len(title_lines) - 1) * 86
+    deck = wrap_text(subtitle, 38, 2) if subtitle else []
+    deck_y = title_y - 78 - max(len(deck) - 1, 0) * 40
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{accent}"/>
+  <rect x="{MARGIN}" y="120" width="72" height="72" fill="#0b0c10"/>
+  <text x="{MARGIN + 36}" y="170" fill="{accent}" font-family="{FONT}" font-size="34" font-weight="900" text-anchor="middle">{counter.split(" / ")[0]}</text>
+  <text x="{MARGIN + 96}" y="150" fill="#0b0c10" font-family="{FONT}" font-size="24" font-weight="900" letter-spacing="3">{escape_xml(_niche_label(kicker_raw).upper())}</text>
+  <text x="{MARGIN + 96}" y="182" fill="#0b0c10" fill-opacity="0.6" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="4">PLAYDESIGN / CAROUSEL</text>
+  {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#0b0c10", size=28, weight=600)}
+  {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=86, fill="#0b0c10", size=78, weight=900)}
+  <text x="{MARGIN}" y="1058" fill="#0b0c10" fill-opacity="0.78" font-family="{FONT}" font-size="21" font-weight="700" letter-spacing="3">{escape_xml(str(document.get('sourceName') or 'Belum diisi'))}</text>
+  <text x="{MARGIN}" y="{FOOTER_BASELINE}" fill="#0b0c10" font-family="{FONT}" font-size="30" font-weight="900">{escape_xml(brand)}</text>
+  <text x="{FOOTER_TAGLINE_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" fill-opacity="0.72" font-family="{FONT}" font-size="15" font-weight="700" letter-spacing="2">LETS PLAY CREATIVITY WITH US</text>
+  <text x="{FOOTER_COUNTER_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" font-family="{FONT}" font-size="30" font-weight="900">{counter}</text>
+</svg>'''
+
+
+def _cover_kolase(document: dict, title: str, subtitle: str, accent: str, kicker_raw: str, brand: str, counter: str) -> str:
+    """Kolase (rujukan RED_COLLAGE): blok warna bertumpuk, judul menimpa blok."""
+    title_lines = wrap_text(title, 18, 4)
+    title_y = 960 - (len(title_lines) - 1) * 84
+    deck = wrap_text(subtitle, 40, 2) if subtitle else []
+    deck_y = title_y - 70 - max(len(deck) - 1, 0) * 40
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="#11131a"/>
+  <rect x="740" y="110" width="290" height="340" fill="{accent}"/>
+  <rect x="690" y="168" width="290" height="340" fill="#1c1f2a" stroke="rgba(255,255,255,0.12)"/>
+  <rect x="640" y="226" width="290" height="340" fill="{accent}" fill-opacity="0.20" stroke="rgba(255,255,255,0.16)"/>
+  <text x="{MARGIN}" y="120" fill="{accent}" font-family="{FONT}" font-size="22" font-weight="900" letter-spacing="5">{escape_xml(_niche_label(kicker_raw).upper())}</text>
+  <rect x="{MARGIN}" y="146" width="96" height="6" fill="{accent}"/>
+  {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#b8b0ae", size=28, weight=400)}
+  {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=84, fill="#fffaf5", size=74, weight=800)}
+  <text x="{MARGIN}" y="1058" fill="#8f8785" font-family="{FONT}" font-size="21" font-weight="600" letter-spacing="3">{escape_xml(str(document.get('sourceName') or 'Belum diisi'))}</text>
+  {_footer(brand, counter, accent)}
+</svg>'''
+
+
+def _text_blok(document: dict, slide: dict, title: str, accent: str, brand: str, counter: str, index: int) -> str:
+    """Slide isi blok tebal: latar aksen, tipografi hitam, daftar rapat."""
+    title_lines = wrap_text(title.upper(), 20, 3)
+    body_text = str(slide.get("body") or "").strip()
+    body_lines = _paragraph_lines(body_text, 40, 8)
+    body_y = 300 + (len(title_lines) - 1) * 76 + 100
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{accent}"/>
+  <rect x="{MARGIN}" y="120" width="72" height="72" fill="#0b0c10"/>
+  <text x="{MARGIN + 36}" y="170" fill="{accent}" font-family="{FONT}" font-size="34" font-weight="900" text-anchor="middle">{index + 1:02d}</text>
+  <text x="{MARGIN + 96}" y="164" fill="#0b0c10" fill-opacity="0.6" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="4">PLAYDESIGN / CAROUSEL</text>
+  {_text_block(title_lines, x=MARGIN, baseline=300, line_height=76, fill="#0b0c10", size=62, weight=900)}
+  {_text_block(body_lines, x=MARGIN, baseline=body_y, line_height=52, fill="#0b0c10", size=30, weight=600)}
+  <text x="{MARGIN}" y="{FOOTER_BASELINE}" fill="#0b0c10" font-family="{FONT}" font-size="30" font-weight="900">{escape_xml(brand)}</text>
+  <text x="{FOOTER_TAGLINE_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" fill-opacity="0.72" font-family="{FONT}" font-size="15" font-weight="700" letter-spacing="2">LETS PLAY CREATIVITY WITH US</text>
+  <text x="{FOOTER_COUNTER_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" font-family="{FONT}" font-size="30" font-weight="900">{counter}</text>
+</svg>'''
+
+
+def build_slide_svg(document: dict, index: int) -> str:
+    """Layout 1080x1350 yang selaras dengan preview Carousel Studio."""
+    slides = document.get("slides") or []
+    slide = slides[index] if 0 <= index < len(slides) else {"kind": "cover", "title": "", "body": ""}
+    total = len(slides) or 1
+    is_cover = slide.get("kind") == "cover"
+    title = str(document.get("headline") or "") if is_cover else str(slide.get("title") or "")
+    subtitle = str(slide.get("body") or "").strip()
+
+    template = str(document.get("template") or "split-brand")
+    style = TEMPLATE_STYLES.get(template, TEMPLATE_STYLES["split-brand"])
+    # Brand kit: aksen & handle dari dokumen menimpa palet template.
+    accent_override = normalize_hex_accent(document.get("accent"))
+    accent = accent_override or DEFAULT_ACCENT
+    brand = normalize_brand_handle(document.get("brandHandle")) or "playdesign"
+    bar = accent_override or str(style.get("bar") or "")
+    counter = f"{index + 1:02d} / {total:02d}"
+    kicker_raw = str(document.get("kicker") or "PLAYDESIGN / CAROUSEL").strip()
+
+    if is_cover:
+        layout = str(style.get("cover") or "split")
+        if layout == "statement":
+            return _cover_statement(document, title, subtitle, accent, kicker_raw, brand, counter)
+        if layout == "photo":
+            return _cover_photo(document, title, subtitle, accent, kicker_raw, brand, counter)
+        if layout == "poster":
+            return _cover_poster(document, title, subtitle, accent, kicker_raw, brand, counter, index)
+        if layout == "kolase":
+            return _cover_kolase(document, title, subtitle, accent, kicker_raw, brand, counter)
+        if layout == "blok":
+            return _cover_blok(document, title, subtitle, accent, kicker_raw, brand, counter)
+        return _cover_split(document, title, subtitle, accent, bar, kicker_raw, brand, counter)
+
+    layout = str(style.get("text") or "cards")
+    if layout == "statement":
+        return _text_statement(document, slide, title, accent, brand, counter, index)
+    if layout == "poster":
+        return _text_poster(document, slide, title, accent, brand, counter, index)
+    if layout == "blok":
+        return _text_blok(document, slide, title, accent, brand, counter, index)
+    return _text_cards(document, slide, title, accent, bar, brand, counter, index)
 
 def render_binary() -> str:
     override = os.environ.get("CAROUSEL_RENDER_BIN")
@@ -387,24 +586,97 @@ def fetch_cover(url: str, dest: Path, *, opener=None, timeout: int = 20) -> Path
     return dest
 
 
-def render_png(svg_text: str, out_path: Path, *, cover: Path | None = None) -> None:
+def render_png(svg_text: str, out_path: Path, *, cover: Path | None = None, full_bleed: bool = False) -> None:
     """Render SVG -> PNG 1080x1350. Gagal keras, tidak pernah menulis placeholder.
 
-    `cover` menempelkan foto di pita atas (template full-image); kalau komposit gagal,
-    PNG teks tetap dipakai supaya ekspor tidak hilang.
+    `cover` + `full_bleed` menempelkan foto penuh kanvas lalu menggambar teks SVG
+    transparan di atasnya (template full-image). Tanpa `full_bleed`, foto hanya
+    menempati pita atas. Kalau komposit gagal, PNG teks tetap dipakai supaya
+    ekspor tidak hilang.
     """
     binary = render_binary()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     svg_path = out_path.with_suffix(".svg")
     svg_path.write_text(svg_text, encoding="utf-8")
 
-    cmd = [binary]
-    if Path(binary).name == "magick":
-        cmd.append("svg:" + str(svg_path))
-    else:
-        cmd.append(str(svg_path))
-    cmd += ["-background", BG, "-alpha", "remove", "-alpha", "off", str(out_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    def _render_svg(target: Path, *, transparent: bool) -> subprocess.CompletedProcess:
+        if Path(binary).name == "magick":
+            source = "svg:" + str(svg_path)
+        else:
+            source = str(svg_path)
+        # -background harus mendahului input agar SVG benar-benar transparan.
+        if transparent:
+            cmd = [binary, "-background", "none", source, "-alpha", "on", str(target)]
+        else:
+            cmd = [binary, "-background", BG, source, "-alpha", "remove", "-alpha", "off", str(target)]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+
+    if full_bleed and cover is not None:
+        overlay_png = out_path.with_name(out_path.stem + "-teks.png")
+        base_png = out_path.with_name(out_path.stem + "-foto.png")
+        try:
+            proc = _render_svg(overlay_png, transparent=True)
+            if proc.returncode != 0 or not overlay_png.exists():
+                raise RuntimeError("render overlay gagal")
+            base = subprocess.run(
+                [
+                    binary,
+                    str(cover),
+                    "-resize",
+                    f"{SLIDE_WIDTH}x{SLIDE_HEIGHT}^",
+                    "-gravity",
+                    "center",
+                    "-extent",
+                    f"{SLIDE_WIDTH}x{SLIDE_HEIGHT}",
+                    str(base_png),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if base.returncode != 0 or not base_png.exists():
+                raise RuntimeError("siapkan foto penuh gagal")
+            # Scrim gradien: gelap di bawah supaya judul tetap terbaca di atas foto apa pun.
+            scrim = subprocess.run(
+                [
+                    binary,
+                    str(base_png),
+                    "(",
+                    "-size",
+                    f"{SLIDE_WIDTH}x{SLIDE_HEIGHT}",
+                    "gradient:rgba(7,8,12,0.18)-rgba(7,8,12,0.97)",
+                    ")",
+                    "-compose",
+                    "over",
+                    "-composite",
+                    str(base_png),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if scrim.returncode != 0:
+                raise RuntimeError("scrim gagal")
+            comp = subprocess.run(
+                [binary, str(base_png), str(overlay_png), "-gravity", "northwest", "-composite", str(out_path)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if comp.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+                raise RuntimeError("komposit penuh gagal")
+        except Exception as exc:  # noqa: BLE001 - foto eksternal tidak boleh menggagalkan ekspor
+            print(f"peringatan: komposit full-bleed dilewati ({exc}); memakai render teks.")
+            proc = _render_svg(out_path, transparent=False)
+            if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+                detail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+                raise RuntimeError("render PNG gagal: " + " | ".join(detail)[:300])
+        finally:
+            overlay_png.unlink(missing_ok=True)
+            base_png.unlink(missing_ok=True)
+        return
+
+    proc = _render_svg(out_path, transparent=False)
     if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
         raise RuntimeError("render PNG gagal: " + " | ".join(detail)[:300])
@@ -502,8 +774,8 @@ def render_slides(
         out_path = tmp_dir / name
         svg_text = build_slide_svg(document, index)
         if overlay and index == 0 and cover is not None:
-            # Slide cover: teks tetap dari SVG, foto ditempel di pita atas.
-            render_png(svg_text, out_path, cover=cover)
+            # Slide cover: foto penuh kanvas, teks SVG transparan digambar di atasnya.
+            render_png(svg_text, out_path, cover=cover, full_bleed=True)
         else:
             render(svg_text, out_path)
         if not out_path.exists() or out_path.stat().st_size == 0:
