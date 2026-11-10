@@ -9537,6 +9537,12 @@ button.folder-row { cursor: pointer; }
   align-items: start;
 }
 
+.carousel-preview-frame {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
 .carousel-preview-rail {
   position: sticky;
   top: calc(var(--topbar-h) + 16px);

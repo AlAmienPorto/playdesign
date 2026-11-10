@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowDown,
@@ -37,6 +37,7 @@ import {
 } from '../lib/carousel';
 import { ApiError, acknowledgeRadarDraftImport, createCarouselExportJob, fetchCarouselExportJobs, fetchOffice, fetchRadarDrafts, scheduleCarouselPublish, type CarouselExportJob, type CarouselPublishPlatform } from '../lib/api';
 import { syncRadarDraftImports, type RadarDraft } from '../lib/content-radar';
+import { downloadBlob, renderSlidePng } from '../lib/slide-image';
 import { useStore } from '../store/store';
 
 const LAST_CAROUSEL_KEY = 'playdesign.carousel.last';
@@ -48,58 +49,6 @@ const toLocalDateTime = (value: string) => {
   if (Number.isNaN(date.getTime())) return '';
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
-};
-
-const escapeXml = (value: string) => value.replace(/[<>&'\"]/g, (char) => ({
-  '<': '&lt;',
-  '>': '&gt;',
-  '&': '&amp;',
-  "'": '&apos;',
-  '"': '&quot;',
-}[char] ?? char));
-
-const wrapSvgText = (value: string, max = 28) => {
-  const words = value.trim().split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    if (`${line} ${word}`.trim().length > max && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = `${line} ${word}`.trim();
-    }
-  }
-  if (line) lines.push(line);
-  return lines.slice(0, 8);
-};
-
-const previewSvg = (document: CarouselDocument, activeIndex: number) => {
-  const slide = document.slides[activeIndex] ?? document.slides[0];
-  const title = slide.kind === 'cover' ? document.headline : slide.title;
-  const body = slide.kind === 'cover'
-    ? `Sumber: ${document.sourceName || 'Belum diisi'}`
-    : slide.body || 'Isi slide belum diisi.';
-  const titleLines = wrapSvgText(title, 24);
-  const bodyLines = wrapSvgText(body, 42);
-  const titleText = titleLines.map((line, index) =>
-    `<tspan x="88" dy="${index === 0 ? 0 : 80}">${escapeXml(line)}</tspan>`,
-  ).join('');
-  const bodyY = 420 + titleLines.length * 80;
-  const bodyText = bodyLines.map((line, index) =>
-    `<tspan x="88" dy="${index === 0 ? 0 : 46}">${escapeXml(line)}</tspan>`,
-  ).join('');
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1350" viewBox="0 0 1080 1350">
-    <rect width="1080" height="1350" fill="#11131a"/>
-    <rect x="0" y="0" width="24" height="1350" fill="#bf1d2d"/>
-    <text x="88" y="110" fill="#ef5a6b" font-family="Arial, sans-serif" font-size="24" font-weight="700" letter-spacing="4">${escapeXml(document.kicker || 'PLAYDESIGN / CAROUSEL')}</text>
-    <text x="88" y="420" fill="#fffaf5" font-family="Arial, sans-serif" font-size="68" font-weight="800">${titleText}</text>
-    <text x="88" y="${bodyY}" fill="#c5bdba" font-family="Arial, sans-serif" font-size="30">${bodyText}</text>
-    <text x="88" y="1260" fill="#ef5a6b" font-family="Arial, sans-serif" font-size="30" font-weight="700">playdesign</text>
-    <text x="930" y="1260" fill="#fffaf5" font-family="Arial, sans-serif" font-size="30" text-anchor="end">${String(activeIndex + 1).padStart(2, '0')} / ${String(document.slides.length).padStart(2, '0')}</text>
-    ${document.coverImageUrl && slide.kind === 'cover' ? '<text x="88" y="1180" fill="#8f8785" font-family="Arial, sans-serif" font-size="22">Foto eksternal tidak disematkan dalam ekspor SVG.</text>' : ''}
-  </svg>`;
 };
 
 const draftPost = (id: string): SocialPost => ({
@@ -173,6 +122,8 @@ export function CarouselStudioPage() {
   const [statusMessage, setStatusMessage] = useState('');
   const [reviewNote, setReviewNote] = useState('');
   const [exportJob, setExportJob] = useState<CarouselExportJob | null>(null);
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const previewRef = useRef<HTMLDivElement | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState('');
   const [publishAccounts, setPublishAccounts] = useState<CarouselPublishPlatform[]>(['instagram']);
@@ -454,21 +405,25 @@ export function CarouselStudioPage() {
     }
   };
 
-  const handleDownload = () => {
-    if (!document) return;
+  const handleDownload = async () => {
+    const node = previewRef.current?.querySelector<HTMLElement>('.carousel-canvas');
+    if (!document || !node) return;
+    setDownloadBusy(true);
     try {
-      const blob = new Blob([previewSvg(document, activeIndex)], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const anchor = window.document.createElement('a');
-      anchor.href = url;
-      anchor.download = `${selectedId || 'carousel'}-slide-${activeIndex + 1}.svg`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-      toast('Slide SVG diunduh.', 'success');
-      setStatusMessage('Slide aktif berhasil diunduh sebagai SVG.');
+      const { blob, missingImages } = await renderSlidePng(node);
+      downloadBlob(blob, `${selectedId || 'carousel'}-slide-${String(activeIndex + 1).padStart(2, '0')}.png`);
+      setStatusMessage(`Slide ${activeIndex + 1} diunduh sebagai PNG 1080×1350.`);
+      toast(
+        missingImages
+          ? 'PNG diunduh, tetapi foto cover tidak ikut karena sumbernya memblokir CORS.'
+          : 'PNG 1080×1350 diunduh.',
+        missingImages ? 'warning' : 'success',
+      );
     } catch {
-      toast('Slide gagal diunduh.', 'danger');
-      setStatusMessage('Gagal mengunduh slide.');
+      toast('PNG gagal dibuat. Pakai "PNG final" untuk hasil dari renderer.', 'danger');
+      setStatusMessage('Gagal membuat PNG dari pratinjau.');
+    } finally {
+      setDownloadBusy(false);
     }
   };
 
@@ -646,11 +601,13 @@ export function CarouselStudioPage() {
 
       <div className="carousel-studio">
         <aside className="carousel-preview-rail" aria-label="Pratinjau carousel">
-          <CarouselPreview
-            document={document}
-            activeIndex={activeIndex}
-            onImageState={setImageInvalid}
-          />
+          <div ref={previewRef} className="carousel-preview-frame">
+            <CarouselPreview
+              document={document}
+              activeIndex={activeIndex}
+              onImageState={setImageInvalid}
+            />
+          </div>
           <div className="carousel-nav-row">
             <button
               type="button"
@@ -688,16 +645,31 @@ export function CarouselStudioPage() {
             ))}
           </div>
           <div className="carousel-preview-actions">
-            <button type="button" className="btn btn-ghost" onClick={handleDownload}>
-              <Download size={15} /> Unduh slide
+            <button type="button" className="btn btn-ghost" onClick={handleDownload} disabled={downloadBusy}>
+              <Download size={15} /> {downloadBusy ? 'Membuat PNG…' : 'PNG cepat'}
             </button>
+            {exportJob?.status === 'done' && exportJob.driveFolderLink ? (
+              <a className="btn btn-ghost" href={exportJob.driveFolderLink} target="_blank" rel="noreferrer">
+                <ExternalLink size={15} /> PNG final
+              </a>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={handleExport}
+                disabled={!canExport || exportRunning}
+              >
+                <CloudUpload size={15} /> {exportRunning ? 'Merender…' : 'PNG final'}
+              </button>
+            )}
             <button type="button" className="btn btn-ghost" onClick={handleCopy}>
               <Clipboard size={15} /> Copy caption
             </button>
           </div>
-          {document.coverImageUrl && activeSlide.kind === 'cover' && (
-            <p className="carousel-export-note">Ekspor SVG memuat layout dan teks. Foto eksternal tidak disematkan.</p>
-          )}
+          <p className="carousel-export-note">
+            PNG cepat dibuat di browser dari pratinjau (instan). PNG final dirender runner Python 1080×1350
+            lalu diunggah ke Drive — pakai ini untuk tayang.
+          </p>
         </aside>
 
         <main className="carousel-editor" aria-label="Editor carousel">
