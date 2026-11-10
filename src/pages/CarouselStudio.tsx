@@ -24,6 +24,7 @@ import { AutoBadge, Badge, EmptyState, Field, Modal, PageHead } from '../compone
 import type { CarouselDocument, CarouselSlide, SocialPost } from '../data/types';
 import {
   addTextSlide,
+  CAROUSEL_FONTS,
   CAROUSEL_TEMPLATES,
   clampSlideIndex,
   deleteTextSlide,
@@ -31,6 +32,7 @@ import {
   normalizeAccent,
   normalizeBrandHandle,
   normalizeCarousel,
+  normalizeFont,
   resolveCarouselSelection,
 } from '../lib/carousel';
 import { ApiError, acknowledgeRadarDraftImport, createCarouselExportJob, fetchCarouselExportJobs, fetchOffice, fetchRadarDrafts, scheduleCarouselPublish, type CarouselExportJob, type CarouselPublishPlatform } from '../lib/api';
@@ -1002,6 +1004,18 @@ export function CarouselStudioPage() {
                     maxLength={31}
                   />
                 </Field>
+                <Field label="Font dasar" hint="Berlaku untuk semua slide; bisa ditimpa per slide.">
+                  <select
+                    className="input"
+                    value={document.font ?? ''}
+                    onChange={(event) => patchDocument({ font: normalizeFont(event.target.value) })}
+                  >
+                    <option value="">Default (Grotesk)</option>
+                    {CAROUSEL_FONTS.map((font) => (
+                      <option key={font.id} value={font.id}>{font.label}</option>
+                    ))}
+                  </select>
+                </Field>
                 <Field className="span-2" label="Judul" hint={`${document.headline.length}/120 karakter`}>
                   <textarea className="input" value={document.headline} onChange={(event) => patchDocument({ headline: event.target.value })} maxLength={120} rows={3} />
                 </Field>
@@ -1053,6 +1067,19 @@ export function CarouselStudioPage() {
                     </Field>
                     <Field className="span-2" label="Isi" hint={`${slide.body.length}/260 karakter`}>
                       <textarea className="input" value={slide.body} onFocus={() => setActiveIndex(index)} onChange={(event) => patchSlide(slide.id, { body: event.target.value })} maxLength={260} rows={4} />
+                    </Field>
+                    <Field label="Font slide ini" hint="Kosong = ikut font dasar.">
+                      <select
+                        className="input"
+                        value={slide.font ?? ''}
+                        onFocus={() => setActiveIndex(index)}
+                        onChange={(event) => patchSlide(slide.id, { font: normalizeFont(event.target.value) })}
+                      >
+                        <option value="">Ikut font dasar</option>
+                        {CAROUSEL_FONTS.map((font) => (
+                          <option key={font.id} value={font.id}>{font.label}</option>
+                        ))}
+                      </select>
                     </Field>
                   </div>
                 </section>

@@ -10,6 +10,7 @@ Jalankan: python3 scripts/tests/test_carousel_export.py
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -243,6 +244,84 @@ def main() -> int:
         and runner.normalize_brand_handle("   ") == "",
         "handle",
     )
+
+    # ---------- font per slide ----------
+    mono = runner.build_slide_svg(dict(DOCUMENT, font="mono"), 0)
+    check(
+        "font dokumen mengganti semua font-family",
+        'font-family="DejaVu Sans Mono"' in mono and 'font-family="DejaVu Sans"' not in mono,
+        "font dokumen",
+    )
+    doc_multi = dict(
+        DOCUMENT,
+        font="serif",
+        slides=[
+            DOCUMENT["slides"][0],
+            dict(DOCUMENT["slides"][1], font="mono"),
+        ],
+    )
+    slide_one = runner.build_slide_svg(doc_multi, 1)
+    slide_zero = runner.build_slide_svg(doc_multi, 0)
+    check("font slide menimpa font dokumen", 'font-family="DejaVu Sans Mono"' in slide_one, "override")
+    check("slide tanpa override memakai font dokumen", 'font-family="DejaVu Serif"' in slide_zero, "warisan")
+    check(
+        "font tidak dikenal diabaikan",
+        'font-family="DejaVu Sans"' in runner.build_slide_svg(dict(DOCUMENT, font="papyrus"), 0),
+        "validasi font",
+    )
+    check(
+        "normalisasi id font",
+        runner.normalize_font_id("SERIF") == "serif"
+        and runner.normalize_font_id("") == ""
+        and runner.normalize_font_id("comic") == "",
+        "normalize_font_id",
+    )
+
+    # ---------- foto cover tidak boleh menimpa teks ----------
+    photo_doc = dict(DOCUMENT, template="split-brand", coverImageUrl="https://example.com/foto.jpg")
+    photo_svg = runner.build_slide_svg(photo_doc, 0)
+    text_ys = [int(match) for match in re.findall(r'<text[^>]*y="(\d+)"', photo_svg)]
+    check(
+        "pita foto: tidak ada teks di area foto",
+        bool(text_ys) and min(text_ys) >= runner.PHOTO_BAND_HEIGHT,
+        f"y minimum {min(text_ys) if text_ys else '-'}",
+    )
+    check(
+        "pita foto: metadata pindah ke bawah pita",
+        "EDISI EDITORIAL" in photo_svg and 'y="104"' not in photo_svg,
+        "geser teks",
+    )
+    check(
+        "template tipografi mengabaikan foto",
+        runner.TEMPLATE_PHOTO["poster"] == "none"
+        and runner.TEMPLATE_PHOTO["split-brand"] == "band"
+        and runner.TEMPLATE_PHOTO["full-image"] == "full",
+        "peta foto",
+    )
+
+    # ---------- lebar badge mengikuti lebar teks ----------
+    check("perkiraan lebar teks 21px ls2", runner.approx_text_width("STRATEGI", 21, 2) == 208, "lebar")
+    badge = runner._niche_badge("STRATEGI", "PLAYDESIGN / STRATEGI", "#bf1d2d")
+    badge_w = int(re.search(r'width="(\d+)"', badge).group(1))
+    check("badge cukup lebar untuk teksnya", badge_w >= runner.approx_text_width("STRATEGI", 21, 2) + 40, f"{badge_w}px")
+
+    # ---------- render pita foto menghasilkan PNG utuh ----------
+    band_png = Path(tempfile.mkdtemp()) / "band.png"
+    photo_src = band_png.with_name("foto.png")
+    subprocess.run(["convert", "-size", "1600x900", "xc:#f2e26b", str(photo_src)], check=True)
+    runner.render_png(photo_svg, band_png, cover=photo_src, photo_band=True)
+    size = subprocess.run(
+        ["identify", "-format", "%wx%h", str(band_png)], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    top_pixel = subprocess.run(
+        ["convert", str(band_png), "-crop", "1x1+540+100", "-format", "%[pixel:p{0,0}]", "info:"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    check("pita foto: PNG 1080x1350", size == "1080x1350", size)
+    check("pita foto: foto benar-benar terpasang", "srgba(242,226,107" in top_pixel or "srgb(242,226,107" in top_pixel, top_pixel)
+    shutil.rmtree(band_png.parent, ignore_errors=True)
 
     failed = [label for label, ok, _ in checks if not ok]
     print(f"\n{len(checks) - len(failed)}/{len(checks)} lulus")

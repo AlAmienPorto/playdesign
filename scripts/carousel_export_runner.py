@@ -50,6 +50,37 @@ LOCAL_OUT_DIR = Path(
     os.environ.get("CAROUSEL_LOCAL_DIR", str(Path.home() / "work" / "drive-out" / "carousel"))
 )
 FONT = os.environ.get("CAROUSEL_FONT", "DejaVu Sans")
+
+# Font yang benar-benar terpasang di host render (diverifikasi lewat fc-list).
+# `font` per dokumen/slide memilih salah satu kunci di bawah; kosong = default.
+FONT_STACKS = {
+    "grotesk": "DejaVu Sans",
+    "sans": "Liberation Sans",
+    "narrow": "Nimbus Sans Narrow",
+    "serif": "DejaVu Serif",
+    "roman": "Nimbus Roman",
+    "mono": "DejaVu Sans Mono",
+}
+DEFAULT_FONT_ID = "grotesk"
+
+# Bagaimana tiap template memperlakukan foto cover:
+#   band = pita foto di atas, seluruh teks di bawahnya (tidak mungkin tumpang tindih)
+#   full = foto penuh kanvas + scrim, teks menimpa area gelap
+#   none = template tipografi, foto tidak dipakai
+TEMPLATE_PHOTO = {
+    "split-brand": "band",
+    "full-image": "full",
+    "split-dark": "none",
+    "poster": "none",
+    "kolase": "none",
+    "blok": "none",
+}
+
+
+def normalize_font_id(value: object) -> str:
+    """Kembalikan id font yang dikenal, atau '' kalau tidak valid."""
+    key = str(value or "").strip().lower()
+    return key if key in FONT_STACKS else ""
 SLIDE_WIDTH = 1080
 SLIDE_HEIGHT = 1350
 BG = "#11131a"
@@ -179,7 +210,7 @@ def build_caption(document: dict) -> str:
 
 MARGIN = 88
 FOOTER_BASELINE = 1260
-FOOTER_TAGLINE_X = 293
+FOOTER_TAGLINE_X = 430
 FOOTER_COUNTER_X = 880
 
 
@@ -227,7 +258,7 @@ def _footer(brand: str, counter: str, accent: str) -> str:
         f'<text x="{MARGIN}" y="{FOOTER_BASELINE}" fill="{accent}" font-family="{FONT}" '
         f'font-size="30" font-weight="700">{escape_xml(brand)}</text>'
         f'<text x="{FOOTER_TAGLINE_X}" y="{FOOTER_BASELINE}" fill="rgba(255,255,255,0.34)" font-family="{FONT}" '
-        f'font-size="15" font-weight="700" letter-spacing="2">'
+        f'font-size="15" font-weight="700">'
         f"LETS PLAY CREATIVITY WITH US</text>"
         f'<text x="{FOOTER_COUNTER_X}" y="{FOOTER_BASELINE}" fill="{INK}" font-family="{FONT}" font-size="30" '
         f'font-weight="700">{counter}</text>'
@@ -238,14 +269,28 @@ def _niche_label(kicker_raw: str) -> str:
     return kicker_raw.replace("PLAYDESIGN / ", "").replace("PLAYDESIGN/", "").strip() or "EDITORIAL"
 
 
-def _niche_badge(label: str, kicker_raw: str, accent: str) -> str:
+def approx_text_width(text: str, size: float, letter_spacing: float = 0) -> int:
+    """Perkiraan lebar teks (px) untuk DejaVu Sans Bold di renderer ImageMagick.
+
+    Renderer menerapkan `letter-spacing` sekitar 7x nilai SVG (terukur: font 21,
+    ls 2 -> 208 px untuk 8 huruf), jadi jarak antar huruf dihitung 7x di sini.
+    Dipakai untuk menghitung lebar pil/badge supaya teks tidak keluar kotak.
+    """
+    chars = len(text)
+    if chars == 0:
+        return 0
+    return int(chars * size * 0.66 + max(chars - 1, 0) * letter_spacing * 7)
+
+
+def _niche_badge(label: str, kicker_raw: str, accent: str, y: int = 128) -> str:
     """Badge niche solid: kuning untuk crypto, aksen brand untuk sisanya."""
     bg = "#f59e0b" if "crypto" in kicker_raw.lower() else accent
-    width = min(max(len(label) * 17 + 56, 168), 470)
+    text_w = approx_text_width(label, 21, 2)
+    width = min(max(text_w + 56, 168), 640)
     return (
-        f'<rect x="{MARGIN}" y="128" width="{width}" height="48" rx="24" fill="{bg}"/>'
-        f'<text x="{MARGIN + width // 2}" y="160" fill="#000000" font-family="{FONT}" font-size="21" '
-        f'font-weight="800" letter-spacing="2" text-anchor="middle">{escape_xml(label)}</text>'
+        f'<rect x="{MARGIN}" y="{y}" width="{width}" height="48" rx="24" fill="{bg}"/>'
+        f'<text x="{MARGIN + 28}" y="{y + 32}" fill="#000000" font-family="{FONT}" font-size="21" '
+        f'font-weight="800" letter-spacing="2">{escape_xml(label)}</text>'
     )
 
 
@@ -277,6 +322,33 @@ def _cover_split(document: dict, title: str, subtitle: str, accent: str, bar: st
   {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#b8b0ae", size=28, weight=400)}
   {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=82, fill=INK, size=68, weight=800)}
   {_source_pill(document)}
+  {_footer(brand, counter, accent)}
+</svg>'''
+
+
+def _cover_split_photo(document: dict, title: str, subtitle: str, accent: str, bar: str, kicker_raw: str, brand: str, counter: str) -> str:
+    """Editorial split + foto: pita foto di atas, seluruh teks di bawah pita.
+
+    Semua teks berada di y >= 600 sehingga tidak mungkin bertumpuk dengan foto
+    (pita 0..560). Komposit foto dikerjakan `render_png(photo_band=True)`.
+    """
+    label = _niche_label(kicker_raw)
+    band = PHOTO_BAND_HEIGHT
+    title_lines = wrap_text(title, 22, 4)
+    title_y = 1090 - (len(title_lines) - 1) * 78
+    deck = wrap_text(subtitle, 44, 2) if subtitle else []
+    deck_y = title_y - 56 - max(len(deck) - 1, 0) * 40
+    source = str(document.get("sourceName") or "Belum diisi")
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" viewBox="0 0 {SLIDE_WIDTH} {SLIDE_HEIGHT}">
+  <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{TEMPLATE_STYLES['split-brand']['bg']}"/>
+  <rect x="0" y="{band}" width="24" height="{SLIDE_HEIGHT - band}" fill="{bar}"/>
+  <text x="1010" y="800" fill="#ffffff" fill-opacity="0.035" font-family="{FONT}" font-size="200" font-weight="900" text-anchor="end" transform="rotate(-90 1010 800)">PLAYDESIGN</text>
+  <text x="{MARGIN}" y="622" fill="#8f8785" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="5">EDISI EDITORIAL</text>
+  {_niche_badge(label, kicker_raw, accent, y=646)}
+  <rect x="{MARGIN}" y="718" width="904" height="1" fill="rgba(255,255,255,0.12)"/>
+  {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#b8b0ae", size=27, weight=400)}
+  {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=78, fill=INK, size=64, weight=800)}
+  <text x="{MARGIN}" y="1140" fill="#8f8785" font-family="{FONT}" font-size="20" font-weight="600" letter-spacing="3">SUMBER: {escape_xml(source.upper())}</text>
   {_footer(brand, counter, accent)}
 </svg>'''
 
@@ -323,7 +395,7 @@ def _cover_photo(document: dict, title: str, subtitle: str, accent: str, kicker_
   <text x="{MARGIN + 26}" y="162" fill="{INK}" font-family="{FONT}" font-size="21" font-weight="800" letter-spacing="3">{escape_xml(_niche_label(kicker_raw).upper())}</text>
   {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#ddd6d3", size=28, weight=400)}
   {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=82, fill="#ffffff", size=66, weight=800)}
-  <text x="{MARGIN}" y="1060" fill="#f0eae8" font-family="{FONT}" font-size="22" letter-spacing="2">SUMBER: {escape_xml(str(document.get('sourceName') or 'BELUM DIISI').upper())}</text>
+  {_text_block(wrap_text("SUMBER: " + str(document.get("sourceName") or "BELUM DIISI").upper(), 40, 2), x=MARGIN, baseline=1046, line_height=32, fill="#f0eae8", size=21, weight=600)}
   {_footer(brand, counter, accent)}
 </svg>'''
 
@@ -454,12 +526,12 @@ def _cover_blok(document: dict, title: str, subtitle: str, accent: str, kicker_r
   <rect x="{MARGIN}" y="120" width="72" height="72" fill="#0b0c10"/>
   <text x="{MARGIN + 36}" y="170" fill="{accent}" font-family="{FONT}" font-size="34" font-weight="900" text-anchor="middle">{counter.split(" / ")[0]}</text>
   <text x="{MARGIN + 96}" y="150" fill="#0b0c10" font-family="{FONT}" font-size="24" font-weight="900" letter-spacing="3">{escape_xml(_niche_label(kicker_raw).upper())}</text>
-  <text x="{MARGIN + 96}" y="182" fill="#0b0c10" fill-opacity="0.6" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="4">PLAYDESIGN / CAROUSEL</text>
+  <text x="{MARGIN + 96}" y="182" fill="#0b0c10" fill-opacity="0.6" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="2">PLAYDESIGN / CAROUSEL</text>
   {_text_block(deck, x=MARGIN, baseline=deck_y, line_height=40, fill="#0b0c10", size=28, weight=600)}
   {_text_block(title_lines, x=MARGIN, baseline=title_y, line_height=86, fill="#0b0c10", size=78, weight=900)}
   <text x="{MARGIN}" y="1058" fill="#0b0c10" fill-opacity="0.78" font-family="{FONT}" font-size="21" font-weight="700" letter-spacing="3">{escape_xml(str(document.get('sourceName') or 'Belum diisi'))}</text>
   <text x="{MARGIN}" y="{FOOTER_BASELINE}" fill="#0b0c10" font-family="{FONT}" font-size="30" font-weight="900">{escape_xml(brand)}</text>
-  <text x="{FOOTER_TAGLINE_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" fill-opacity="0.72" font-family="{FONT}" font-size="15" font-weight="700" letter-spacing="2">LETS PLAY CREATIVITY WITH US</text>
+  <text x="{FOOTER_TAGLINE_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" fill-opacity="0.72" font-family="{FONT}" font-size="15" font-weight="700">LETS PLAY CREATIVITY WITH US</text>
   <text x="{FOOTER_COUNTER_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" font-family="{FONT}" font-size="30" font-weight="900">{counter}</text>
 </svg>'''
 
@@ -494,16 +566,16 @@ def _text_blok(document: dict, slide: dict, title: str, accent: str, brand: str,
   <rect width="{SLIDE_WIDTH}" height="{SLIDE_HEIGHT}" fill="{accent}"/>
   <rect x="{MARGIN}" y="120" width="72" height="72" fill="#0b0c10"/>
   <text x="{MARGIN + 36}" y="170" fill="{accent}" font-family="{FONT}" font-size="34" font-weight="900" text-anchor="middle">{index + 1:02d}</text>
-  <text x="{MARGIN + 96}" y="164" fill="#0b0c10" fill-opacity="0.6" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="4">PLAYDESIGN / CAROUSEL</text>
+  <text x="{MARGIN + 96}" y="164" fill="#0b0c10" fill-opacity="0.6" font-family="{FONT}" font-size="19" font-weight="700" letter-spacing="2">PLAYDESIGN / CAROUSEL</text>
   {_text_block(title_lines, x=MARGIN, baseline=300, line_height=76, fill="#0b0c10", size=62, weight=900)}
   {_text_block(body_lines, x=MARGIN, baseline=body_y, line_height=52, fill="#0b0c10", size=30, weight=600)}
   <text x="{MARGIN}" y="{FOOTER_BASELINE}" fill="#0b0c10" font-family="{FONT}" font-size="30" font-weight="900">{escape_xml(brand)}</text>
-  <text x="{FOOTER_TAGLINE_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" fill-opacity="0.72" font-family="{FONT}" font-size="15" font-weight="700" letter-spacing="2">LETS PLAY CREATIVITY WITH US</text>
+  <text x="{FOOTER_TAGLINE_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" fill-opacity="0.72" font-family="{FONT}" font-size="15" font-weight="700">LETS PLAY CREATIVITY WITH US</text>
   <text x="{FOOTER_COUNTER_X}" y="{FOOTER_BASELINE}" fill="#0b0c10" font-family="{FONT}" font-size="30" font-weight="900">{counter}</text>
 </svg>'''
 
 
-def build_slide_svg(document: dict, index: int) -> str:
+def _build_slide_svg_base(document: dict, index: int) -> str:
     """Layout 1080x1350 yang selaras dengan preview Carousel Studio."""
     slides = document.get("slides") or []
     slide = slides[index] if 0 <= index < len(slides) else {"kind": "cover", "title": "", "body": ""}
@@ -534,6 +606,8 @@ def build_slide_svg(document: dict, index: int) -> str:
             return _cover_kolase(document, title, subtitle, accent, kicker_raw, brand, counter)
         if layout == "blok":
             return _cover_blok(document, title, subtitle, accent, kicker_raw, brand, counter)
+        if document.get("coverImageUrl"):
+            return _cover_split_photo(document, title, subtitle, accent, bar, kicker_raw, brand, counter)
         return _cover_split(document, title, subtitle, accent, bar, kicker_raw, brand, counter)
 
     layout = str(style.get("text") or "cards")
@@ -544,6 +618,25 @@ def build_slide_svg(document: dict, index: int) -> str:
     if layout == "blok":
         return _text_blok(document, slide, title, accent, brand, counter, index)
     return _text_cards(document, slide, title, accent, bar, brand, counter, index)
+
+def build_slide_svg(document: dict, index: int) -> str:
+    """SVG satu slide, sudah memakai font pilihan slide/dokumen.
+
+    Pemilihan font dilakukan dengan menukar `font-family` pada SVG jadi:
+    semua builder memakai konstanta FONT, jadi satu penggantian cukup dan
+    tidak ada elemen yang tertinggal memakai font lama.
+    """
+    svg = _build_slide_svg_base(document, index)
+    slides = document.get("slides") or []
+    slide = slides[index] if 0 <= index < len(slides) else {}
+    font_id = normalize_font_id(slide.get("font")) or normalize_font_id(document.get("font"))
+    if not font_id:
+        return svg
+    family = FONT_STACKS[font_id]
+    if family == FONT:
+        return svg
+    return svg.replace(f'font-family="{FONT}"', f'font-family="{family}"')
+
 
 def render_binary() -> str:
     override = os.environ.get("CAROUSEL_RENDER_BIN")
@@ -558,6 +651,7 @@ def render_binary() -> str:
 
 COVER_MAX_BYTES = 8 * 1024 * 1024
 COVER_BAND_HEIGHT = 640
+PHOTO_BAND_HEIGHT = 560
 
 
 def fetch_cover(url: str, dest: Path, *, opener=None, timeout: int = 20) -> Path | None:
@@ -586,13 +680,21 @@ def fetch_cover(url: str, dest: Path, *, opener=None, timeout: int = 20) -> Path
     return dest
 
 
-def render_png(svg_text: str, out_path: Path, *, cover: Path | None = None, full_bleed: bool = False) -> None:
+def render_png(
+    svg_text: str,
+    out_path: Path,
+    *,
+    cover: Path | None = None,
+    full_bleed: bool = False,
+    photo_band: bool = False,
+) -> None:
     """Render SVG -> PNG 1080x1350. Gagal keras, tidak pernah menulis placeholder.
 
     `cover` + `full_bleed` menempelkan foto penuh kanvas lalu menggambar teks SVG
-    transparan di atasnya (template full-image). Tanpa `full_bleed`, foto hanya
-    menempati pita atas. Kalau komposit gagal, PNG teks tetap dipakai supaya
-    ekspor tidak hilang.
+    transparan di atasnya (template full-image). `photo_band` menempelkan foto
+    sebagai pita di area atas yang memang kosong dari teks (template split), jadi
+    teks tidak pernah tertimpa. Kalau komposit gagal, PNG teks tetap dipakai
+    supaya ekspor tidak hilang.
     """
     binary = render_binary()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -610,6 +712,69 @@ def render_png(svg_text: str, out_path: Path, *, cover: Path | None = None, full
         else:
             cmd = [binary, "-background", BG, source, "-alpha", "remove", "-alpha", "off", str(target)]
         return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+
+    if photo_band and cover is not None:
+        band_png = out_path.with_name(out_path.stem + "-pita.png")
+        try:
+            proc = _render_svg(out_path, transparent=False)
+            if proc.returncode != 0 or not out_path.exists():
+                raise RuntimeError("render teks gagal")
+            band = subprocess.run(
+                [
+                    binary,
+                    str(cover),
+                    "-resize",
+                    f"{SLIDE_WIDTH}x{PHOTO_BAND_HEIGHT}^",
+                    "-gravity",
+                    "center",
+                    "-extent",
+                    f"{SLIDE_WIDTH}x{PHOTO_BAND_HEIGHT}",
+                    str(band_png),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if band.returncode != 0 or not band_png.exists():
+                raise RuntimeError("siapkan pita foto gagal")
+            paste = subprocess.run(
+                [binary, str(out_path), str(band_png), "-gravity", "northwest", "-composite", str(out_path)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if paste.returncode != 0:
+                raise RuntimeError("tempel pita foto gagal")
+            # Lelehkan tepi bawah pita ke warna latar supaya tidak terlihat seperti potongan.
+            fade = subprocess.run(
+                [
+                    binary,
+                    str(out_path),
+                    "(",
+                    "-size",
+                    f"{SLIDE_WIDTH}x150",
+                    "gradient:rgba(17,19,26,0)-rgba(17,19,26,1)",
+                    ")",
+                    "-gravity",
+                    "northwest",
+                    "-geometry",
+                    f"+0+{PHOTO_BAND_HEIGHT - 150}",
+                    "-compose",
+                    "over",
+                    "-composite",
+                    str(out_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if fade.returncode != 0:
+                raise RuntimeError("gradien tepi pita gagal")
+        except Exception as exc:  # noqa: BLE001 - foto tidak boleh menggagalkan ekspor
+            print(f"peringatan: pita foto dilewati ({exc}); memakai render teks.")
+        finally:
+            band_png.unlink(missing_ok=True)
+        return
 
     if full_bleed and cover is not None:
         overlay_png = out_path.with_name(out_path.stem + "-teks.png")
@@ -763,19 +928,23 @@ def render_slides(
     tmp_dir = Path(tempfile.mkdtemp(prefix="pd-carousel-"))
     slides = document.get("slides") or []
     rendered: list[dict] = []
-    overlay = str(document.get("template") or "") == "full-image"
+    photo_mode = TEMPLATE_PHOTO.get(str(document.get("template") or ""), "none")
     cover = (
         fetch_cover(str(document.get("coverImageUrl") or ""), tmp_dir / "cover")
-        if overlay
+        if photo_mode != "none"
         else None
     )
     for index, slide in enumerate(slides):
         name = slide_filename(index, str(slide.get("kind") or "text"))
         out_path = tmp_dir / name
         svg_text = build_slide_svg(document, index)
-        if overlay and index == 0 and cover is not None:
-            # Slide cover: foto penuh kanvas, teks SVG transparan digambar di atasnya.
-            render_png(svg_text, out_path, cover=cover, full_bleed=True)
+        if index == 0 and cover is not None and render is render_png:
+            if photo_mode == "full":
+                # Foto penuh kanvas, teks SVG transparan digambar di atas scrim.
+                render_png(svg_text, out_path, cover=cover, full_bleed=True)
+            else:
+                # Pita foto di area kosong; seluruh teks berada di bawah pita.
+                render_png(svg_text, out_path, cover=cover, photo_band=True)
         else:
             render(svg_text, out_path)
         if not out_path.exists() or out_path.stat().st_size == 0:

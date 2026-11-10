@@ -9551,6 +9551,7 @@ button.folder-row { cursor: pointer; }
 
 .carousel-canvas {
   position: relative;
+  font-family: var(--carousel-font, inherit);
   isolation: isolate;
   display: grid;
   grid-template-rows: 46% 54%;

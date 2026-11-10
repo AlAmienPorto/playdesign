@@ -1729,6 +1729,7 @@ function normalizeCarouselDocument(raw: unknown) {
       kind: slide.kind === "cover" ? "cover" : "text",
       title: str(slide.title ?? "", "slides[].title", 0, 140),
       body: str(slide.body ?? "", "slides[].body", 0, 400),
+      font: normalizeCarouselFont(slide.font),
     };
   });
   if (slides[0].kind !== "cover") {
@@ -1743,12 +1744,14 @@ function normalizeCarouselDocument(raw: unknown) {
   const accent = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(accentRaw) ? accentRaw.toLowerCase() : "";
   const brandRaw = String(doc.brandHandle ?? "").trim().replace(/^@+/, "").replace(/\s+/g, "");
   const brandHandle = brandRaw ? `@${brandRaw.slice(0, 30)}` : "";
+  const font = normalizeCarouselFont(doc.font);
 
   const document = {
     kicker: str(doc.kicker ?? "", "kicker", 0, 60),
     template,
     accent,
     brandHandle,
+    font,
     headline: str(doc.headline ?? "", "headline", 1, 140),
     highlight: str(doc.highlight ?? "", "highlight", 0, 60),
     sourceName: str(doc.sourceName ?? "", "sourceName", 0, 80),
@@ -1767,6 +1770,14 @@ function normalizeCarouselDocument(raw: unknown) {
     fail(400, "document_too_large", "Dokumen carousel melebihi batas 64 KB.");
   }
   return { document, serialized, slideCount: slides.length };
+}
+
+/** Font carousel yang dikenal renderer; selain itu dikosongkan (pakai default). */
+const CAROUSEL_FONT_IDS = ["grotesk", "sans", "narrow", "serif", "roman", "mono"];
+
+function normalizeCarouselFont(value: unknown): string {
+  const key = String(value ?? "").trim().toLowerCase();
+  return CAROUSEL_FONT_IDS.includes(key) ? key : "";
 }
 
 async function listCarouselJobs(env: Env, req: Request) {

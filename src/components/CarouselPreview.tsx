@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo, type CSSProperties } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import type { CarouselDocument } from '../data/types';
-import { splitHeadline } from '../lib/carousel';
+import { fontStack, splitHeadline } from '../lib/carousel';
 
 interface CarouselPreviewProps {
   document: CarouselDocument;
@@ -56,7 +56,13 @@ function parseSlideBody(body: string): { points: ParsedPoint[]; paragraphs: stri
 export function CarouselPreview({ document, activeIndex, compact = false, onImageState }: CarouselPreviewProps) {
   const slide = document.slides[activeIndex] ?? document.slides[0];
   const [imageFailed, setImageFailed] = useState(false);
-  const showImage = slide.kind === 'cover' && Boolean(document.coverImageUrl) && !imageFailed;
+  // Template tipografi tidak memakai foto; menyembunyikannya di sini menjaga
+  // pratinjau tetap sama dengan PNG ekspor (yang juga mengabaikan foto).
+  const photoMode =
+    document.template === 'full-image' ? 'full' : document.template === 'split-brand' ? 'band' : 'none';
+  const showImage =
+    slide.kind === 'cover' && photoMode !== 'none' && Boolean(document.coverImageUrl) && !imageFailed;
+  const fontFamily = fontStack(slide.font || document.font);
   const isEditorialCover = slide.kind === 'cover' && !showImage;
   const headline = splitHeadline(document.headline, document.highlight);
   const parsed = useMemo(() => parseSlideBody(slide.body || ''), [slide.body]);
@@ -82,7 +88,12 @@ export function CarouselPreview({ document, activeIndex, compact = false, onImag
       }`}
       data-testid="carousel-preview"
       aria-label={`Pratinjau slide ${activeIndex + 1} dari ${document.slides.length}`}
-      style={document.accent ? ({ '--carousel-accent': document.accent } as CSSProperties) : undefined}
+      style={
+        {
+          ...(document.accent ? { '--carousel-accent': document.accent } : {}),
+          ...(fontFamily ? { '--carousel-font': fontFamily } : {}),
+        } as CSSProperties
+      }
     >
       {document.template === 'kolase' ? (
         <div className="carousel-kolase-stack" aria-hidden="true">

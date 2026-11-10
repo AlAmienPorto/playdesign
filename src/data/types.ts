@@ -338,6 +338,8 @@ export interface CarouselSlide {
   kind: 'cover' | 'text';
   title: string;
   body: string;
+  /** Override font untuk slide ini; kosong = ikut font dokumen. */
+  font?: string;
 }
 
 export interface CarouselDocument {
@@ -347,6 +349,8 @@ export interface CarouselDocument {
   accent?: string;
   /** Handle brand di footer slide, mis. "@plydsgn". */
   brandHandle?: string;
+  /** Id font dari CAROUSEL_FONTS; kosong = default (grotesk). */
+  font?: string;
   headline: string;
   highlight: string;
   sourceName: string;

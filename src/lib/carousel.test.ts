@@ -5,7 +5,10 @@ import test from 'node:test';
 
 import {
   addTextSlide,
+  CAROUSEL_FONTS,
   CAROUSEL_TEMPLATES,
+  fontStack,
+  normalizeFont,
   clampSlideIndex,
   deleteTextSlide,
   moveTextSlide,
@@ -126,6 +129,54 @@ test('CAROUSEL_TEMPLATES mencakup semua template yang didukung', () => {
     assert.ok(item.useCase.length > 0);
     assert.match(item.swatch, /^#[0-9a-f]{6}$/);
   }
+});
+
+test('CAROUSEL_FONTS menyediakan pilihan font yang valid', () => {
+  assert.ok(CAROUSEL_FONTS.length >= 4);
+  const ids = new Set<string>();
+  for (const font of CAROUSEL_FONTS) {
+    assert.match(font.id, /^[a-z]+$/);
+    assert.ok(font.label.length > 0 && font.host.length > 0 && font.stack.length > 0);
+    assert.ok(!ids.has(font.id), `id font duplikat: ${font.id}`);
+    ids.add(font.id);
+  }
+});
+
+test('normalizeFont hanya meloloskan id font yang dikenal', () => {
+  assert.equal(normalizeFont('SERIF'), 'serif');
+  assert.equal(normalizeFont('  mono '), 'mono');
+  assert.equal(normalizeFont('comic-sans'), '');
+  assert.equal(normalizeFont(''), '');
+  assert.equal(normalizeFont(undefined), '');
+  assert.equal(fontStack('narrow'), CAROUSEL_FONTS.find((f) => f.id === 'narrow')?.stack);
+  assert.equal(fontStack(''), undefined);
+});
+
+test('normalizeCarousel menyimpan font dokumen dan font per slide', () => {
+  const doc = normalizeCarousel({
+    ...legacyPost,
+    carousel: {
+      kicker: '',
+      template: 'split-brand',
+      headline: 'Judul',
+      highlight: '',
+      sourceName: '',
+      sourceUrl: '',
+      coverImageUrl: '',
+      caption: '',
+      hashtags: [],
+      updatedAt: '',
+      font: 'serif',
+      slides: [
+        { id: 's2', kind: 'text', title: 'A', body: 'B', font: 'mono' },
+        { id: 's3', kind: 'text', title: 'C', body: 'D', font: 'papyrus' },
+      ],
+    },
+  });
+
+  assert.equal(doc.font, 'serif');
+  assert.equal(doc.slides[1].font, 'mono');
+  assert.equal(doc.slides[2].font, '');
 });
 
 test('setiap template punya hook CSS pratinjau', () => {

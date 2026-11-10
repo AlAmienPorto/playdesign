@@ -55,6 +55,37 @@ export const CAROUSEL_TEMPLATES: ReadonlyArray<{
   },
 ];
 
+/** Font yang tersedia di host render (dicek lewat fc-list) + padanan CSS pratinjau. */
+export const CAROUSEL_FONTS: ReadonlyArray<{
+  id: string;
+  label: string;
+  /** Nama keluarga font yang dipakai renderer PNG. */
+  host: string;
+  /** Tumpukan CSS untuk pratinjau di browser (pendekatan terdekat). */
+  stack: string;
+}> = [
+  { id: 'grotesk', label: 'Grotesk', host: 'DejaVu Sans', stack: "'Inter Tight','Inter',system-ui,'Segoe UI',sans-serif" },
+  { id: 'sans', label: 'Netral', host: 'Liberation Sans', stack: "Arial,'Liberation Sans',Helvetica,sans-serif" },
+  { id: 'narrow', label: 'Sempit', host: 'Nimbus Sans Narrow', stack: "'Arial Narrow','Helvetica Neue',Arial,sans-serif" },
+  { id: 'serif', label: 'Serif tebal', host: 'DejaVu Serif', stack: "Georgia,'DejaVu Serif',serif" },
+  { id: 'roman', label: 'Roman klasik', host: 'Nimbus Roman', stack: "'Times New Roman',Times,serif" },
+  { id: 'mono', label: 'Mono teknis', host: 'DejaVu Sans Mono', stack: "'JetBrains Mono',ui-monospace,SFMono-Regular,monospace" },
+];
+
+const FONT_IDS = CAROUSEL_FONTS.map((font) => font.id);
+
+/** Id font yang dikenal, atau '' kalau kosong/tidak valid. */
+export function normalizeFont(value?: string | null): string {
+  const key = (value ?? '').trim().toLowerCase();
+  return FONT_IDS.includes(key) ? key : '';
+}
+
+/** Tumpukan CSS untuk id font; '' -> undefined supaya CSS memakai default. */
+export function fontStack(value?: string | null): string | undefined {
+  const id = normalizeFont(value);
+  return id ? CAROUSEL_FONTS.find((font) => font.id === id)?.stack : undefined;
+}
+
 const TEMPLATES: CarouselTemplate[] = CAROUSEL_TEMPLATES.map((item) => item.id);
 
 /** Normalisasi warna aksen: hanya #rgb / #rrggbb, selain itu string kosong. */
@@ -94,6 +125,7 @@ export function normalizeCarousel(post: SocialPost): CarouselDocument {
           kind: 'text' as const,
           title: slide.title || `Slide ${index + 2}`,
           body: slide.body || '',
+          font: normalizeFont(slide.font),
         }))
     : (post.slides ?? []).map((title, index) => ({
         id: slideId(post.id, index + 1),
@@ -107,6 +139,7 @@ export function normalizeCarousel(post: SocialPost): CarouselDocument {
     template: saved && TEMPLATES.includes(saved.template) ? saved.template : 'split-brand',
     accent: normalizeAccent(saved?.accent),
     brandHandle: normalizeBrandHandle(saved?.brandHandle),
+    font: normalizeFont(saved?.font),
     headline,
     highlight: saved?.highlight ?? '',
     sourceName: saved?.sourceName?.trim() || post.author?.trim() || 'Playdesign',

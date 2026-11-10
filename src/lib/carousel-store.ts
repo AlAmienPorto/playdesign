@@ -79,6 +79,7 @@ export function createCarouselDraftInDb(
             template: 'split-brand',
             accent: '',
             brandHandle: '@plydsgn',
+            font: '',
             headline,
             highlight: '',
             sourceName: 'Playdesign',
