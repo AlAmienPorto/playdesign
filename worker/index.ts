@@ -1739,9 +1739,16 @@ function normalizeCarouselDocument(raw: unknown) {
     ? String(doc.template)
     : "split-brand";
 
+  const accentRaw = String(doc.accent ?? "").trim();
+  const accent = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(accentRaw) ? accentRaw.toLowerCase() : "";
+  const brandRaw = String(doc.brandHandle ?? "").trim().replace(/^@+/, "").replace(/\s+/g, "");
+  const brandHandle = brandRaw ? `@${brandRaw.slice(0, 30)}` : "";
+
   const document = {
     kicker: str(doc.kicker ?? "", "kicker", 0, 60),
     template,
+    accent,
+    brandHandle,
     headline: str(doc.headline ?? "", "headline", 1, 140),
     highlight: str(doc.highlight ?? "", "highlight", 0, 60),
     sourceName: str(doc.sourceName ?? "", "sourceName", 0, 80),

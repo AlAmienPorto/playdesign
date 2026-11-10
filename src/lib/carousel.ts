@@ -1,6 +1,34 @@
 import type { CarouselDocument, CarouselSlide, SocialPost } from '../data/types';
 
+export type CarouselTemplate = CarouselDocument['template'];
+
+/** Palet & deskripsi tiap template. Dipakai galeri template di studio. */
+export const CAROUSEL_TEMPLATES: ReadonlyArray<{
+  id: CarouselTemplate;
+  label: string;
+  description: string;
+  swatch: string;
+}> = [
+  { id: 'split-brand', label: 'Split brand', description: 'Pita merah brand, judul di bawah', swatch: '#bf1d2d' },
+  { id: 'split-dark', label: 'Split dark', description: 'Hitam pekat, aksen lembut', swatch: '#ef5a6b' },
+  { id: 'full-image', label: 'Full image', description: 'Foto penuh, judul menimpa', swatch: '#11131a' },
+];
+
 const TEMPLATES: CarouselDocument['template'][] = ['split-brand', 'split-dark', 'full-image'];
+
+/** Normalisasi warna aksen: hanya #rgb / #rrggbb, selain itu string kosong. */
+export function normalizeAccent(value: string | undefined): string {
+  const raw = (value ?? '').trim();
+  if (!raw) return '';
+  const hex = raw.startsWith('#') ? raw : `#${raw}`;
+  return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(hex) ? hex.toLowerCase() : '';
+}
+
+/** Normalisasi handle brand: buang spasi, pastikan satu "@" di depan. */
+export function normalizeBrandHandle(value: string | undefined): string {
+  const raw = (value ?? '').trim().replace(/^@+/, '').replace(/\s+/g, '');
+  return raw ? `@${raw.slice(0, 30)}` : '';
+}
 
 const cleanHashtag = (value: string) => value.trim().replace(/^#+/, '');
 
@@ -36,6 +64,8 @@ export function normalizeCarousel(post: SocialPost): CarouselDocument {
   return {
     kicker: saved?.kicker?.trim() || 'PLAYDESIGN / CAROUSEL',
     template: saved && TEMPLATES.includes(saved.template) ? saved.template : 'split-brand',
+    accent: normalizeAccent(saved?.accent),
+    brandHandle: normalizeBrandHandle(saved?.brandHandle),
     headline,
     highlight: saved?.highlight ?? '',
     sourceName: saved?.sourceName?.trim() || post.author?.trim() || 'Playdesign',

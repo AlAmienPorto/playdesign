@@ -77,6 +77,8 @@ export function createCarouselDraftInDb(
           carousel: {
             kicker: 'PLAYDESIGN / CAROUSEL',
             template: 'split-brand',
+            accent: '',
+            brandHandle: '@plydsgn',
             headline,
             highlight: '',
             sourceName: 'Playdesign',

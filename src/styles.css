@@ -9561,6 +9561,7 @@ button.folder-row { cursor: pointer; }
   border-radius: 4px;
   background: #171923;
   color: #fffaf5;
+  --carousel-accent-default: #bf1d2d;
 }
 
 .carousel-canvas::before {
@@ -9569,7 +9570,7 @@ button.folder-row { cursor: pointer; }
   z-index: 4;
   inset: 0 auto 0 0;
   width: 7px;
-  background: #bf1d2d;
+  background: var(--carousel-accent, var(--carousel-accent-default));
 }
 
 .carousel-cover-media {
@@ -9637,7 +9638,7 @@ button.folder-row { cursor: pointer; }
 .carousel-cover-copy mark {
   padding: 0;
   background: transparent;
-  color: #ef5a6b;
+  color: var(--carousel-accent, #ef5a6b);
 }
 
 .carousel-source {
@@ -9668,7 +9669,7 @@ button.folder-row { cursor: pointer; }
   width: 52px;
   height: 4px;
   margin: 20px 0 4px;
-  background: #bf1d2d;
+  background: var(--carousel-accent, #bf1d2d);
 }
 
 .carousel-text-slide p {
@@ -9709,7 +9710,7 @@ button.folder-row { cursor: pointer; }
 }
 
 .carousel-canvas.template-split-dark .carousel-cover-copy { background: #090b10; }
-.carousel-canvas.template-split-dark::before { background: #ef5a6b; }
+.carousel-canvas.template-split-dark { --carousel-accent-default: #ef5a6b; }
 
 .carousel-canvas.is-editorial-cover {
   grid-template-rows: 1fr;
@@ -9756,7 +9757,7 @@ button.folder-row { cursor: pointer; }
   align-items: center;
   padding: 4px 12px;
   border-radius: 999px;
-  background: #ef4444;
+  background: var(--carousel-accent, #ef4444);
   color: #000000;
   font-size: 10.5px;
   font-weight: 800;
@@ -9789,7 +9790,7 @@ button.folder-row { cursor: pointer; }
 
 .carousel-editorial-cover mark {
   background: transparent;
-  color: #ef5a6b;
+  color: var(--carousel-accent, #ef5a6b);
 }
 
 .carousel-cover-subtitle {
@@ -9848,7 +9849,7 @@ button.folder-row { cursor: pointer; }
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  background: #ef5a6b;
+  background: var(--carousel-accent, #ef5a6b);
   color: #ffffff;
   font-size: 10.5px;
   font-weight: 800;
@@ -10665,3 +10666,93 @@ button.folder-row { cursor: pointer; }
   .content-radar-page *::after { transition-duration: 0.01ms !important; }
   .radar-loading > svg { animation: none; }
 }
+
+/* ---------------------------------------------------------------------------
+   Galeri template & brand kit (Carousel Studio)
+   Pratinjau mini memakai CarouselPreview mode compact, jadi kartu selalu
+   menampilkan hasil nyata dari dokumen yang sedang diedit.
+--------------------------------------------------------------------------- */
+
+.carousel-template-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 10px;
+}
+
+.carousel-template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.carousel-template-card:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.carousel-template-card:focus-visible {
+  outline: 2px solid var(--accent, #ef5a6b);
+  outline-offset: 2px;
+}
+
+.carousel-template-card.is-active {
+  border-color: var(--accent, #ef5a6b);
+  background: rgba(239, 90, 107, 0.09);
+}
+
+.carousel-template-thumb {
+  display: block;
+  width: 100%;
+  pointer-events: none;
+}
+
+.carousel-template-thumb .carousel-canvas {
+  border-radius: 6px;
+}
+
+.carousel-template-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.carousel-template-meta strong {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.carousel-template-meta span {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--muted, #9aa0aa);
+}
+
+.carousel-accent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.carousel-accent-swatch {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.carousel-accent-swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.carousel-accent-swatch::-webkit-color-swatch { border: none; border-radius: 6px; }

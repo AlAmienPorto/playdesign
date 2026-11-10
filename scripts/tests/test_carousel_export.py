@@ -211,6 +211,29 @@ def main() -> int:
     check("template full-image tanpa bar samping", "<rect x=\"0\" y=\"0\" width=\"24\"" not in full, "bar")
     check("template full-image menurunkan judul", 'y="860"' in full and 'y="420"' in brand, "posisi judul")
 
+    # ---------- brand kit (aksen + handle) ----------
+    accented = runner.build_slide_svg(dict(DOCUMENT, accent="#1e6f5c", brandHandle="plydsgn"), 0)
+    check("aksen brand menimpa palet template", "#1e6f5c" in accented and "#bf1d2d" not in accented, "aksen")
+    check("handle brand tampil di footer", ">@plydsgn<" in accented, "handle")
+    check("handle dengan @ dinormalkan", ">@plydsgn<" in runner.build_slide_svg(dict(DOCUMENT, brandHandle="@plydsgn"), 0), "handle")
+    check("footer default tetap playdesign", ">playdesign<" in brand, "default")
+    check("aksen tidak valid diabaikan", "#bf1d2d" in runner.build_slide_svg(dict(DOCUMENT, accent="merah"), 0), "validasi")
+    check(
+        "normalisasi hex aksen",
+        runner.normalize_hex_accent("1E6F5C") == "#1e6f5c"
+        and runner.normalize_hex_accent("#abc") == "#abc"
+        and runner.normalize_hex_accent("#12345") == ""
+        and runner.normalize_hex_accent("") == "",
+        "hex",
+    )
+    check(
+        "normalisasi handle brand",
+        runner.normalize_brand_handle("  @ply dsgn  ") == "@plydsgn"
+        and runner.normalize_brand_handle("plydsgn") == "@plydsgn"
+        and runner.normalize_brand_handle("   ") == "",
+        "handle",
+    )
+
     failed = [label for label, ok, _ in checks if not ok]
     print(f"\n{len(checks) - len(failed)}/{len(checks)} lulus")
     return 1 if failed else 0

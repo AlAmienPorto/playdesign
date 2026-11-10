@@ -56,6 +56,7 @@ BG = "#11131a"
 INK = "#fffaf5"
 MUTED = "#d8d2cf"
 ACCENT = "#ef5a6b"
+DEFAULT_ACCENT = ACCENT
 
 # Sama dengan preview: template mengubah palet, bukan hanya label.
 TEMPLATE_STYLES: dict[str, dict[str, object]] = {
@@ -96,6 +97,25 @@ def slugify(text: str, limit: int = 40) -> str:
     while "--" in slug:
         slug = slug.replace("--", "-")
     return slug.strip("-")[:limit].rstrip("-") or "carousel"
+
+
+HEX_ACCENT_RE = re.compile(r"^#(?:[0-9a-f]{3}|[0-9a-f]{6})$", re.IGNORECASE)
+
+
+def normalize_hex_accent(value: object) -> str:
+    """Warna aksen brand: hanya #rgb / #rrggbb, selain itu string kosong."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if not raw.startswith("#"):
+        raw = f"#{raw}"
+    return raw.lower() if HEX_ACCENT_RE.match(raw) else ""
+
+
+def normalize_brand_handle(value: object) -> str:
+    """Handle brand untuk footer slide, selalu satu '@' di depan."""
+    raw = re.sub(r"\s+", "", str(value or "").strip()).lstrip("@")
+    return f"@{raw[:30]}" if raw else ""
 
 
 def escape_xml(value: str) -> str:
@@ -163,7 +183,13 @@ def build_slide_svg(document: dict, index: int) -> str:
     title = str(document.get("headline") or "") if is_cover else str(slide.get("title") or "")
     has_cover_image = bool(document.get("coverImageUrl"))
 
-    style = TEMPLATE_STYLES.get(str(document.get("template") or "split-brand"), TEMPLATE_STYLES["split-brand"])
+    style = dict(TEMPLATE_STYLES.get(str(document.get("template") or "split-brand"), TEMPLATE_STYLES["split-brand"]))
+    # Brand kit: aksen & handle dari dokumen menimpa palet template.
+    accent_override = normalize_hex_accent(document.get("accent"))
+    ACCENT = accent_override or DEFAULT_ACCENT  # noqa: N806 - sengaja membayangi konstanta modul
+    brand = normalize_brand_handle(document.get("brandHandle")) or "playdesign"
+    if accent_override:
+        style["bar"] = accent_override
     bg = str(style["bg"])
     bar = style["bar"]
     overlay = bool(style["overlay"])
@@ -176,7 +202,7 @@ def build_slide_svg(document: dict, index: int) -> str:
 
     tagline = f'<text x="540" y="1260" fill="rgba(255,255,255,0.35)" font-family="{FONT}" font-size="18" font-weight="700" letter-spacing="6" text-anchor="middle">LETS PLAY CREATIVITY WITH US</text>'
     footer = f'''
-  <text x="88" y="1260" fill="{ACCENT}" font-family="{FONT}" font-size="30" font-weight="700">playdesign</text>
+  <text x="88" y="1260" fill="{ACCENT}" font-family="{FONT}" font-size="30" font-weight="700">{escape_xml(brand)}</text>
   {tagline}
   <text x="992" y="1260" fill="{INK}" font-family="{FONT}" font-size="30" text-anchor="end">{counter}</text>'''
 
@@ -209,7 +235,7 @@ def build_slide_svg(document: dict, index: int) -> str:
         # Editorial Typography Cover (tanpa foto cover / poster berita editorial PlayDesign)
         kicker_raw = str(document.get("kicker") or "PLAYDESIGN / RADAR").strip()
         is_crypto = "crypto" in kicker_raw.lower()
-        badge_bg = "#f59e0b" if is_crypto else "#ef4444"
+        badge_bg = "#f59e0b" if is_crypto else (accent_override or "#ef4444")
         clean_kicker = kicker_raw.replace("PLAYDESIGN / ", "").replace("PLAYDESIGN/", "").strip()
         badge_w = min(max(len(clean_kicker) * 16 + 48, 160), 450)
 

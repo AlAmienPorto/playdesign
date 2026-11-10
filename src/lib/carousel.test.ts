@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   addTextSlide,
+  CAROUSEL_TEMPLATES,
   clampSlideIndex,
   deleteTextSlide,
   moveTextSlide,
@@ -62,6 +63,66 @@ test('normalizeCarousel memulihkan carousel kosong agar selalu punya cover', () 
   assert.equal(document.slides.length, 1);
   assert.equal(document.slides[0].kind, 'cover');
   assert.equal(document.slides[0].title, legacyPost.title);
+});
+
+test('normalizeCarousel menyimpan aksen & handle brand yang valid', () => {
+  const document = normalizeCarousel({
+    ...legacyPost,
+    carousel: {
+      kicker: 'PLAYDESIGN / CAROUSEL',
+      template: 'split-dark',
+      accent: '#1E6F5C',
+      brandHandle: 'ply dsgn',
+      headline: 'Judul',
+      highlight: '',
+      sourceName: '',
+      sourceUrl: '',
+      coverImageUrl: '',
+      slides: [],
+      caption: '',
+      hashtags: [],
+      updatedAt: '',
+    },
+  });
+
+  assert.equal(document.accent, '#1e6f5c');
+  assert.equal(document.brandHandle, '@plydsgn');
+});
+
+test('normalizeCarousel membuang aksen tidak valid dan handle kosong', () => {
+  const build = (patch: Record<string, string>) =>
+    normalizeCarousel({
+      ...legacyPost,
+      carousel: {
+        kicker: '',
+        template: 'split-brand',
+        headline: 'Judul',
+        highlight: '',
+        sourceName: '',
+        sourceUrl: '',
+        coverImageUrl: '',
+        slides: [],
+        caption: '',
+        hashtags: [],
+        updatedAt: '',
+        ...patch,
+      },
+    });
+
+  assert.equal(build({ accent: 'merah' }).accent, '');
+  assert.equal(build({ accent: '#12345' }).accent, '');
+  assert.equal(build({ brandHandle: '   ' }).brandHandle, '');
+  assert.equal(build({ accent: '#abc' }).accent, '#abc');
+});
+
+test('CAROUSEL_TEMPLATES mencakup semua template yang didukung', () => {
+  assert.deepEqual(
+    CAROUSEL_TEMPLATES.map((item) => item.id).sort(),
+    ['full-image', 'split-brand', 'split-dark'],
+  );
+  for (const item of CAROUSEL_TEMPLATES) {
+    assert.ok(item.label.length > 0 && item.description.length > 0);
+  }
 });
 
 test('splitHeadline memisahkan highlight tanpa mengubah kapitalisasi headline', () => {

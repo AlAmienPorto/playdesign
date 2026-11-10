@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, type CSSProperties } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import type { CarouselDocument } from '../data/types';
 import { splitHeadline } from '../lib/carousel';
@@ -82,6 +82,7 @@ export function CarouselPreview({ document, activeIndex, compact = false, onImag
       }`}
       data-testid="carousel-preview"
       aria-label={`Pratinjau slide ${activeIndex + 1} dari ${document.slides.length}`}
+      style={document.accent ? ({ '--carousel-accent': document.accent } as CSSProperties) : undefined}
     >
       {slide.kind === 'cover' ? (
         showImage ? (
@@ -163,7 +164,7 @@ export function CarouselPreview({ document, activeIndex, compact = false, onImag
         <strong>{String(activeIndex + 1).padStart(2, '0')}</strong>
         <span>/ {String(document.slides.length).padStart(2, '0')}</span>
       </div>
-      <div className="carousel-wordmark">playdesign</div>
+      <div className="carousel-wordmark">{document.brandHandle || 'playdesign'}</div>
     </div>
   );
 }

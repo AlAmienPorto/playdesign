@@ -24,9 +24,12 @@ import { AutoBadge, Badge, EmptyState, Field, Modal, PageHead } from '../compone
 import type { CarouselDocument, CarouselSlide, SocialPost } from '../data/types';
 import {
   addTextSlide,
+  CAROUSEL_TEMPLATES,
   clampSlideIndex,
   deleteTextSlide,
   moveTextSlide,
+  normalizeAccent,
+  normalizeBrandHandle,
   normalizeCarousel,
   resolveCarouselSelection,
 } from '../lib/carousel';
@@ -946,12 +949,57 @@ export function CarouselStudioPage() {
                 <Field label="Label atas">
                   <input className="input" value={document.kicker} onChange={(event) => patchDocument({ kicker: event.target.value })} maxLength={48} />
                 </Field>
-                <Field label="Template cover">
-                  <select className="input" value={document.template} onChange={(event) => patchDocument({ template: event.target.value as CarouselDocument['template'] })}>
-                    <option value="split-brand">Split brand</option>
-                    <option value="split-dark">Split dark</option>
-                    <option value="full-image">Full image</option>
-                  </select>
+                <Field className="span-2" label="Template cover" hint="Klik kartu — pratinjau langsung memakai dokumen ini.">
+                  <div className="carousel-template-gallery">
+                    {CAROUSEL_TEMPLATES.map((tpl) => (
+                      <button
+                        key={tpl.id}
+                        type="button"
+                        className={`carousel-template-card${document.template === tpl.id ? ' is-active' : ''}`}
+                        onClick={() => patchDocument({ template: tpl.id })}
+                        aria-pressed={document.template === tpl.id}
+                        title={tpl.description}
+                      >
+                        <span className="carousel-template-thumb" aria-hidden="true">
+                          <CarouselPreview document={{ ...document, template: tpl.id }} activeIndex={0} compact />
+                        </span>
+                        <span className="carousel-template-meta">
+                          <strong>{tpl.label}</strong>
+                          <span>{tpl.description}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </Field>
+                <Field label="Warna aksen" hint={document.accent ? 'Aksen brand aktif.' : 'Kosong = palet template.'}>
+                  <div className="carousel-accent-row">
+                    <input
+                      type="color"
+                      className="carousel-accent-swatch"
+                      aria-label="Pilih warna aksen"
+                      value={document.accent || '#ef5a6b'}
+                      onChange={(event) => patchDocument({ accent: normalizeAccent(event.target.value) })}
+                    />
+                    <input
+                      className="input"
+                      value={document.accent ?? ''}
+                      onChange={(event) => patchDocument({ accent: event.target.value })}
+                      onBlur={(event) => patchDocument({ accent: normalizeAccent(event.target.value) })}
+                      placeholder="#ef5a6b"
+                      maxLength={7}
+                      aria-label="Kode warna aksen"
+                    />
+                  </div>
+                </Field>
+                <Field label="Handle brand" hint="Tampil di footer setiap slide.">
+                  <input
+                    className="input"
+                    value={document.brandHandle ?? ''}
+                    onChange={(event) => patchDocument({ brandHandle: event.target.value })}
+                    onBlur={(event) => patchDocument({ brandHandle: normalizeBrandHandle(event.target.value) })}
+                    placeholder="@plydsgn"
+                    maxLength={31}
+                  />
                 </Field>
                 <Field className="span-2" label="Judul" hint={`${document.headline.length}/120 karakter`}>
                   <textarea className="input" value={document.headline} onChange={(event) => patchDocument({ headline: event.target.value })} maxLength={120} rows={3} />
