@@ -20,6 +20,9 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    "DATA_MODE": "live"
+  },
   "ai": {
     "binding": "AI"
   },
