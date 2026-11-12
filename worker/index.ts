@@ -33,6 +33,8 @@ export interface Env {
    * cf-access-authenticated-user-email boleh dipercaya (workers.dev dimatikan).
    */
   ACCESS_ENABLED?: string;
+  /** Set to "live" only after the workspace database contains production records. */
+  DATA_MODE?: "demo-seed" | "live";
   /** Folder Google Drive tujuan video final (id folder, bukan rahasia). */
   VIDEO_DRIVE_FOLDER?: string;
   /**
@@ -79,6 +81,7 @@ const errorResponse = (error: ApiError) =>
   );
 
 const nowIso = () => new Date().toISOString();
+const dataMode = (env: Env) => (env.DATA_MODE === "live" ? "live" : "demo-seed");
 const uid = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const parseArray = <T>(raw: string | null | undefined): T[] => {
   if (!raw) return [];
@@ -714,7 +717,7 @@ async function health(env: Env) {
     service: "playdesign-office-crm",
     api: "v1",
     database,
-    dataMode: "demo-seed",
+    dataMode: dataMode(env),
     time: nowIso(),
   });
 }
@@ -847,7 +850,7 @@ async function office(env: Env, req: Request) {
       engagement: (row.engagement as number | null) ?? undefined,
     })),
     counts: { tasks: tasks.length, pendingApprovals, openRuns, agents: agents.length },
-    dataMode: "demo-seed",
+    dataMode: dataMode(env),
   });
 }
 
@@ -1315,7 +1318,7 @@ async function reports(env: Env, req: Request) {
         value: row.value,
       })),
     },
-    dataMode: "demo-seed",
+    dataMode: dataMode(env),
   });
 }
 

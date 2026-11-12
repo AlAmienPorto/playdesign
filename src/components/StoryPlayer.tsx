@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Story, type StoryCaption } from '@story';
+import { Story, type StoryCaption } from '../remotion/Story';
 import { Player, type PlayerRef } from '@remotion/player';
 import type { VideoSpec } from '../lib/video-spec';
 

@@ -89,6 +89,14 @@ export interface ApiLead {
   confidenceScore?: number;
 }
 
+export interface OfficeWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+  initial?: string;
+  approvalPolicy?: string;
+}
+
 export interface OfficeActor {
   id: string;
   name: string;
@@ -96,13 +104,120 @@ export interface OfficeActor {
   workspaceId: string;
 }
 
+export interface OfficeAgent {
+  id: string;
+  name: string;
+  role: string;
+  jobdesk: string;
+  availability: string;
+  provider: string;
+  model: string;
+  lastSeen: string;
+  note?: string;
+}
+
+export interface OfficeTask {
+  id: string;
+  title: string;
+  project: string;
+  priority: 'high' | 'medium' | 'low';
+  status: 'backlog' | 'in_progress' | 'review' | 'done';
+  due: string;
+  ownerId: string;
+  tags: string[];
+  board: string;
+  nextAction: string;
+  approval: 'none' | 'pending' | 'approved' | 'changes_requested' | 'rejected';
+  outputStatus: string;
+  confidence?: number;
+  blockedReason?: string;
+  assignedAgentId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OfficeRun {
+  id: string;
+  agentId: string;
+  taskId?: string;
+  action: string;
+  subject: string;
+  state: string;
+  approvalRequired: boolean;
+  failureReason?: string;
+  startedAt: string;
+  endedAt?: string;
+}
+
+export interface OfficeActivity {
+  id: string;
+  entityType: string;
+  entityId: string;
+  actorType: string;
+  actorId: string;
+  action: string;
+  result: string;
+  meta?: string;
+  at: string;
+}
+
+export interface OfficeSchedule {
+  id: string;
+  postId: string;
+  title: string;
+  caption: string;
+  platform: string;
+  scheduledFor: string;
+  status: string;
+  ownerId: string;
+}
+
+export interface OfficeDeal {
+  id: string;
+  company: string;
+  title: string;
+  value: number;
+  stage: 'new' | 'qualified' | 'proposal' | 'negotiation' | 'won';
+  contact: string;
+  ownerId: string;
+  score: number;
+  due: string;
+  tags: string[];
+  source: string;
+}
+
+export interface OfficePost {
+  id: string;
+  title: string;
+  caption: string;
+  platform: string;
+  scheduledFor: string;
+  status: string;
+  format: string;
+  ownerId: string;
+  reach?: number;
+  engagement?: number;
+}
+
 export interface OfficeSnapshot {
+  workspace?: OfficeWorkspace | null;
   actor?: OfficeActor;
-  workspace?: { id: string; name: string } | null;
+  agents?: OfficeAgent[];
+  tasks?: OfficeTask[];
+  approvals?: OfficeTask[];
+  runs?: OfficeRun[];
+  activity?: OfficeActivity[];
+  schedules?: OfficeSchedule[];
+  deals?: OfficeDeal[];
   leads?: ApiLead[];
-  tasks?: unknown[];
-  runs?: unknown[];
-  activity?: unknown[];
+  posts?: OfficePost[];
+  counts?: {
+    tasks: number;
+    pendingApprovals: number;
+    openRuns: number;
+    agents: number;
+  };
+  dataMode?: string;
 }
 
 export class ApiError extends Error {

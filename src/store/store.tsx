@@ -398,7 +398,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [toast],
   );
 
->>>>>>> upstream/main
   const setRole = useCallback((next: Role) => {
     setRoleState(next);
   }, []);

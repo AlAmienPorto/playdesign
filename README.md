@@ -41,7 +41,7 @@ npm run dev
 cp .dev.vars.example .dev.vars      # set API_TOKEN for local use
 npm run db:migrate:local            # apply migrations/0001_init.sql
 npm run db:seed:local               # load seed/seed.sql (synthetic demo data)
-npm run cf:dev                      # builds the SPA, then serves it on http://127.0.0.1:8787
+npm run cf:dev                      # builds the SPA, then serves it on http://127.0.0.1:8788
 ```
 
 `npm run cf:dev` runs `vite build` first because Workers Assets serves `./dist` and the Worker
@@ -50,10 +50,10 @@ handles `/api/*` first.
 Try it:
 
 ```bash
-curl http://127.0.0.1:8787/api/health
+curl http://127.0.0.1:8788/api/health
 
 curl -H "Authorization: Bearer local-dev-token" \
-  "http://127.0.0.1:8787/api/office?workspace=playdesign"
+  "http://127.0.0.1:8788/api/office?workspace=playdesign"
 ```
 
 All API calls except `/api/health` require `Authorization: Bearer <API_TOKEN>`.

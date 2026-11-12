@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CloudUpload, ExternalLink, Film, Play, RefreshCw, Sparkles, X } from 'lucide-react';
-import { Badge, Card, EmptyState, Field, Fig, PageHead } from '../components/ui';
+import {
+  CheckCircle2,
+  CircleAlert,
+  CloudUpload,
+  ExternalLink,
+  Film,
+  Play,
+  RefreshCw,
+  Sparkles,
+  X,
+} from 'lucide-react';
+import { Badge, Card, EmptyState, Field } from '../components/ui';
 import {
   createVideoJob,
   fetchVideoJobs,
@@ -224,30 +234,53 @@ export function VideoStudioPage() {
   };
 
   return (
-    <>
-      <PageHead
-        kicker="Marketing & Content"
-        title="Video Studio"
-        desc="Buat video promo dari brief di sini. Render dijalankan di mesin runner, lalu file final langsung diunggah ke Google Drive — tidak ada video yang disimpan di server."
-        actions={
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void load()} disabled={loading}>
-            <RefreshCw size={14} /> {loading ? 'Memuat…' : 'Muat ulang'}
-          </button>
-        }
-      />
+    <div className="video-studio-page">
+      <section className="video-hero">
+        <div className="video-hero-copy">
+          <div className="video-hero-kicker">
+            <span className="video-live-dot" aria-hidden="true" />
+            Production workspace
+            <span className="video-hero-divider" aria-hidden="true" />
+            Drive delivery
+          </div>
+          <h1>Video Studio</h1>
+          <p>
+            Susun brief, arah visual, scene, dan audio dalam satu alur. Preview memakai spesifikasi yang
+            sama dengan render final, lalu hasilnya langsung dikirim ke Google Drive.
+          </p>
+        </div>
+        <button type="button" className="btn btn-ghost btn-sm video-refresh" onClick={() => void load()} disabled={loading}>
+          <RefreshCw size={14} className={loading ? 'is-spinning' : undefined} />
+          {loading ? 'Memuat…' : 'Muat ulang'}
+        </button>
+      </section>
 
-      <div className="figs figs-4">
-        <Fig label="Total job" value={jobs.length} icon={<Film size={16} />} />
-        <Fig label="Sedang jalan" value={activeCount} icon={<CloudUpload size={16} />} />
-        <Fig label="Selesai" value={doneCount} icon={<Sparkles size={16} />} />
-        <Fig label="Gagal" value={failedCount} icon={<Film size={16} />} />
+      <div className="video-status-ribbon" aria-label="Ringkasan render">
+        <div className="video-status-item">
+          <span className="video-status-icon"><Film size={16} /></span>
+          <span><small>Total job</small><strong>{jobs.length}</strong></span>
+        </div>
+        <div className="video-status-item is-active">
+          <span className="video-status-icon"><CloudUpload size={16} /></span>
+          <span><small>Sedang jalan</small><strong>{activeCount}</strong></span>
+        </div>
+        <div className="video-status-item is-done">
+          <span className="video-status-icon"><CheckCircle2 size={16} /></span>
+          <span><small>Selesai</small><strong>{doneCount}</strong></span>
+        </div>
+        <div className="video-status-item is-failed">
+          <span className="video-status-icon"><CircleAlert size={16} /></span>
+          <span><small>Gagal</small><strong>{failedCount}</strong></span>
+        </div>
       </div>
 
       {error && <p className="notice-inline">{error}</p>}
 
       <Card
+        className="video-builder-card"
+        bodyClass="video-builder-body"
         title="Buat video baru"
-        sub="Tulis prompt, atur gaya dan scene, lihat pratinjaunya, lalu antrekan. Preview dan render memakai spesifikasi yang sama."
+        sub="Mulai dari brief, lihat hasilnya langsung, lalu kirim ke antrean render."
         action={
           <div className="studio-mode">
             <button
@@ -276,8 +309,8 @@ export function VideoStudioPage() {
             onToast={(message, tone) => toast(message, tone ?? 'success')}
           />
         ) : (
-        <>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
+        <div className="legacy-template-panel">
+        <div className="legacy-template-grid is-primary">
           <Field label="Template">
             <select className="input" value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
               {templates.map((item) => (
@@ -297,14 +330,7 @@ export function VideoStudioPage() {
           </Field>
         </div>
 
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-            gap: 12,
-            marginTop: 12,
-          }}
-        >
+        <div className="legacy-template-grid">
           {(template?.propsSchema.fields ?? []).map((field) => (
             <Field key={field.key} label={field.label}>
               <input
@@ -319,21 +345,21 @@ export function VideoStudioPage() {
           ))}
         </div>
 
-        <div className="row-end" style={{ marginTop: 16 }}>
+        <div className="row-end legacy-template-action">
           <button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={saving || !template}>
             <Sparkles size={14} /> {saving ? 'Mengantrekan…' : 'Render & kirim ke Drive'}
           </button>
         </div>
-        </>
+        </div>
         )}
       </Card>
 
-      <Card title="Riwayat render" sub="Status diperbarui otomatis selama ada job berjalan.">
+      <Card className="video-history-card" title="Riwayat render" sub="Status diperbarui otomatis selama ada job berjalan.">
         {jobs.length === 0 ? (
           <EmptyState title="Belum ada job video" desc="Buat job pertama di panel atas." />
         ) : (
           <div className="table-wrap">
-          <table className="pd-table">
+          <table className="pd-table video-history-table">
             <thead>
               <tr>
                 <th>Judul</th>
@@ -350,25 +376,25 @@ export function VideoStudioPage() {
             <tbody>
               {jobs.map((job) => (
                 <tr key={job.id}>
-                  <td>
+                  <td data-label="Judul">
                     <div className="cell-main">{job.title}</div>
                     <div className="cell-sub">{job.id}</div>
                   </td>
-                  <td>{templates.find((item) => item.id === job.templateId)?.name ?? job.templateId}</td>
-                  <td>
+                  <td data-label="Template">{templates.find((item) => item.id === job.templateId)?.name ?? job.templateId}</td>
+                  <td data-label="Status">
                     <Badge tone={STATUS_TONE[job.status]} dot>
                       {STATUS_LABEL[job.status]}
                     </Badge>
                     {(job.attempts ?? 0) > 0 && <div className="cell-sub">percobaan ke-{(job.attempts ?? 0) + 1}</div>}
                     {job.status === 'failed' && job.error && <div className="cell-sub">{job.error}</div>}
                   </td>
-                  <td>{previewCell(job)}</td>
-                  <td>
+                  <td data-label="Pratinjau">{previewCell(job)}</td>
+                  <td data-label="Resolusi">
                     {job.width}×{job.height}
                   </td>
-                  <td>{formatBytes(job.bytes)}</td>
-                  <td>{formatWhen(job.createdAt)}</td>
-                  <td>
+                  <td data-label="Ukuran">{formatBytes(job.bytes)}</td>
+                  <td data-label="Dibuat">{formatWhen(job.createdAt)}</td>
+                  <td data-label="File">
                     {job.driveWebLink ? (
                       <a className="detail-link" href={job.driveWebLink} target="_blank" rel="noreferrer">
                         Buka di Drive <ExternalLink size={12} />
@@ -381,7 +407,7 @@ export function VideoStudioPage() {
                       <span className="muted-small">—</span>
                     )}
                   </td>
-                  <td>
+                  <td data-label="Aksi">
                     <div className="row-actions">
                       <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDetail(job)}>
                         Detail
@@ -626,6 +652,6 @@ export function VideoStudioPage() {
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }

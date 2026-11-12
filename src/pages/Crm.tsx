@@ -13,6 +13,7 @@ import {
   MapPin,
   Phone,
   Plus,
+  RotateCcw,
   Search,
   ShieldCheck,
   Sparkles,
@@ -56,6 +57,7 @@ import {
   waLink,
 } from '../lib/utils';
 import { LEAD_BUSINESS_TYPES, type Company, type Contact, type Deal, type DealStage, type Lead, type LeadSource, type WaTemplate } from '../data/types';
+import './Leads.css';
 
 const CRM_KICKER = 'CRM · Foundation';
 
@@ -313,6 +315,12 @@ export function LeadsPage() {
   const [templateId, setTemplateId] = useState('');
   const pageSize = 8;
 
+  const activeLeads = db.leads.filter((lead) => lead.status !== 'Tidak cocok');
+  const potentialValue = activeLeads.reduce((sum, lead) => sum + lead.value, 0);
+  const newCount = db.leads.filter((lead) => lead.status === 'Baru').length;
+  const qualifiedCount = db.leads.filter((lead) => lead.status === 'Terkualifikasi').length;
+  const waReadyCount = db.leads.filter((lead) => Boolean(lead.phone)).length;
+
   const defaultTemplate = db.waTemplates.find((t) => t.isDefault) ?? db.waTemplates[0];
   const activeTemplate = db.waTemplates.find((t) => t.id === templateId) ?? defaultTemplate;
 
@@ -343,6 +351,15 @@ export function LeadsPage() {
   const pageCount = Math.ceil(filtered.length / pageSize) || 1;
   const current = Math.min(page, pageCount);
   const rows = filtered.slice((current - 1) * pageSize, current * pageSize);
+  const hasFilters = Boolean(q) || source !== 'all' || business !== 'all' || sort !== 'created';
+
+  const resetFilters = () => {
+    setQ('');
+    setSource('all');
+    setBusiness('all');
+    setSort('created');
+    setPage(1);
+  };
 
   const handleConvert = (lead: Lead) => {
     const id = convertLead(lead.id);
@@ -351,11 +368,12 @@ export function LeadsPage() {
   };
 
   return (
+    <div className="leads-page">
     <CrmPage
       title="Leads"
-      desc="Lead dengan nomor WA dan jenis usaha. Chat langsung atau konversi menjadi deal."
+      desc="Prioritaskan prospek, lanjutkan percakapan lewat WhatsApp, lalu konversi peluang yang siap ke pipeline."
       actions={
-        <div className="flex gap-8">
+        <div className="lead-head-actions">
           <button type="button" className="btn btn-outline" onClick={() => navigate('/crm/scraper')}>
             <Search size={14} /> Scrape Prospek Baru
           </button>
@@ -365,10 +383,32 @@ export function LeadsPage() {
         </div>
       }
     >
-      <Card bodyClass="no-pad">
-        <div className="table-toolbar">
-          <SearchField value={q} onChange={(v) => { setQ(v); setPage(1); }} placeholder="Cari nama, perusahaan, WA, jenis usaha…" />
-          <div className="toolbar-filters">
+      <div className="lead-command-strip" aria-label="Ringkasan leads">
+        <div className="lead-command-item is-primary">
+          <span className="lead-command-icon"><Wallet size={17} /></span>
+          <span><small>Potensi lead aktif</small><strong>{compactRupiah(potentialValue)}</strong></span>
+        </div>
+        <div className="lead-command-item is-attention">
+          <span className="lead-command-icon"><CircleAlert size={16} /></span>
+          <span><small>Perlu follow-up</small><strong>{newCount}</strong></span>
+        </div>
+        <div className="lead-command-item is-qualified">
+          <span className="lead-command-icon"><Target size={16} /></span>
+          <span><small>Siap dikonversi</small><strong>{qualifiedCount}</strong></span>
+        </div>
+        <div className="lead-command-item is-whatsapp">
+          <span className="lead-command-icon"><WhatsAppIcon size={16} /></span>
+          <span><small>WhatsApp tersedia</small><strong>{waReadyCount}</strong></span>
+        </div>
+      </div>
+
+      <Card className="leads-directory" bodyClass="no-pad">
+        <div className="lead-toolbar">
+          <div className="lead-search">
+            <SearchField value={q} onChange={(v) => { setQ(v); setPage(1); }} placeholder="Cari nama, perusahaan, WA, jenis usaha…" />
+            <span className="lead-result-count"><strong>{filtered.length}</strong> dari {db.leads.length} lead</span>
+          </div>
+          <div className="lead-filter-rail">
             <SelectBox
               label="Sumber"
               value={source}
@@ -397,16 +437,22 @@ export function LeadsPage() {
                 { value: 'business', label: 'Jenis usaha' },
               ]}
             />
+            {hasFilters && (
+              <button type="button" className="btn btn-ghost btn-sm lead-reset" onClick={resetFilters}>
+                <RotateCcw size={13} /> Reset
+              </button>
+            )}
           </div>
         </div>
-        <div className="table-wrap">
-          <table className="pd-table">
+        <div className="table-wrap leads-table-wrap">
+          <table className="pd-table leads-table">
             <thead>
               <tr>
                 <th scope="col">Lead</th>
                 <th scope="col">Nomor WA</th>
                 <th scope="col">Jenis usaha</th>
                 <th scope="col">Sumber</th>
+                <th scope="col">Potensi</th>
                 <th scope="col">Status</th>
                 <th scope="col">Aksi</th>
               </tr>
@@ -414,16 +460,16 @@ export function LeadsPage() {
             <tbody>
               {rows.map((l) => (
                 <tr key={l.id} className="is-clickable" onClick={() => openLead(l)}>
-                  <td>
+                  <td data-label="Lead">
                     <div className="cell-person">
-                      <Avatar name={l.name} size={32} />
+                      <Avatar name={l.name} size={36} />
                       <div className="cell-main">
                         <strong>{l.name}</strong>
                         <span className="cell-sub">{l.company}</span>
                       </div>
                     </div>
                   </td>
-                  <td>
+                  <td data-label="Nomor WA">
                     {l.phone ? (
                       <a
                         className="wa-number"
@@ -440,16 +486,19 @@ export function LeadsPage() {
                       <span className="muted-small">Belum ada</span>
                     )}
                   </td>
-                  <td>
+                  <td data-label="Jenis usaha">
                     <Badge tone="neutral">{l.businessType}</Badge>
                   </td>
-                  <td>
+                  <td data-label="Sumber">
                     <Badge tone={sourceTone[l.source]}>{l.source}</Badge>
                   </td>
-                  <td>
+                  <td data-label="Potensi" className="lead-value-cell">
+                    {compactRupiah(l.value)}
+                  </td>
+                  <td data-label="Status">
                     <AutoBadge value={l.status} />
                   </td>
-                  <td>
+                  <td data-label="Aksi">
                     <div className="table-actions">
                       {l.phone && (
                         <a
@@ -573,6 +622,7 @@ export function LeadsPage() {
         )}
       </Drawer>
     </CrmPage>
+    </div>
   );
 }
 

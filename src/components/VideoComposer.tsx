@@ -1,5 +1,5 @@
 import { Suspense, lazy, useMemo, useState } from 'react';
-import { GripVertical, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
+import { Clock3, GripVertical, Layers3, MonitorPlay, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { Field } from './ui';
 import { ReferenceManager } from './ReferenceManager';
 
@@ -809,10 +809,23 @@ export function VideoComposer({
       </div>
 
       <aside className="studio-aside">
-        <div className="studio-preview">
-          <Suspense fallback={<div className="studio-player-skeleton">Memuat pratinjau…</div>}>
-            <StoryPlayer spec={spec} className="studio-player" />
-          </Suspense>
+        <div className="studio-monitor">
+          <div className="studio-monitor-head">
+            <span className="studio-monitor-title">
+              <MonitorPlay size={15} /> Pratinjau langsung
+            </span>
+            <span className="studio-monitor-format">{ASPECTS[spec.render.aspect].label}</span>
+          </div>
+          <div className="studio-preview">
+            <Suspense fallback={<div className="studio-player-skeleton">Memuat pratinjau…</div>}>
+              <StoryPlayer spec={spec} className="studio-player" />
+            </Suspense>
+          </div>
+          <div className="studio-monitor-meta">
+            <span><Clock3 size={13} /> {totalSeconds.toFixed(1)} detik</span>
+            <span><Layers3 size={13} /> {spec.scenes.length} scene</span>
+            <span>{spec.render.fps} fps</span>
+          </div>
         </div>
         <button type="button" className="btn btn-primary studio-render" onClick={() => void submit()} disabled={saving}>
           <Sparkles size={14} /> {saving ? 'Mengantrekan…' : spec.render.upload ? 'Render & kirim ke Drive' : 'Render (simpan lokal)'}

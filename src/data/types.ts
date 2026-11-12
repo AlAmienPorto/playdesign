@@ -436,7 +436,6 @@ export type OutreachStatus =
   | 'not_interested'
   | 'deal';
 
->>>>>>> upstream/main
 export interface LandingPageConfig {
   hero: {
     badge: string;
