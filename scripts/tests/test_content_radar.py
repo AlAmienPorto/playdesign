@@ -1,0 +1,1150 @@
+"""Tests for the local Content Radar feed collector."""
+
+from __future__ import annotations
+
+import contextlib
+import datetime as dt
+import io
+import json
+import os
+import socket
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from content_radar_collector import (  # noqa: E402
+    Collector,
+    FeedError,
+    accept_discovery_evidence,
+    canonical_url,
+    fetch_feed,
+    parse_feed,
+    persist_discovery_evidence,
+)
+from content_radar_common import ApiClient, ApiError, ConfigError, FileLock, load_config  # noqa: E402
+from content_radar_selector import (  # noqa: E402
+    DraftValidationError,
+    Evaluation,
+    Selector,
+    SelectorApiClient,
+    SelectorResult,
+    compute_radar_score,
+    format_digest,
+    generate_draft,
+    is_auto_draft_eligible,
+    validate_discrete_evaluation,
+    validate_radar_draft,
+)
+
+ERROR_EXAMPLE_LIMIT = 5
+
+UTC = dt.timezone.utc
+NOW = dt.datetime(2026, 11, 8, 8, 0, tzinfo=UTC)
+RECENT_RFC = "Sun, 08 Nov 2026 07:00:00 GMT"
+RECENT_ISO = "2026-11-08T07:00:00Z"
+FUTURE_RFC = "Sun, 08 Nov 2026 09:00:01 GMT"
+
+
+def rss(*items: str) -> bytes:
+    return (
+        "<?xml version='1.0'?><rss version='2.0'><channel><title>Radar</title>"
+        + "".join(items)
+        + "</channel></rss>"
+    ).encode()
+
+
+def rss_item(title: str, link: str, published: str = RECENT_RFC, description: str = "Ringkas") -> str:
+    published_element = f"<pubDate>{published}</pubDate>" if published else ""
+    return (
+        f"<item><title>{title}</title><link>{link}</link>"
+        f"{published_element}<description>{description}</description></item>"
+    )
+
+
+def fetch_test_feed(url: str, *, timeout: float, max_bytes: int) -> tuple[bytes, str]:
+    return fetch_feed(url, timeout=timeout, max_bytes=max_bytes, allow_private=True)
+
+
+ATOM = f"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Radar Atom</title>
+  <entry>
+    <title>Rilis Atom</title>
+    <link rel="alternate" href="https://example.com/atom?utm_source=feed" />
+    <updated>{RECENT_ISO}</updated>
+    <summary>Ringkasan Atom</summary>
+  </entry>
+</feed>
+""".encode()
+
+
+class QuietServer(ThreadingHTTPServer):
+    def handle_error(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        pass
+
+
+class FixtureHandler(BaseHTTPRequestHandler):
+    calls: list[dict[str, object]] = []
+    token = "token-sangat-rahasia"
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+    def send_body(self, status: int, content_type: str, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        if self.path == "/rss":
+            self.send_body(200, "application/rss+xml; charset=utf-8", rss(rss_item("Rilis RSS", "https://EXAMPLE.com/news/?utm_medium=rss#frag")))
+            return
+        if self.path == "/atom":
+            self.send_body(200, "application/atom+xml", ATOM)
+            return
+        if self.path == "/bad-type":
+            self.send_body(200, "text/html", b"<rss></rss>")
+            return
+        if self.path == "/large":
+            self.send_body(200, "application/xml", b"x" * 4096)
+            return
+        if self.path == "/slow":
+            time.sleep(0.2)
+            self.send_body(200, "application/rss+xml", rss(rss_item("Lambat", "https://example.com/slow")))
+            return
+        if self.path.startswith("/api/content-radar/sources"):
+            self._record(None)
+            self.send_body(200, "application/json", json.dumps({"sources": [], "pagination": {"hasMore": False}}).encode())
+            return
+        self.send_body(404, "application/json", b'{"error":"missing"}')
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        self._record(body)
+        if self.path == "/api/content-radar/runs":
+            response = {"run": {"id": "run-1", "status": "queued"}}
+            self.send_body(201, "application/json", json.dumps(response).encode())
+            return
+        if self.path == "/api/content-radar/runs/run-1":
+            self.send_body(200, "application/json", json.dumps({"run": {"id": "run-1", "status": body["status"]}}).encode())
+            return
+        if self.path == "/api/content-radar/candidates:ingest":
+            self.send_body(201, "application/json", b'{"created":true,"candidateId":"candidate-1"}')
+            return
+        self.send_body(404, "application/json", b'{"error":"missing"}')
+
+    def _record(self, body: object) -> None:
+        self.calls.append(
+            {
+                "method": self.command,
+                "path": self.path,
+                "authorization": self.headers.get("Authorization"),
+                "body": body,
+            }
+        )
+
+
+@contextlib.contextmanager
+def fixture_server():
+    FixtureHandler.calls = []
+    server = QuietServer(("127.0.0.1", 0), FixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+@contextlib.contextmanager
+def handler_server(handler: type[BaseHTTPRequestHandler]):
+    server = QuietServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+class FakeApi:
+    def __init__(self, sources: list[dict[str, object]], fail_ingest_url: str | None = None) -> None:
+        self.sources = sources
+        self.fail_ingest_url = fail_ingest_url
+        self.events: list[tuple[str, object]] = []
+        self.payloads: list[dict[str, object]] = []
+
+    def create_run(self, kind: str, meta: dict[str, object] | None = None) -> dict[str, object]:
+        self.events.append(("create", {"kind": kind, "meta": meta or {}}))
+        return {"id": "run-collector", "status": "queued"}
+
+    def update_run(self, run_id: str, **fields: object) -> dict[str, object]:
+        self.events.append(("update", {"runId": run_id, **fields}))
+        return {"id": run_id, "status": fields.get("status")}
+
+    def list_sources(self) -> list[dict[str, object]]:
+        self.events.append(("sources", None))
+        return self.sources
+
+    def ingest(self, payload: dict[str, object]) -> dict[str, object]:
+        self.events.append(("ingest", payload))
+        self.payloads.append(payload)
+        url = str(dict(payload["candidate"])["canonicalUrl"])
+        if url == self.fail_ingest_url:
+            raise RuntimeError("ingest ditolak")
+        return {"created": True, "candidateId": "candidate-1"}
+
+
+class CollectorTests(unittest.TestCase):
+    def test_collector_parses_rss_and_atom(self) -> None:
+        rss_entries = parse_feed(rss(rss_item("Rilis RSS", "https://example.com/rss")), "application/rss+xml", NOW)
+        atom_entries = parse_feed(ATOM, "application/atom+xml", NOW)
+
+        self.assertEqual(rss_entries[0].title, "Rilis RSS")
+        self.assertEqual(rss_entries[0].published_at, RECENT_ISO)
+        self.assertEqual(atom_entries[0].title, "Rilis Atom")
+        self.assertEqual(atom_entries[0].url, "https://example.com/atom")
+
+    def test_collector_accepts_undated_rss_and_atom_entries(self) -> None:
+        atom = b"""<?xml version='1.0'?>
+        <feed xmlns='http://www.w3.org/2005/Atom'>
+          <entry><title>Atom tanpa tanggal</title><link href='https://example.com/atom-undated' /></entry>
+        </feed>"""
+
+        rss_entries = parse_feed(
+            rss(rss_item("RSS tanpa tanggal", "https://example.com/rss-undated", published="")),
+            "application/rss+xml",
+            NOW,
+        )
+        atom_entries = parse_feed(atom, "application/atom+xml", NOW)
+
+        self.assertEqual(rss_entries[0].published_at, None)
+        self.assertEqual(atom_entries[0].published_at, None)
+
+    def test_collector_ingests_undated_entry_with_discovery_fallback(self) -> None:
+        source = {
+            "id": "undated",
+            "name": "Undated",
+            "domain": "example.com",
+            "feedUrl": "https://feeds.example.com/rss",
+            "enabled": True,
+            "niches": ["technology"],
+        }
+        api = FakeApi([source])
+        body = rss(rss_item("Tanpa tanggal", "https://example.com/undated", published=""))
+        result = Collector(
+            api,
+            timeout=1,
+            max_bytes=2048,
+            now=lambda: NOW,
+            fetcher=lambda *args, **kwargs: (body, "application/rss+xml"),
+        ).run()
+
+        self.assertEqual(result.created, 1)
+        candidate = dict(api.payloads[0]["candidate"])
+        provenance = dict(api.payloads[0]["provenance"][0])
+        self.assertEqual(candidate["discoveredAt"], "2026-11-08T08:00:00Z")
+        self.assertNotIn("publishedAt", candidate)
+        self.assertNotIn("publishedAtSource", candidate)
+        self.assertIsNone(provenance["publishedAt"])
+
+    def test_collector_rejects_non_xml_content_type_and_response_cap(self) -> None:
+        with fixture_server() as base:
+            with self.assertRaisesRegex(FeedError, "content type"):
+                fetch_feed(f"{base}/bad-type", timeout=1, max_bytes=1024, allow_private=True)
+            with self.assertRaisesRegex(FeedError, "byte cap"):
+                fetch_feed(f"{base}/large", timeout=1, max_bytes=128, allow_private=True)
+
+    def test_collector_uses_explicit_timeout(self) -> None:
+        with fixture_server() as base:
+            with self.assertRaisesRegex(FeedError, "timed out"):
+                fetch_feed(f"{base}/slow", timeout=0.03, max_bytes=1024, allow_private=True)
+
+    def test_collector_rejects_multicast_and_disallowed_destinations(self) -> None:
+        for multicast in ("http://224.0.0.1/rss", "http://[ff02::1]/rss"):
+            with self.subTest(multicast=multicast):
+                with self.assertRaisesRegex(FeedError, "disallowed address"):
+                    fetch_feed(multicast, timeout=1, max_bytes=2048)
+                with self.assertRaisesRegex(FeedError, "disallowed address"):
+                    fetch_feed(multicast, timeout=1, max_bytes=2048, allow_private=True)
+
+        for disallowed in (
+            "http://127.0.0.1/rss",
+            "http://[::1]/rss",
+            "http://10.0.0.1/rss",
+            "http://192.168.1.1/rss",
+            "http://169.254.1.1/rss",
+            "http://0.0.0.0/rss",
+            "http://240.0.0.1/rss",
+        ):
+            with self.subTest(disallowed=disallowed):
+                with self.assertRaisesRegex(FeedError, "disallowed address"):
+                    fetch_feed(disallowed, timeout=1, max_bytes=2048)
+
+    def test_collector_rejects_multicast_redirect(self) -> None:
+        class RedirectHandler(BaseHTTPRequestHandler):
+            destination = ""
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", type(self).destination)
+                self.end_headers()
+
+        for target in ("http://224.0.0.1/rss", "http://[ff02::1]/rss"):
+            with self.subTest(target=target):
+                RedirectHandler.destination = target
+                with handler_server(RedirectHandler) as redirect:
+                    with self.assertRaisesRegex(FeedError, "disallowed address"):
+                        fetch_feed(f"{redirect}/start", timeout=1, max_bytes=2048, allow_private=True)
+
+    def test_collector_dials_validated_address_and_preserves_host_header(self) -> None:
+        class RedirectHandler(BaseHTTPRequestHandler):
+            destination = ""
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", type(self).destination)
+                self.end_headers()
+
+        with fixture_server() as destination:
+            dest_port = int(destination.split(":")[-1])
+            RedirectHandler.destination = f"http://destination.radar.test:{dest_port}/rss"
+            with handler_server(RedirectHandler) as redirect:
+                redir_port = int(redirect.split(":")[-1])
+                initial = f"http://initial.radar.test:{redir_port}/start"
+
+                def resolver(host: str, port: int, *args: Any, **kwargs: Any) -> Any:
+                    if host in ("initial.radar.test", "destination.radar.test"):
+                        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+                    return socket.getaddrinfo(host, port, *args, **kwargs)
+
+                dialed: list[tuple[object, ...]] = []
+                original_create_connection = socket.create_connection
+
+                def spying_create_connection(address: tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
+                    dialed.append(address)
+                    return original_create_connection(address, *args, **kwargs)
+
+                with mock.patch("socket.create_connection", side_effect=spying_create_connection):
+                    body, content_type = fetch_feed(
+                        initial,
+                        timeout=1,
+                        max_bytes=2048,
+                        allow_private=True,
+                        resolver=resolver,
+                    )
+
+                self.assertEqual(dialed, [("127.0.0.1", redir_port), ("127.0.0.1", dest_port)])
+                self.assertIn(b"Rilis RSS", body)
+                self.assertEqual(content_type.split(";", 1)[0], "application/rss+xml")
+
+    def test_collector_rejects_excessive_feed_redirects(self) -> None:
+        class LoopHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", "/loop")
+                self.end_headers()
+
+        with handler_server(LoopHandler) as base:
+            with self.assertRaisesRegex(FeedError, "too many redirects"):
+                fetch_feed(f"{base}/loop", timeout=1, max_bytes=2048, allow_private=True, max_redirects=2)
+
+    def test_collector_canonicalizes_only_http_urls(self) -> None:
+        self.assertEqual(
+            canonical_url("HTTPS://Example.COM:443/a/../news/?b=2&utm_source=x&a=1#frag"),
+            "https://example.com/news?a=1&b=2",
+        )
+        for invalid in ("javascript:alert(1)", "ftp://example.com/x", "https://user:pass@example.com/x", "not-a-url"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                canonical_url(invalid)
+
+    def test_collector_rejects_future_timestamp_and_collapses_duplicates(self) -> None:
+        body = rss(
+            rss_item("Pertama", "https://example.com/news?utm_source=a"),
+            rss_item("Duplikat", "https://EXAMPLE.com/news/#top"),
+            rss_item("Masa depan", "https://example.com/future", FUTURE_RFC),
+        )
+        entries = parse_feed(body, "application/rss+xml", NOW)
+
+        self.assertEqual([entry.title for entry in entries], ["Pertama"])
+        self.assertEqual(entries[0].url, "https://example.com/news")
+
+    def test_collector_ignores_entries_older_than_26_hour_fetch_window(self) -> None:
+        old = "Sat, 07 Nov 2026 05:59:59 GMT"
+        entries = parse_feed(rss(rss_item("Lama", "https://example.com/old", old)), "application/rss+xml", NOW)
+        self.assertEqual(entries, [])
+
+    def test_collector_isolates_timeout_and_ingest_failures_per_source(self) -> None:
+        with fixture_server() as base:
+            sources = [
+                {"id": "slow", "name": "Slow", "feedUrl": f"{base}/slow", "enabled": True, "niches": ["technology"]},
+                {"id": "rss", "name": "RSS", "feedUrl": f"{base}/rss", "enabled": True, "niches": ["technology"]},
+                {"id": "atom", "name": "Atom", "feedUrl": f"{base}/atom", "enabled": True, "niches": ["ai"]},
+            ]
+            api = FakeApi(sources, fail_ingest_url="https://example.com/atom")
+            result = Collector(api, timeout=0.03, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
+
+        self.assertEqual(result.fetched, 2)
+        self.assertEqual(result.created, 1)
+        self.assertEqual(len(result.errors), 2)
+        self.assertEqual(len(api.payloads), 2)
+        self.assertEqual([event[1]["status"] for event in api.events if event[0] == "update"], ["running", "succeeded"])
+
+    def test_collector_sends_normalized_evidence_without_tier_or_owner_mutation(self) -> None:
+        with fixture_server() as base:
+            source = {
+                "id": "rss",
+                "domain": "registry.example",
+                "name": "Example",
+                "tier": "A",
+                "kind": "official",
+                "feedUrl": f"{base}/rss",
+                "enabled": True,
+                "niches": ["technology"],
+            }
+            api = FakeApi([source])
+            Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
+
+        payload = api.payloads[0]
+        self.assertNotIn("tier", payload.get("source", {}))
+        self.assertNotIn("kind", payload.get("source", {}))
+        candidate = dict(payload["candidate"])
+        self.assertEqual(candidate["canonicalUrl"], "https://example.com/news")
+        self.assertEqual(candidate["sourceDomain"], "registry.example")
+        self.assertEqual(candidate["publishedAtSource"], "feed")
+        self.assertEqual(candidate["niche"], "technology")
+        provenance = dict(payload["provenance"][0])
+        self.assertEqual(provenance["relation"], "primary")
+        self.assertEqual(provenance["domain"], "registry.example")
+
+    def test_collector_api_rejects_cross_origin_redirect_without_forwarding_token(self) -> None:
+        class CaptureHandler(BaseHTTPRequestHandler):
+            authorization: str | None = None
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                type(self).authorization = self.headers.get("Authorization")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"run":{"id":"stolen"}}')
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            destination = ""
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                self.send_response(307)
+                self.send_header("Location", type(self).destination)
+                self.end_headers()
+
+        CaptureHandler.authorization = None
+        with handler_server(CaptureHandler) as capture:
+            RedirectHandler.destination = f"{capture}/capture"
+            with handler_server(RedirectHandler) as redirect:
+                client = ApiClient(redirect, FixtureHandler.token, "ws-a", timeout=1, max_bytes=2048)
+                with self.assertRaises(ApiError):
+                    client.create_run("collector")
+
+        self.assertIsNone(CaptureHandler.authorization)
+
+    def test_collector_api_uses_bearer_auth_workspace_and_never_logs_secret(self) -> None:
+        secret = FixtureHandler.token
+        with fixture_server() as base:
+            client = ApiClient(base, secret, "ws-a", timeout=1, max_bytes=2048)
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+                run = client.create_run("collector")
+                client.update_run(str(run["id"]), status="running")
+                client.list_sources()
+
+        self.assertTrue(FixtureHandler.calls)
+        self.assertTrue(all(call["authorization"] == f"Bearer {secret}" for call in FixtureHandler.calls))
+        post_bodies = [call["body"] for call in FixtureHandler.calls if call["body"] is not None]
+        self.assertTrue(all(dict(body)["workspaceId"] == "ws-a" for body in post_bodies))
+        self.assertNotIn(secret, stream.getvalue())
+        self.assertNotIn(secret, repr(client))
+
+    def test_collector_run_lifecycle_marks_uncaught_failure_failed(self) -> None:
+        class BrokenApi(FakeApi):
+            def list_sources(self) -> list[dict[str, object]]:
+                raise RuntimeError("registry unavailable")
+
+        api = BrokenApi([])
+        with self.assertRaisesRegex(RuntimeError, "registry unavailable"):
+            Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
+
+        updates = [event[1] for event in api.events if event[0] == "update"]
+        self.assertEqual([update["status"] for update in updates], ["running", "failed"])
+        self.assertNotIn("token", json.dumps(updates))
+
+    def test_collector_run_lifecycle_marks_failed_when_running_transition_fails(self) -> None:
+        class FirstUpdateFailsApi(FakeApi):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.update_attempts = 0
+
+            def update_run(self, run_id: str, **fields: object) -> dict[str, object]:
+                self.update_attempts += 1
+                self.events.append(("update", {"runId": run_id, **fields}))
+                if self.update_attempts == 1:
+                    raise RuntimeError("running transition failed")
+                return {"id": run_id, "status": fields.get("status")}
+
+        api = FirstUpdateFailsApi()
+        with self.assertRaisesRegex(RuntimeError, "running transition failed"):
+            Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
+
+        updates = [event[1] for event in api.events if event[0] == "update"]
+        self.assertEqual([update["status"] for update in updates], ["running", "failed"])
+        self.assertEqual(api.update_attempts, 2)
+
+    def test_collector_loads_protected_local_config_and_rejects_open_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "radar.json"
+            config.write_text(json.dumps({"apiBaseUrl": "https://radar.example", "apiToken": "sekret", "workspaceId": "ws-a"}))
+            config.chmod(0o600)
+            loaded = load_config({}, config)
+            self.assertEqual((loaded.api_base_url, loaded.workspace_id), ("https://radar.example", "ws-a"))
+            config.chmod(0o644)
+            with self.assertRaises(ConfigError):
+                load_config({}, config)
+
+    def test_collector_rejects_api_base_url_with_path_query_or_fragment(self) -> None:
+        for base_url in (
+            "https://radar.example/base",
+            "https://radar.example/?mode=test",
+            "https://radar.example/#section",
+        ):
+            with self.subTest(base_url=base_url), tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "radar.json"
+                config.write_text(
+                    json.dumps({"apiBaseUrl": base_url, "apiToken": "sekret", "workspaceId": "ws-a"})
+                )
+                config.chmod(0o600)
+                with self.assertRaisesRegex(ConfigError, "origin"):
+                    load_config({}, config)
+
+    def test_collector_caps_error_examples_and_reports_total(self) -> None:
+        source = {
+            "id": "many-errors",
+            "feedUrl": "https://feeds.example.com/rss",
+            "enabled": True,
+            "niches": ["technology"],
+        }
+        body = rss(
+            *(rss_item(f"Item {index}", f"https://example.com/{index}") for index in range(ERROR_EXAMPLE_LIMIT + 3))
+        )
+        api = FakeApi([source])
+        api.fail_ingest_url = "all"
+
+        def fail_all(payload: dict[str, object]) -> dict[str, object]:
+            api.payloads.append(payload)
+            raise RuntimeError("ingest ditolak")
+
+        api.ingest = fail_all  # type: ignore[method-assign]
+        result = Collector(
+            api,
+            timeout=1,
+            max_bytes=8192,
+            now=lambda: NOW,
+            fetcher=lambda *args, **kwargs: (body, "application/rss+xml"),
+        ).run()
+
+        self.assertEqual(result.error_count, ERROR_EXAMPLE_LIMIT + 3)
+        self.assertEqual(len(result.errors), ERROR_EXAMPLE_LIMIT)
+        output = result.output()
+        self.assertEqual(output["errorCount"], ERROR_EXAMPLE_LIMIT + 3)
+        self.assertEqual(output["errorsTruncated"], 3)
+        terminal_update = [event[1] for event in api.events if event[0] == "update"][-1]
+        self.assertEqual(terminal_update["meta"]["errorCount"], ERROR_EXAMPLE_LIMIT + 3)
+        self.assertEqual(terminal_update["meta"]["errorsTruncated"], 3)
+
+    def test_collector_file_lock_prevents_local_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collector.lock"
+            with FileLock(path):
+                with self.assertRaises(BlockingIOError):
+                    with FileLock(path):
+                        pass
+
+    def test_collector_discovery_is_agent_cron_only_and_persists_raw_evidence_first(self) -> None:
+        evidence = b'[{"url":"https://new.example/story","title":"Raw","publishedAt":"2026-11-08T07:00:00Z"}]'
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "agent cron"):
+                persist_discovery_evidence(evidence, task_dir, agent_cron=False, now=NOW)
+            stored = persist_discovery_evidence(evidence, task_dir, agent_cron=True, now=NOW)
+            self.assertEqual(stored.read_bytes(), evidence)
+            self.assertEqual(stored.parent, task_dir)
+
+            api = FakeApi([])
+            accepted = accept_discovery_evidence(evidence, api, task_dir, agent_cron=True, now=NOW)
+            self.assertEqual(accepted.created, 1)
+            candidate = dict(api.payloads[0]["candidate"])
+            self.assertEqual(candidate["canonicalUrl"], "https://new.example/story")
+            self.assertEqual(candidate["publishedAtSource"], "discovered")
+            self.assertEqual(accepted.evidence_path.read_bytes(), evidence)
+
+    def test_collector_discovery_rejects_invalid_or_future_evidence_after_persisting_raw(self) -> None:
+        evidence = json.dumps(
+            [
+                {"url": "javascript:alert(1)", "title": "Bad", "niche": "ai"},
+                {"url": "https://new.example/future", "title": "Future", "publishedAt": "2026-11-08T09:00:01Z"},
+            ]
+        ).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            api = FakeApi([])
+            accepted = accept_discovery_evidence(evidence, api, Path(directory), agent_cron=True, now=NOW)
+            self.assertEqual(accepted.created, 0)
+            self.assertEqual(len(accepted.errors), 2)
+            self.assertEqual(accepted.evidence_path.read_bytes(), evidence)
+
+    def test_collector_reingest_is_not_reported_as_material_update(self) -> None:
+        class ExistingApi(FakeApi):
+            def ingest(self, payload: dict[str, object]) -> dict[str, object]:
+                self.payloads.append(payload)
+                return {"created": False, "candidateId": "candidate-existing"}
+
+        with fixture_server() as base:
+            api = ExistingApi(
+                [{"id": "rss", "feedUrl": f"{base}/rss", "enabled": True, "niches": ["technology"]}]
+            )
+            result = Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
+        self.assertEqual(result.updated, 0)
+        self.assertIsNone(result.output())
+
+    def test_collector_stdout_contract_is_empty_without_changes(self) -> None:
+        api = FakeApi([])
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            result = Collector(api, timeout=1, max_bytes=2048, now=lambda: NOW, fetcher=fetch_test_feed).run()
+        self.assertEqual(result.created, 0)
+        self.assertEqual(stream.getvalue(), "")
+
+
+class FakeSelectorApi:
+    def __init__(
+        self,
+        candidates: list[dict[str, Any]] | None = None,
+        drafts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.candidates = {c["id"]: dict(c) for c in (candidates or [])}
+        self.drafts = [dict(d) for d in (drafts or [])]
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.created_drafts: list[dict[str, Any]] = []
+
+    def create_run(self, kind: str, meta: dict[str, object] | None = None) -> dict[str, object]:
+        self.events.append(("create_run", {"kind": kind, "meta": meta or {}}))
+        return {"id": "run-selector-1", "status": "queued"}
+
+    def update_run(self, run_id: str, **fields: object) -> dict[str, object]:
+        self.events.append(("update_run", {"runId": run_id, **fields}))
+        return {"id": run_id, "status": fields.get("status")}
+
+    def list_candidates(
+        self,
+        *,
+        window: int = 24,
+        min_score: int = 0,
+        status: str | None = None,
+        niche: str | None = None,
+        tier: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        self.events.append(("list_candidates", {"window": window, "min_score": min_score}))
+        return list(self.candidates.values())
+
+    def get_candidate(self, candidate_id: str) -> dict[str, Any]:
+        self.events.append(("get_candidate", {"id": candidate_id}))
+        return {"candidate": dict(self.candidates[candidate_id])}
+
+    def score_candidate(
+        self,
+        candidate_id: str,
+        relevance: int,
+        carousel_potential: int,
+        reason: str,
+        risk_flags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.events.append(
+            (
+                "score_candidate",
+                {
+                    "candidate_id": candidate_id,
+                    "relevance": relevance,
+                    "carousel_potential": carousel_potential,
+                    "reason": reason,
+                    "risk_flags": risk_flags or [],
+                },
+            )
+        )
+        cand = self.candidates[candidate_id]
+        score = cand.get("score") or {}
+        snapshot = dict(score.get("inputSnapshot") or {})
+        snapshot["relevance"] = relevance
+        snapshot["carouselPotential"] = carousel_potential
+        snapshot["riskFlags"] = risk_flags or []
+        recomputed = compute_radar_score(snapshot)
+        cand["score"] = {
+            "total": recomputed.total,
+            "components": recomputed.components,
+            "inputSnapshot": recomputed.input_snapshot,
+        }
+        cand["score_total"] = recomputed.total
+        cand["status"] = "qualified" if recomputed.total >= 50 else cand.get("status", "new")
+        return {"ok": True, "candidate": cand, "score": cand["score"]}
+
+    def create_draft(self, candidate_id: str, document: dict[str, Any]) -> dict[str, Any]:
+        self.events.append(("create_draft", {"candidate_id": candidate_id, "document": document}))
+        cand = self.candidates[candidate_id]
+        score_obj = cand.get("score") or {}
+        draft = {
+            "id": f"draft-{candidate_id}",
+            "candidateId": candidate_id,
+            "postId": f"draft-{candidate_id}",
+            "clusterKey": cand.get("clusterKey") or cand.get("cluster_key") or candidate_id,
+            "title": document.get("headline") or cand.get("title"),
+            "status": "Draft",
+            "creationKind": "automatic",
+            "autoDateWib": "2026-11-08",
+            "document": document,
+            "scoreSnapshot": score_obj,
+            "sourcesSnapshot": cand.get("sources") or [],
+            "createdBy": "radar-agent",
+        }
+        self.created_drafts.append(draft)
+        self.drafts.append(draft)
+        cand["draftId"] = draft["id"]
+        cand["status"] = "drafted"
+        return {"ok": True, "draft": draft}
+
+    def list_drafts(self, *, unimported: bool | None = None) -> list[dict[str, Any]]:
+        self.events.append(("list_drafts", {"unimported": unimported}))
+        return self.drafts
+
+
+def make_test_candidate(
+    cid: str,
+    *,
+    niche: str = "technology",
+    tier: str = "A",
+    source_is_primary: bool = True,
+    cross_checks: list[dict[str, str]] | None = None,
+    risk_flags: list[str] | None = None,
+    cluster_key: str | None = None,
+    relevance: int = 21,
+    carousel_potential: int = 8,
+    published_at: str = "2026-11-08T06:00:00Z",
+    discovered_at: str = "2026-11-08T06:00:00Z",
+    draft_id: str | None = None,
+    status: str = "qualified",
+) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "rubricVersion": "v1",
+        "asOf": "2026-11-08T08:00:00Z",
+        "effectiveTimestamp": published_at,
+        "timestampValid": True,
+        "timestampFallback": False,
+        "ageHours": 2.0,
+        "sourceTier": tier,
+        "sourceIsPrimary": source_is_primary,
+        "publishedAt": published_at,
+        "discoveredAt": discovered_at,
+        "independentCrossChecks": cross_checks or [],
+        "relevance": relevance,
+        "carouselPotential": carousel_potential,
+        "riskFlags": risk_flags or [],
+    }
+    score_computed = compute_radar_score(snapshot)
+    return {
+        "id": cid,
+        "clusterKey": cluster_key or f"cluster-{cid}",
+        "canonicalUrl": f"https://{cid}.example/post",
+        "title": f"Perkembangan Terbaru {cid}",
+        "summary": f"Ringkasan kabar teknologi terkini untuk {cid}",
+        "publishedAt": published_at,
+        "discoveredAt": discovered_at,
+        "niche": niche,
+        "sourceDomain": f"{cid}.example",
+        "sourceTier": tier,
+        "status": status,
+        "draftId": draft_id,
+        "score": {
+            "total": score_computed.total,
+            "components": score_computed.components,
+            "inputSnapshot": score_computed.input_snapshot,
+        },
+    }
+
+
+class SelectorTests(unittest.TestCase):
+    def test_selector_rejects_invalid_discrete_relevance_values(self) -> None:
+        for invalid in (-1, 5, 7, 10, 15, 20, 24, 30):
+            with self.assertRaisesRegex(ValueError, "relevance"):
+                validate_discrete_evaluation(invalid, 8, "Relevan untuk UMKM", [])
+        for valid in (0, 8, 13, 18, 21, 25):
+            validate_discrete_evaluation(valid, 8, "Relevan untuk UMKM", [])
+
+    def test_selector_rejects_invalid_discrete_carousel_potential_values(self) -> None:
+        for invalid in (-1, 1, 2, 4, 6, 7, 9, 12):
+            with self.assertRaisesRegex(ValueError, "carousel potential"):
+                validate_discrete_evaluation(21, invalid, "Potensi visual", [])
+        for valid in (0, 3, 5, 8, 10):
+            validate_discrete_evaluation(21, valid, "Potensi visual", [])
+
+    def test_selector_rejects_invalid_risk_flags_and_empty_reason(self) -> None:
+        with self.assertRaisesRegex(ValueError, "risk flag"):
+            validate_discrete_evaluation(21, 8, "Relevan", ["random_risk"])
+        with self.assertRaisesRegex(ValueError, "reason"):
+            validate_discrete_evaluation(21, 8, "   ", [])
+        with self.assertRaisesRegex(ValueError, "reason"):
+            validate_discrete_evaluation(21, 8, "x" * 501, [])
+
+    def test_selector_excludes_candidate_without_crosscheck_or_untrusted(self) -> None:
+        tier_d = make_test_candidate(
+            "community",
+            tier="D",
+            source_is_primary=False,
+            cross_checks=[{"domain": "x.example", "tier": "D"}],
+            relevance=25,
+            carousel_potential=10,
+        )
+        eligible, reasons = is_auto_draft_eligible(tier_d)
+        self.assertFalse(eligible)
+        self.assertIn("insufficient_crosscheck", reasons)
+
+        api = FakeSelectorApi([tier_d])
+        selector = Selector(api, now=lambda: NOW)
+        result = selector.run()
+        self.assertEqual(len(result.drafts_created), 0)
+        self.assertEqual(result.qualified_count, 0)
+        self.assertEqual(result.rejected_count, 1)
+
+    def test_selector_excludes_unverified_source_without_crosschecks(self) -> None:
+        unverified = make_test_candidate(
+            "unverified-src",
+            tier="unverified",
+            source_is_primary=False,
+            cross_checks=[],
+            relevance=25,
+            carousel_potential=10,
+        )
+        eligible, reasons = is_auto_draft_eligible(unverified)
+        self.assertFalse(eligible)
+        self.assertIn("insufficient_crosscheck", reasons)
+
+        api = FakeSelectorApi([unverified])
+        result = Selector(api, now=lambda: NOW).run()
+        self.assertEqual(len(result.drafts_created), 0)
+
+    def test_selector_enforces_max_one_crypto_draft_per_day(self) -> None:
+        c1 = make_test_candidate("crypto-high", niche="crypto", relevance=25, carousel_potential=10)
+        c2 = make_test_candidate("crypto-second", niche="crypto", relevance=21, carousel_potential=8)
+        c3 = make_test_candidate("ai-story", niche="ai", relevance=21, carousel_potential=8)
+
+        api = FakeSelectorApi([c1, c2, c3])
+        result = Selector(api, now=lambda: NOW).run()
+
+        self.assertEqual(len(result.drafts_created), 2)
+        niches = [d["document"]["kicker"].lower() for d in result.drafts_created]
+        self.assertEqual(niches.count("crypto"), 1)
+        self.assertIn("ai", niches)
+        self.assertEqual(result.crypto_skipped_count, 1)
+
+    def test_selector_creates_fewer_than_three_drafts_when_quota_unfilled(self) -> None:
+        high = make_test_candidate("only-one", relevance=25, carousel_potential=10)
+        low1 = make_test_candidate("low-1", relevance=0, carousel_potential=0, risk_flags=["context_required"])
+        low2 = make_test_candidate("low-2", relevance=8, carousel_potential=3, risk_flags=["context_required"])
+
+        api = FakeSelectorApi([high, low1, low2])
+        result = Selector(api, now=lambda: NOW).run()
+
+        self.assertEqual(len(result.drafts_created), 1)
+        self.assertEqual(result.drafts_created[0]["candidateId"], "only-one")
+        self.assertEqual(result.qualified_count, 1)
+        self.assertEqual(result.rejected_count, 2)
+
+        # 0 qualify case
+        api_zero = FakeSelectorApi([low1, low2])
+        result_zero = Selector(api_zero, now=lambda: NOW).run()
+        self.assertEqual(len(result_zero.drafts_created), 0)
+        self.assertEqual(result_zero.qualified_count, 0)
+        self.assertEqual(result_zero.rejected_count, 2)
+
+    def test_selector_handles_partial_retry_honoring_existing_drafts_today(self) -> None:
+        existing_auto_draft = {
+            "id": "draft-prev-crypto",
+            "candidateId": "prev-crypto",
+            "creationKind": "automatic",
+            "autoDateWib": "2026-11-08",
+            "document": {"kicker": "CRYPTO"},
+            "niche": "crypto",
+        }
+        cand_crypto = make_test_candidate("crypto-new", niche="crypto", relevance=25, carousel_potential=10)
+        cand_ai = make_test_candidate("ai-new", niche="ai", relevance=25, carousel_potential=10)
+        cand_design = make_test_candidate("design-new", niche="design", relevance=21, carousel_potential=8)
+        cand_sec = make_test_candidate("sec-new", niche="security", relevance=21, carousel_potential=8)
+
+        api = FakeSelectorApi(
+            [cand_crypto, cand_ai, cand_design, cand_sec],
+            drafts=[existing_auto_draft],
+        )
+        result = Selector(api, now=lambda: NOW).run()
+
+        # Existing draft consumed 1 daily slot and 1 crypto slot.
+        # Remaining daily quota: 3 - 1 = 2. Remaining crypto: 0.
+        self.assertEqual(len(result.drafts_created), 2)
+        niches = [d["document"]["kicker"].lower() for d in result.drafts_created]
+        self.assertNotIn("crypto", niches)
+        self.assertEqual(result.existing_drafts_today, 1)
+
+    def test_selector_deterministic_digest_with_no_candidates(self) -> None:
+        result = SelectorResult(
+            run_id="run-1",
+            run_time=NOW,
+            evaluated_count=3,
+            qualified_count=0,
+            rejected_count=3,
+            duplicate_count=0,
+            crypto_skipped_count=0,
+            existing_drafts_today=0,
+            drafts_created=[],
+        )
+        digest = format_digest(result)
+        self.assertIn("Content Radar", digest)
+        self.assertIn("WIB", digest)
+        self.assertIn("Kandidat Memenuhi Syarat (≥75): 0", digest)
+        self.assertIn("Draft Dibuat: 0 / 3", digest)
+        self.assertIn("https://kantor.playdesign.my.id/#/marketing/content-radar", digest)
+        self.assertNotIn("Authorization", digest)
+        self.assertNotIn("Bearer", digest)
+
+    def test_selector_deterministic_digest_with_selected_drafts(self) -> None:
+        draft = {
+            "candidateId": "c1",
+            "title": "OpenAI Meluncurkan Fitur Baru",
+            "niche": "ai",
+            "score": 88,
+            "sourceUrl": "https://openai.example/news",
+        }
+        result = SelectorResult(
+            run_id="run-1",
+            run_time=NOW,
+            evaluated_count=5,
+            qualified_count=2,
+            rejected_count=3,
+            duplicate_count=0,
+            crypto_skipped_count=0,
+            existing_drafts_today=0,
+            drafts_created=[draft],
+        )
+        digest = format_digest(result)
+        self.assertIn("OpenAI Meluncurkan Fitur Baru", digest)
+        self.assertIn("88/100", digest)
+        self.assertIn("https://openai.example/news", digest)
+        self.assertIn("Kandidat Memenuhi Syarat (≥75): 2", digest)
+        self.assertIn("Draft Dibuat: 1 / 3", digest)
+
+    def test_selector_validates_draft_slide_count_between_4_and_8(self) -> None:
+        doc_too_few = generate_draft(make_test_candidate("few"))
+        doc_too_few["slides"] = doc_too_few["slides"][:3]
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(doc_too_few, "technology")
+
+        doc_too_many = generate_draft(make_test_candidate("many"))
+        extra_slides = [
+            {"id": f"slide-{i}", "kind": "text", "title": f"Slide {i}", "body": "Konten"}
+            for i in range(len(doc_too_many["slides"]) + 1, 10)
+        ]
+        doc_too_many["slides"].extend(extra_slides)
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(doc_too_many, "technology")
+
+        doc_valid = generate_draft(make_test_candidate("valid"))
+        self.assertTrue(4 <= len(doc_valid["slides"]) <= 8)
+        validate_radar_draft(doc_valid, "technology")
+
+    def test_selector_validates_draft_bahasa_indonesia_and_local_impact(self) -> None:
+        doc = generate_draft(make_test_candidate("id-impact"))
+        validate_radar_draft(doc, "technology")
+
+        # Without local context
+        doc_no_local = dict(doc)
+        doc_no_local["slides"] = [
+            {"id": "s1", "kind": "cover", "title": "Headline", "body": "Subtitle"},
+            {"id": "s2", "kind": "text", "title": "Details", "body": "Some details"},
+            {"id": "s3", "kind": "text", "title": "Summary", "body": "Summary text"},
+            {"id": "s4", "kind": "text", "title": "Outro", "body": "Outro text"},
+        ]
+        doc_no_local["caption"] = "Read the article here."
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(doc_no_local, "technology")
+
+    def test_selector_validates_crypto_disclaimer_required(self) -> None:
+        crypto_doc = generate_draft(make_test_candidate("crypto-doc", niche="crypto"))
+        validate_radar_draft(crypto_doc, "crypto")
+
+        # Remove disclaimer
+        crypto_no_disclaimer = dict(crypto_doc)
+        crypto_no_disclaimer["caption"] = "Update pasar crypto terkini untuk pelaku digital."
+        crypto_no_disclaimer["slides"] = [
+            {"id": "s1", "kind": "cover", "title": "Kripto Baru", "body": "Dampak bagi UMKM dan desainer Indonesia"},
+            {"id": "s2", "kind": "text", "title": "Perkembangan", "body": "Teknologi blockchain untuk industri kreatif"},
+            {"id": "s3", "kind": "text", "title": "Inovasi", "body": "Adopsi digital di Indonesia"},
+            {"id": "s4", "kind": "text", "title": "Peluang", "body": "Peluang bisnis digital"},
+        ]
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(crypto_no_disclaimer, "crypto")
+
+    def test_selector_validates_no_third_party_media_as_final_media(self) -> None:
+        doc = generate_draft(make_test_candidate("media-check"))
+        doc["coverImageUrl"] = "https://external-cdn.com/stolen-graphic.jpg"
+        with self.assertRaises(DraftValidationError):
+            validate_radar_draft(doc, "technology")
+
+        doc["coverImageUrl"] = ""
+        validate_radar_draft(doc, "technology")
+
+    def test_selector_run_lifecycle_queued_running_succeeded_or_failed(self) -> None:
+        cand = make_test_candidate("c-lifecycle", relevance=25, carousel_potential=10)
+        api = FakeSelectorApi([cand])
+        result = Selector(api, now=lambda: NOW).run()
+
+        event_names = [e[0] for e in api.events]
+        self.assertIn("create_run", event_names)
+        self.assertIn("update_run", event_names)
+        status_updates = [e[1]["status"] for e in api.events if e[0] == "update_run"]
+        self.assertEqual(status_updates[0], "running")
+        self.assertEqual(status_updates[-1], "succeeded")
+
+        # Failure lifecycle
+        class FailingApi(FakeSelectorApi):
+            def list_candidates(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+                raise RuntimeError("koneksi API terputus")
+
+        fail_api = FailingApi()
+        with self.assertRaises(RuntimeError):
+            Selector(fail_api, now=lambda: NOW).run()
+        fail_updates = [e[1] for e in fail_api.events if e[0] == "update_run"]
+        self.assertEqual(fail_updates[-1]["status"], "failed")
+        self.assertIn("koneksi API terputus", fail_updates[-1]["error"])
+
+    def test_selector_tie_breaker_prefers_newer_effective_timestamp(self) -> None:
+        cand_older = make_test_candidate(
+            "a-older",
+            published_at="2026-11-08T03:00:00Z",
+            discovered_at="2026-11-08T03:00:00Z",
+            relevance=25,
+            carousel_potential=10,
+        )
+        cand_newer = make_test_candidate(
+            "b-newer",
+            published_at="2026-11-08T07:00:00Z",
+            discovered_at="2026-11-08T07:00:00Z",
+            relevance=25,
+            carousel_potential=10,
+        )
+        # Verify both have identical score total (85)
+        self.assertEqual(cand_older["score"]["total"], cand_newer["score"]["total"])
+
+        # Remaining quota = 1 slot (2 existing drafts today)
+        existing = [
+            {"id": "d1", "candidateId": "p1", "creationKind": "automatic", "autoDateWib": "2026-11-08", "document": {"kicker": "TECH"}},
+            {"id": "d2", "candidateId": "p2", "creationKind": "automatic", "autoDateWib": "2026-11-08", "document": {"kicker": "TECH"}},
+        ]
+        api = FakeSelectorApi([cand_older, cand_newer], drafts=existing)
+        result = Selector(api, now=lambda: NOW).run()
+        self.assertEqual(len(result.drafts_created), 1)
+        self.assertEqual(result.drafts_created[0]["candidateId"], "b-newer")
+
+    def test_selector_digest_extracts_score_from_score_snapshot(self) -> None:
+        draft = {
+            "candidateId": "c1",
+            "title": "OpenAI Meluncurkan Fitur Baru",
+            "document": {"kicker": "AI", "sourceUrl": "https://openai.example/news"},
+            "scoreSnapshot": {
+                "rubricVersion": "v1",
+                "total": 88,
+                "components": {"credibility": 30, "freshness": 15, "evidence": 11, "relevance": 21, "potential": 8, "safety": 3},
+            },
+        }
+        result = SelectorResult(
+            run_id="run-1",
+            run_time=NOW,
+            evaluated_count=1,
+            qualified_count=1,
+            rejected_count=0,
+            duplicate_count=0,
+            crypto_skipped_count=0,
+            existing_drafts_today=0,
+            drafts_created=[draft],
+        )
+        digest = format_digest(result)
+        self.assertIn("88/100", digest)
+        self.assertNotIn("?/100", digest)
+
+    def test_selector_enriches_drafts_created_and_digest_from_api_draft_view(self) -> None:
+        cand = make_test_candidate("c-enrich", relevance=25, carousel_potential=10)
+        api = FakeSelectorApi([cand])
+        result = Selector(api, now=lambda: NOW).run()
+
+        self.assertEqual(len(result.drafts_created), 1)
+        draft = result.drafts_created[0]
+        self.assertEqual(draft["candidateId"], "c-enrich")
+        self.assertEqual(draft["niche"], "technology")
+        self.assertEqual(draft["score"], cand["score"]["total"])
+        self.assertEqual(draft["sourceUrl"], "https://c-enrich.example/post")
+
+        digest = result.digest()
+        self.assertIn(f"{cand['score']['total']}/100", digest)
+        self.assertNotIn("?/100", digest)
+        self.assertIn("https://c-enrich.example/post", digest)
+
+    def test_selector_dry_run_skips_create_draft(self) -> None:
+        cand = make_test_candidate("c-dry", relevance=25, carousel_potential=10)
+        api = FakeSelectorApi([cand])
+        selector = Selector(api, now=lambda: NOW, dry_run=True)
+        result = selector.run()
+
+        self.assertEqual(len(api.created_drafts), 0)
+        self.assertEqual(len(result.drafts_created), 1)
+        self.assertEqual(result.drafts_created[0]["candidateId"], "c-dry")
+        digest = result.digest()
+        self.assertIn(f"{cand['score']['total']}/100", digest)
+        self.assertNotIn("?/100", digest)
+
+
+if __name__ == "__main__":
+    unittest.main()

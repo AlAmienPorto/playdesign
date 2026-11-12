@@ -16,6 +16,8 @@ import {
 import { LeadScraperPage } from './pages/LeadScraper';
 import { VideoStudioPage } from './pages/VideoStudio';
 import { LandingCmsPage } from './pages/LandingCms';
+import { CarouselStudioPage } from './pages/CarouselStudio';
+import { ContentRadarPage } from './pages/ContentRadar';
 import { CrmTemplates } from './pages/CrmTemplates';
 import {
   AssignmentPage,
@@ -138,6 +140,8 @@ export default function App() {
             <Route path="/marketing/articles" element={<ArticlesPage />} />
             <Route path="/marketing/pages" element={<PagesPage />} />
             <Route path="/marketing/editor" element={<PostEditorPage />} />
+            <Route path="/marketing/content-radar" element={<ContentRadarPage />} />
+            <Route path="/marketing/carousel" element={<CarouselStudioPage />} />
             <Route path="/marketing/media" element={<MediaPage />} />
             <Route path="/marketing/video" element={<VideoStudioPage />} />
             <Route path="/marketing/social" element={<SocialPlannerPage />} />

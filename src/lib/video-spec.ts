@@ -114,6 +114,8 @@ export interface VideoSpec {
   version: 1;
   prompt: string;
   negativePrompt: string;
+  /** Nama brand di chrome template editorial (opsional). */
+  brand?: string;
   style: VideoStyle;
   scenes: VideoScene[];
   references: VideoReference[];
@@ -323,6 +325,7 @@ export function defaultSpec(partial: Partial<VideoSpec> = {}): VideoSpec {
     version: 1,
     prompt: partial.prompt ?? '',
     negativePrompt: partial.negativePrompt ?? '',
+    brand: partial.brand,
     style: { ...base, ...partial.style, preset },
     scenes: scenes.length ? scenes : [defaultScene({ kind: 'title', durationSec: 4 }), defaultScene({ kind: 'cta', durationSec: 4 })],
     references: partial.references ?? [],
@@ -426,6 +429,7 @@ export function normalizeSpec(raw: unknown, fallbackAspect: VideoRender['aspect'
     version: 1,
     prompt: str(input.prompt).slice(0, 2000),
     negativePrompt: str(input.negativePrompt).slice(0, 800),
+    brand: str(input.brand).slice(0, 24) || undefined,
     style: {
       preset,
       bg: str(styleRaw.bg, presetStyle.bg),
