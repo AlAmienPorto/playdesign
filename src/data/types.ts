@@ -333,18 +333,62 @@ export interface ChatMessage {
   mine?: boolean;
 }
 
+export interface CarouselSlide {
+  id: string;
+  kind: 'cover' | 'text';
+  title: string;
+  body: string;
+  /** Override font untuk slide ini; kosong = ikut font dokumen. */
+  font?: string;
+}
+
+export interface CarouselDocument {
+  kicker: string;
+  template: 'split-brand' | 'split-dark' | 'full-image' | 'poster' | 'kolase' | 'blok';
+  /** Warna aksen brand (hex #rrggbb). Kosong = ikut palet template. */
+  accent?: string;
+  /** Handle brand di footer slide, mis. "@plydsgn". */
+  brandHandle?: string;
+  /** Id font dari CAROUSEL_FONTS; kosong = default (grotesk). */
+  font?: string;
+  headline: string;
+  highlight: string;
+  sourceName: string;
+  sourceUrl: string;
+  coverImageUrl: string;
+  slides: CarouselSlide[];
+  caption: string;
+  hashtags: string[];
+  updatedAt: string;
+}
+
+/**
+ * Lifecycle carousel/post sosial. Konten AI tidak boleh lahir sebagai Approved:
+ * Draft → Review (paket approval manusia) → Approved | Rejected → Scheduled → Published.
+ */
+export type SocialPostStatus = 'Draft' | 'Review' | 'Approved' | 'Rejected' | 'Scheduled' | 'Published';
+
 export interface SocialPost {
   id: string;
   title: string;
   channel: 'Instagram' | 'LinkedIn' | 'X' | 'YouTube' | 'Newsletter';
   date: string;
-  status: 'Approved' | 'Scheduled' | 'Published';
+  status: SocialPostStatus;
   articleId?: string;
   caption?: string;
   hashtags?: string[];
   mediaUrl?: string;
   slides?: string[];
   author?: string;
+  carousel?: CarouselDocument;
+  submittedAt?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+  approvedAt?: string;
+  radarDraftId?: string;
+  radarCandidateId?: string;
+  radarImportSnapshot?: string;
 }
 
 export interface RawLead {

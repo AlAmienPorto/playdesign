@@ -37,3 +37,6 @@ _legacy/
 # Python
 __pycache__/
 *.pyc
+
+# Isolated feature worktrees
+.worktrees/

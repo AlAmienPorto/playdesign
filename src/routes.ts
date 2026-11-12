@@ -15,6 +15,7 @@ import {
   MessagesSquare,
   Network,
   PenLine,
+  PanelsTopLeft,
   Plug,
   Radar,
   ScrollText,
@@ -40,6 +41,8 @@ export interface SubTab {
 export const MODULE_TABS: Record<string, SubTab[]> = {
   marketing: [
     { label: 'Content Composer', path: '/marketing/editor', icon: PenLine },
+    { label: 'Content Radar', path: '/marketing/content-radar', icon: Radar },
+    { label: 'Carousel Studio', path: '/marketing/carousel', icon: PanelsTopLeft },
     { label: 'Social Planner', path: '/marketing/social', icon: CalendarClock },
     { label: 'Landing Pages', path: '/marketing/landing-cms', icon: LayoutTemplate },
     { label: 'Media', path: '/marketing/media', icon: ImageIcon },
@@ -153,6 +156,8 @@ export const CRUMBS: Record<string, { section: string; page: string }> = {
   '/marketing/articles': { section: 'Marketing & Content', page: 'Articles' },
   '/marketing/pages': { section: 'Marketing & Content', page: 'Pages' },
   '/marketing/editor': { section: 'Marketing & Content', page: 'Post Editor' },
+  '/marketing/content-radar': { section: 'Marketing & Content', page: 'Content Radar' },
+  '/marketing/carousel': { section: 'Marketing & Content', page: 'Carousel Studio' },
   '/marketing/media': { section: 'Marketing & Content', page: 'Media' },
   '/marketing/video': { section: 'Marketing & Content', page: 'Video Studio' },
   '/marketing/social': { section: 'Marketing & Content', page: 'Social Planner' },

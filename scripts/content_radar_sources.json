@@ -1,0 +1,362 @@
+[
+  {
+    "domain": "openai.com",
+    "name": "OpenAI",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology"]
+  },
+  {
+    "domain": "anthropic.com",
+    "name": "Anthropic",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology"]
+  },
+  {
+    "domain": "deepmind.google",
+    "name": "Google DeepMind",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology"]
+  },
+  {
+    "domain": "ai.meta.com",
+    "name": "Meta AI",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology"]
+  },
+  {
+    "domain": "microsoft.com",
+    "name": "Microsoft",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology", "security"]
+  },
+  {
+    "domain": "developer.apple.com",
+    "name": "Apple Developer",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["technology", "design"]
+  },
+  {
+    "domain": "adobe.com",
+    "name": "Adobe",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["design", "technology"]
+  },
+  {
+    "domain": "figma.com",
+    "name": "Figma",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["design", "technology"]
+  },
+  {
+    "domain": "github.blog",
+    "name": "GitHub Blog",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": "https://github.blog/feed/",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["technology", "security"]
+  },
+  {
+    "domain": "blog.cloudflare.com",
+    "name": "Cloudflare Blog",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": "https://blog.cloudflare.com/rss/",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["technology", "security", "internet"]
+  },
+  {
+    "domain": "blogs.nvidia.com",
+    "name": "NVIDIA Blog",
+    "tier": "A",
+    "kind": "official",
+    "feedUrl": "https://blogs.nvidia.com/feed/",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology"]
+  },
+  {
+    "domain": "arxiv.org",
+    "name": "arXiv",
+    "tier": "A",
+    "kind": "research",
+    "feedUrl": "https://export.arxiv.org/rss/cs.AI",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology"]
+  },
+  {
+    "domain": "blog.ethereum.org",
+    "name": "Ethereum Foundation Blog",
+    "tier": "A",
+    "kind": "project",
+    "feedUrl": "https://blog.ethereum.org/feed.xml",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["crypto", "technology"]
+  },
+  {
+    "domain": "ojk.go.id",
+    "name": "Otoritas Jasa Keuangan",
+    "tier": "A",
+    "kind": "regulator",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["crypto", "internet"]
+  },
+  {
+    "domain": "bi.go.id",
+    "name": "Bank Indonesia",
+    "tier": "A",
+    "kind": "regulator",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["crypto", "internet"]
+  },
+  {
+    "domain": "bappebti.go.id",
+    "name": "Bappebti",
+    "tier": "A",
+    "kind": "regulator",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["crypto"]
+  },
+  {
+    "domain": "sec.gov",
+    "name": "U.S. Securities and Exchange Commission",
+    "tier": "A",
+    "kind": "regulator",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["crypto", "internet"]
+  },
+  {
+    "domain": "cftc.gov",
+    "name": "Commodity Futures Trading Commission",
+    "tier": "A",
+    "kind": "regulator",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["crypto"]
+  },
+  {
+    "domain": "reuters.com",
+    "name": "Reuters",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology", "crypto"]
+  },
+  {
+    "domain": "apnews.com",
+    "name": "Associated Press",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology"]
+  },
+  {
+    "domain": "techcrunch.com",
+    "name": "TechCrunch",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": "https://techcrunch.com/feed/",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology", "internet"]
+  },
+  {
+    "domain": "theverge.com",
+    "name": "The Verge",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": "https://www.theverge.com/rss/index.xml",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology", "design", "internet"]
+  },
+  {
+    "domain": "wired.com",
+    "name": "Wired",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": "https://www.wired.com/feed/rss",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology", "security"]
+  },
+  {
+    "domain": "arstechnica.com",
+    "name": "Ars Technica",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": "https://feeds.arstechnica.com/arstechnica/index",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology", "security"]
+  },
+  {
+    "domain": "technologyreview.com",
+    "name": "MIT Technology Review",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": "https://www.technologyreview.com/feed/",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology"]
+  },
+  {
+    "domain": "coindesk.com",
+    "name": "CoinDesk",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["crypto"]
+  },
+  {
+    "domain": "theblock.co",
+    "name": "The Block",
+    "tier": "B",
+    "kind": "media",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["crypto"]
+  },
+  {
+    "domain": "tekno.kompas.com",
+    "name": "Kompas Tekno",
+    "tier": "C",
+    "kind": "media",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology", "internet"]
+  },
+  {
+    "domain": "tekno.tempo.co",
+    "name": "Tempo Tekno",
+    "tier": "C",
+    "kind": "media",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["ai", "technology", "internet"]
+  },
+  {
+    "domain": "katadata.co.id",
+    "name": "Katadata",
+    "tier": "C",
+    "kind": "media",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["technology", "internet", "crypto"]
+  },
+  {
+    "domain": "dailysocial.id",
+    "name": "DailySocial",
+    "tier": "C",
+    "kind": "media",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": false,
+    "niches": ["technology", "internet"]
+  },
+  {
+    "domain": "x.com",
+    "name": "X",
+    "tier": "D",
+    "kind": "community",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": true,
+    "niches": ["ai", "technology", "design", "security", "internet", "crypto"]
+  },
+  {
+    "domain": "reddit.com",
+    "name": "Reddit",
+    "tier": "D",
+    "kind": "community",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": true,
+    "niches": ["ai", "technology", "design", "security", "internet", "crypto"]
+  },
+  {
+    "domain": "threads.net",
+    "name": "Threads",
+    "tier": "D",
+    "kind": "community",
+    "feedUrl": null,
+    "enabled": true,
+    "requiresCrosscheck": true,
+    "niches": ["ai", "technology", "design", "internet"]
+  },
+  {
+    "domain": "news.ycombinator.com",
+    "name": "Hacker News",
+    "tier": "D",
+    "kind": "community",
+    "feedUrl": "https://news.ycombinator.com/rss",
+    "enabled": true,
+    "requiresCrosscheck": true,
+    "niches": ["ai", "technology", "security", "internet"]
+  },
+  {
+    "domain": "cointelegraph.com",
+    "name": "Cointelegraph",
+    "tier": "D",
+    "kind": "media",
+    "feedUrl": "https://cointelegraph.com/rss",
+    "enabled": true,
+    "requiresCrosscheck": true,
+    "niches": ["crypto"]
+  }
+]

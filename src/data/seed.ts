@@ -424,7 +424,7 @@ export const SEED: DB = {
   ],
   usage,
   workspaces: [
-    { id: 'ws-1', name: 'Playdesign Studio', members: 7, projects: 7, plan: 'Studio', active: true },
+    { id: 'playdesign', name: 'Playdesign Studio', members: 7, projects: 7, plan: 'Studio', active: true },
     { id: 'ws-2', name: 'Playdesign Lab', members: 3, projects: 1, plan: 'Internal', active: false },
     { id: 'ws-3', name: 'Sagara (client)', members: 4, projects: 1, plan: 'Client portal', active: false },
   ],
